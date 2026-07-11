@@ -7,12 +7,11 @@ import type {
 } from '../../../platform/pluginRuntime/types';
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { parseCommunitySubgroupsConfig } from '../community-subgroups/config';
-import { COMMUNITY_SUBGROUPS_PLUGIN_ID } from '../community-subgroups/manifest';
 import { parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
+import { createEventCommunitySubgroup } from './subgroups';
 import {
   appendEventLog,
   eventsDatabase,
@@ -159,22 +158,12 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     let subgroupTitle: string | undefined;
 
     if (attendeeWids.length > 0) {
-      if (!context.createManagedCommunitySubgroup) {
-        throw new Error('Plugin runtime does not expose createManagedCommunitySubgroup.');
-      }
-      await context.ensureChatArchivePolicyForScope?.(record.scopeId);
-      const parentCommunityWid = await context.communityGroupWidForScope?.(record.scopeId);
-      if (!parentCommunityWid) {
-        throw new Error('No parent community is mapped for this scope.');
-      }
-      const creationPolicy = await communitySubgroupCreationPolicyForScope(context, record.scopeId, record.actorWid);
-      const result = await context.createManagedCommunitySubgroup({
+      const result = await createEventCommunitySubgroup({
+        context,
         scopeId: record.scopeId,
         actorWid: record.actorWid,
         title: record.groupTitle,
-        participantWids: attendeeWids,
-        parentCommunityWid,
-        creationPolicy
+        participantWids: attendeeWids
       });
       const created = result.created;
       subgroupChatId = created.chatId;
@@ -264,17 +253,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     });
     return [audit('events.close.failed', { eventId: record.id, reason })];
   }
-}
-
-async function communitySubgroupCreationPolicyForScope(
-  context: PluginRuntimeContext,
-  scopeId: string,
-  actorWid?: string | undefined
-) {
-  const rawConfig = context.catalog
-    ? await context.catalog.configFor(COMMUNITY_SUBGROUPS_PLUGIN_ID, scopeId, actorWid)
-    : {};
-  return parseCommunitySubgroupsConfig(rawConfig).creationPolicy;
 }
 
 async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {

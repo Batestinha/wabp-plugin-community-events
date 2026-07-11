@@ -4,7 +4,7 @@ import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/route
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
-import { requireOfficialCommandRuntime, requireScopeId } from '../shared';
+import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
@@ -16,12 +16,14 @@ import {
   eventFlowConfirmed,
   eventInitialFlowData,
   eventFlowSelectedProfileId,
+  renderEventTemplate,
   selectedOptionLabels,
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
-import { materializeEventLifecycle } from './materialize';
+import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
+import { createEventCommunitySubgroup } from './subgroups';
 import {
   eventsDatabase,
   getEvent,
@@ -30,6 +32,7 @@ import {
   listCancellableEvents,
   listCalendarEvents,
   newEventId,
+  saveCreatedGroupParticipants,
   type StoredEventRecord,
 } from './store';
 
@@ -74,6 +77,10 @@ interface EventCancelDraft {
   actorLabel: string;
   candidateEventIds: string[];
   createdAt: string;
+}
+
+interface EventTextTransport {
+  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
 }
 
 const EVENT_CANCEL_SELECT_STEP_ID = 'event';
@@ -634,15 +641,34 @@ function registerEventFlowCompletionHandlers(
         await activeTransport.sendText(responseChatId, t('official.community-events.notConfigured'));
         return true;
       }
+      const eventId = newEventId();
+      let creationMode: 'poll' | 'unplanned' = 'poll';
       try {
         const db = eventsDatabase(runtime.databases);
-        const eventId = newEventId();
         const materialized = materializeEventLifecycle({
           profile,
           answers,
           timezone: draft.timezone,
           creatorDisplayName: draft.actorLabel || draft.actorWid
         });
+        const now = new Date();
+        creationMode = materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
+        if (creationMode === 'unplanned') {
+          await createUnplannedEventLifecycle({
+            context,
+            runtime,
+            activeTransport,
+            db,
+            eventId,
+            draft,
+            profile,
+            announcementGroupWid,
+            materialized,
+            now
+          });
+          await activeTransport.sendText(responseChatId, t('official.community-events.unplannedPublished'));
+          return true;
+        }
         const sent = await context.doasPublishPoll?.({
           actorWid: draft.actorWid,
           scopeId: draft.scopeId,
@@ -657,7 +683,6 @@ function registerEventFlowCompletionHandlers(
         if (!sent?.messageId) {
           throw new Error('doas poll publisher did not return a message id');
         }
-        const now = new Date();
         insertEvent(db, {
           id: eventId,
           scopeId: draft.scopeId,
@@ -762,21 +787,230 @@ function registerEventFlowCompletionHandlers(
         await activeTransport.sendText(responseChatId, t('official.community-events.pollPublished'));
       } catch (error) {
         await appendEventJsonLog(context, {
-          action: 'event.publish_failed',
+          action: creationMode === 'unplanned' ? 'event.unplanned_failed' : 'event.publish_failed',
           scopeId: draft.scopeId,
+          eventId,
           actorWid: draft.actorWid,
           profileId: profile.id,
           metadata: {
             reason: error instanceof Error ? error.message : String(error)
           }
         });
-        await activeTransport.sendText(responseChatId, t('official.community-events.publishFailed', {
-          reason: error instanceof Error ? error.message : String(error)
-        }));
+        await activeTransport.sendText(responseChatId, t(
+          creationMode === 'unplanned'
+            ? 'official.community-events.unplannedPublishFailed'
+            : 'official.community-events.publishFailed',
+          {
+            reason: error instanceof Error ? error.message : String(error)
+          }
+        ));
       }
       return true;
     });
   }
+}
+
+async function createUnplannedEventLifecycle(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  db: ReturnType<typeof eventsDatabase>;
+  eventId: string;
+  draft: EventDraft;
+  profile: EventProfile;
+  announcementGroupWid: string;
+  materialized: MaterializedEventLifecycle;
+  now: Date;
+}): Promise<void> {
+  const creatorParticipantWid = eventCreatorParticipantWid(input.draft);
+  const result = await createEventCommunitySubgroup({
+    context: input.context,
+    scopeId: input.draft.scopeId,
+    actorWid: input.draft.actorWid,
+    title: input.materialized.groupTitle,
+    participantWids: [creatorParticipantWid]
+  });
+  const created = result.created;
+  const nowIso = input.now.toISOString();
+  const event: StoredEventRecord = {
+    id: input.eventId,
+    scopeId: input.draft.scopeId,
+    ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+    ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+    profileId: input.profile.id,
+    profileLabel: input.profile.label,
+    origin: 'unplanned',
+    eventStatus: 'scheduled',
+    groupLifecycleStatus: 'poll_closed',
+    calendarStatus: 'included',
+    actorWid: input.draft.actorWid,
+    actorLabel: input.draft.actorLabel,
+    announcementGroupWid: input.announcementGroupWid,
+    pollOptions: [],
+    responseClasses: input.materialized.responseClasses,
+    answers: input.materialized.answers,
+    startsAt: input.materialized.startsAt.toISOString(),
+    timezone: input.draft.timezone,
+    closeAt: input.materialized.closeAt.toISOString(),
+    cleanupAt: input.materialized.cleanupAt.toISOString(),
+    groupTitle: input.materialized.groupTitle,
+    calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+    ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
+    ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
+    subgroupChatId: created.chatId,
+    subgroupTitle: created.title,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    closedAt: nowIso
+  };
+
+  insertEvent(input.db, event);
+  saveCreatedGroupParticipants(input.db, event.id, created.participants);
+  await appendEventJsonLog(input.context, {
+    action: 'subgroup.created',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: event.actorWid,
+    profileId: event.profileId,
+    subgroupChatId: created.chatId,
+    metadata: {
+      title: created.title,
+      attendeeWids: [creatorParticipantWid],
+      participants: created.participants,
+      unplanned: true
+    }
+  });
+
+  try {
+    const config = draftEventsConfig(input.draft);
+    const calendar = calendarResourceForProfile(config, input.profile);
+    await writeScopeCalendar({
+      appConfig: input.runtime.config,
+      config,
+      scopeId: input.draft.scopeId,
+      calendarId: input.profile.calendar.calendarId,
+      events: listCalendarEvents(input.db, input.draft.scopeId)
+    });
+    await appendEventJsonLog(input.context, {
+      action: 'calendar.exported',
+      scopeId: input.draft.scopeId,
+      eventId: event.id,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      subgroupChatId: created.chatId,
+      metadata: { calendarEnabled: calendar?.enabled === true, calendarId: input.profile.calendar.calendarId }
+    });
+  } catch (error) {
+    await appendEventJsonLog(input.context, {
+      action: 'calendar.export_failed',
+      scopeId: input.draft.scopeId,
+      eventId: event.id,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      subgroupChatId: created.chatId,
+      metadata: { reason: error instanceof Error ? error.message : String(error) }
+    });
+  }
+
+  await appendEventJsonLog(input.context, {
+    action: 'event.created',
+    scopeId: input.draft.scopeId,
+    eventId: event.id,
+    actorWid: input.draft.actorWid,
+    profileId: input.profile.id,
+    subgroupChatId: created.chatId,
+    metadata: {
+      origin: 'unplanned',
+      announcementGroupWid: input.announcementGroupWid,
+      groupTitle: input.materialized.groupTitle,
+      answers: input.materialized.answers,
+      startsAt: input.materialized.startsAt.toISOString(),
+      closeAt: input.materialized.closeAt.toISOString(),
+      cleanupAt: input.materialized.cleanupAt.toISOString(),
+      prefill: input.draft.prefill
+    }
+  });
+  await input.runtime.enqueuePluginJob({
+    jobName: EVENTS_JOBS.cleanup,
+    scopeId: input.draft.scopeId,
+    ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+    ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+    runAt: input.materialized.cleanupAt,
+    payload: { eventId: event.id, attempt: 0 },
+    dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:unplanned`
+  });
+
+  const groupJoinUrl = await unplannedGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId);
+  const announcementText = renderEventTemplate({
+    template: input.profile.unplanned.announcementTemplate,
+    profile: input.profile,
+    answers: input.materialized.answers,
+    startsAt: input.materialized.startsAt,
+    timezone: input.draft.timezone,
+    creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
+    extraTokens: {
+      eventId: event.id,
+      groupDisplayName: created.title || input.materialized.groupTitle,
+      groupJoinUrl,
+      subgroupChatId: created.chatId
+    }
+  });
+  const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
+  await appendEventJsonLog(input.context, {
+    action: 'event.unplanned_announcement_sent',
+    scopeId: input.draft.scopeId,
+    eventId: event.id,
+    actorWid: input.draft.actorWid,
+    profileId: input.profile.id,
+    subgroupChatId: created.chatId,
+    metadata: {
+      announcementGroupWid: input.announcementGroupWid,
+      messageId: sent.messageId,
+      groupJoinUrl
+    }
+  });
+}
+
+function draftEventsConfig(draft: EventDraft) {
+  return parseEventsConfig({
+    enabled: true,
+    timezone: draft.timezone,
+    cleanup: { retryDelaysMinutes: [], lastFailureMessage: '', lastFailureAt: '' },
+    adoption: {},
+    calendars: draft.calendars,
+    eventProfiles: draft.profiles
+  });
+}
+
+async function unplannedGroupJoinUrl(
+  context: PluginCommandContext,
+  template: string,
+  subgroupChatId: string
+): Promise<string> {
+  if (!templateUsesToken(template, 'groupJoinUrl')) {
+    return '';
+  }
+  if (!context.getGroupInviteCode) {
+    throw new Error('Plugin runtime does not expose getGroupInviteCode.');
+  }
+  const inviteCode = await context.getGroupInviteCode(subgroupChatId);
+  if (!inviteCode) {
+    throw new Error('No invite link is available for the event group.');
+  }
+  return inviteCode.startsWith('http')
+    ? inviteCode
+    : `https://chat.whatsapp.com/${inviteCode}`;
+}
+
+function templateUsesToken(template: string, token: string): boolean {
+  return new RegExp(`\\{${token}\\}`).test(template);
+}
+
+function eventCreatorParticipantWid(draft: EventDraft): string {
+  const aliases = uniqueEventWids([...(draft.actorAliases ?? []), draft.actorWid]);
+  return aliases.find((wid) => wid.endsWith('@c.us')) ??
+    aliases.find((wid) => !wid.endsWith('@g.us')) ??
+    draft.actorWid;
 }
 
 function eventCommand(input: {

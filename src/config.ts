@@ -6,6 +6,7 @@ export const EVENT_CHOICE_QUESTION_TYPE = 'choice';
 export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
+export const EVENT_UNPLANNED_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 
 export const eventQuestionChoiceSchema = z.object({
@@ -88,6 +89,9 @@ const eventProfileObjectSchema = z.object({
     titleTemplate: z.string().trim().min(1),
     cleanupOffsetHoursAfterStart: z.number().int().min(0).max(24 * 365).default(48)
   }).strict(),
+  unplanned: z.object({
+    announcementTemplate: z.string().trim().min(1).default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}')
+  }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
@@ -161,8 +165,13 @@ const eventProfileObjectSchema = z.object({
     ...EVENT_DATE_TEMPLATE_TOKENS,
     ...EVENT_PROFILE_TEMPLATE_TOKENS
   ]);
+  const unplannedTemplateTokens = new Set([
+    ...templateTokens,
+    ...EVENT_UNPLANNED_TEMPLATE_TOKENS
+  ]);
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
+  validateEventTemplate(profile.unplanned.announcementTemplate, unplannedTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
   if (profile.calendar.descriptionTemplate) {
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
@@ -202,6 +211,9 @@ export const defaultClimbingEventProfile: EventProfile = {
   group: {
     titleTemplate: '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
     cleanupOffsetHoursAfterStart: 48
+  },
+  unplanned: {
+    announcementTemplate: '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}'
   },
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,
@@ -314,6 +326,14 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
         profile.group.titleTemplate,
         defaultClimbingEventProfile.group.titleTemplate,
         () => t('official.community-events.profile.climbing.group.titleTemplate')
+      )
+    },
+    unplanned: {
+      ...profile.unplanned,
+      announcementTemplate: localizeIfDefault(
+        profile.unplanned.announcementTemplate,
+        defaultClimbingEventProfile.unplanned.announcementTemplate,
+        () => t('official.community-events.profile.climbing.unplanned.announcementTemplate')
       )
     }
   };

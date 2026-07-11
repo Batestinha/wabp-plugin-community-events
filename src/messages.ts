@@ -1,7 +1,7 @@
 import type { MessageCatalog } from '../../../platform/i18n';
 
 export const eventsMessages: MessageCatalog = {
-  'official.community-events.description': 'Guided event polls, event subgroup lifecycle, and scoped calendar export for managed communities.',
+  'official.community-events.description': 'Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.',
   'official.community-events.disabled': 'Events are disabled for this scope.',
   'official.community-events.notConfigured': 'Events are not configured for this scope.',
   'official.community-events.startedPrivate': 'I sent you a private message to finish creating the event.',
@@ -12,7 +12,9 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.invalid': 'Event setup is no longer valid. Start again.',
   'official.community-events.permissionDenied': 'You do not have permission to create this event type.',
   'official.community-events.pollPublished': 'Event poll published.',
+  'official.community-events.unplannedPublished': 'Unplanned event group created.',
   'official.community-events.publishFailed': 'Could not publish the event poll: {reason}',
+  'official.community-events.unplannedPublishFailed': 'Could not create the unplanned event group: {reason}',
   'official.community-events.status': 'events enabled={enabled} profiles={profiles} timezone={timezone}',
   'official.community-events.none': 'none',
   'official.community-events.cancelHelp': 'Use /event cancel to cancel a published event. Reply /cancel or /stop inside setup flows.',
@@ -31,9 +33,9 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.cancel.notCancellable': 'Event cannot be cancelled because it is {status}: {title}',
   'official.community-events.cancel.failed': 'Could not cancel event {title}: {reason}',
   'official.community-events.flow.profile': 'What type of event?',
-  'official.community-events.flow.confirm': 'Create this event poll?\n\n{summary}',
+  'official.community-events.flow.confirm': 'Create this event?\n\n{summary}',
   'official.community-events.flow.confirmSummary': '{profile}\nWhen: {startsAt}',
-  'official.community-events.flow.complete': 'Creating event poll.',
+  'official.community-events.flow.complete': 'Creating event.',
   'official.community-events.flow.yes': 'Yes',
   'official.community-events.flow.no': 'No',
   'official.community-events.flow.datetimePrompt': '{prompt} (for example: 2026-07-11 09:30, tomorrow at 19:00, or 3 days from now at 18:30)',
@@ -48,6 +50,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.profile.climbing.question.style': 'Climbing style',
   'official.community-events.profile.climbing.poll.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy} By: {creatorDisplayName}',
   'official.community-events.profile.climbing.group.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
+  'official.community-events.profile.climbing.unplanned.announcementTemplate': '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
   'official.community-events.profile.climbing.responseClass.event_group_member': 'Event group member',
   'official.community-events.profile.climbing.poll.option.going': "I'm going ✅",
   'official.community-events.profile.climbing.poll.option.ride': "I want to go, but I'll need a ride 🚗",

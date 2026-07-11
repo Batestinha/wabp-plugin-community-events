@@ -241,6 +241,7 @@ export function renderEventTemplate(input: {
   startsAt: Date;
   timezone: string;
   creatorDisplayName: string;
+  extraTokens?: Record<string, string | undefined> | undefined;
 }): string {
   const dateTokens = eventDateTemplateTokens(input.startsAt, input.timezone);
   const tokens: Record<string, string> = {
@@ -248,7 +249,8 @@ export function renderEventTemplate(input: {
     ...dateTokens,
     profileId: input.profile.id,
     profileLabel: input.profile.label,
-    creatorDisplayName: input.creatorDisplayName
+    creatorDisplayName: input.creatorDisplayName,
+    ...Object.fromEntries(Object.entries(input.extraTokens ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])))
   };
   return input.template.replace(/\{([A-Za-z][A-Za-z0-9_-]*)\}/g, (_match, key: string) => tokens[key] ?? '');
 }

@@ -56,9 +56,9 @@ export const eventsManifest: PluginManifest = {
   databases: eventsDatabases,
   dataVersion: '1',
   assistant: {
-    summary: 'Guided event creation with scoped polls, attendee subgroups, and calendar export.',
+    summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [
-      'Create event polls from configured profiles.',
+      'Create event polls from configured profiles, or create unplanned event subgroups when the poll close time has already passed.',
       'Cancel active event lifecycles by creator or event manager.',
       'Close polls before the event, gather attendees, and create event subgroups.',
       'Export one calendar file per scope.'

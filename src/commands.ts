@@ -3,6 +3,7 @@ import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowType
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
@@ -154,6 +155,7 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
   registerEventFlowCompletionHandlers(context, definition.flowType, eventProfiles, ctx.t);
   const actorAliases = eventActorWids(ctx);
   const privateActorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
   const conversationChatId = ctx.message.context === 'group'
     ? privateActorWid
     : ctx.message.chatId;
@@ -172,7 +174,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
       scopeId,
       conversationChatId,
       conversationContext: 'private',
-      initialData
+      initialData,
+      ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
   } catch {
     return {
@@ -214,6 +217,7 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
   const db = eventsDatabase(runtime.databases);
   const actorAliases = eventActorWids(ctx);
   const actorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
   const actorLabel = ctx.message.senderDisplayName ?? actorWid;
   const query = ctx.command.args.join(' ').trim();
   const resolution = await resolveEventCancelCandidates(context, {
@@ -245,7 +249,8 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
       definition,
       message: ctx.message,
       scopeId,
-      ...(preselectedEventId ? { initialData: { [EVENT_CANCEL_SELECT_STEP_ID]: preselectedEventId } } : {})
+      ...(preselectedEventId ? { initialData: { [EVENT_CANCEL_SELECT_STEP_ID]: preselectedEventId } } : {}),
+      ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
   } catch {
     return { handled: true, text: ctx.t('official.community-events.cancel.startFailed') };
@@ -283,27 +288,28 @@ function registerEventCancelFlowCompletionHandler(
     if (!draft) {
       return false;
     }
+    const responseChatId = snapshot.chatId || draft.chatId;
     await runtime.dataStore.delete(eventCancelDraftKey(snapshot.scopeId, lock.flowSessionId));
 
     if (!eventCancelFlowConfirmed(snapshot)) {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.cancelled'));
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.cancelled'));
       return true;
     }
 
     const eventId = eventCancelFlowSelectedEventId(snapshot);
     if (!eventId || !draft.candidateEventIds.includes(eventId)) {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.invalid'));
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.invalid'));
       return true;
     }
 
     const db = eventsDatabase(runtime.databases);
     const event = getEvent(db, eventId);
     if (!event) {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.invalid'));
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.invalid'));
       return true;
     }
     if (!await eventCancellationAllowed(context, { event, actorWids: draft.actorAliases })) {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.permissionDenied'));
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.permissionDenied'));
       return true;
     }
 
@@ -318,20 +324,20 @@ function registerEventCancelFlowCompletionHandler(
       }
     });
     if (result.status === 'cancelled') {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.done', {
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.done', {
         title: eventDisplayTitle(event),
         eventId: event.id
       }));
       return true;
     }
     if (result.status === 'not_cancellable') {
-      await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.notCancellable', {
+      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.notCancellable', {
         title: eventDisplayTitle(event),
         status: eventLifecycleLabel(event)
       }));
       return true;
     }
-    await activeTransport.sendText(draft.chatId, t('official.community-events.cancel.failed', {
+    await activeTransport.sendText(responseChatId, t('official.community-events.cancel.failed', {
       title: eventDisplayTitle(event),
       reason: result.reason
     }));
@@ -594,19 +600,20 @@ function registerEventFlowCompletionHandlers(
       if (!draft) {
         return false;
       }
+      const responseChatId = snapshot.chatId || draft.chatId;
       const selectedProfileId = eventFlowSelectedProfileId(snapshot);
       if (selectedProfileId !== profile.id) {
         return false;
       }
       await runtime.dataStore.delete(eventDraftKey(snapshot.scopeId, lock.flowSessionId));
       if (!eventFlowConfirmed(snapshot, profile)) {
-        await activeTransport.sendText(draft.chatId, t('official.community-events.cancelled'));
+        await activeTransport.sendText(responseChatId, t('official.community-events.cancelled'));
         return true;
       }
 
       const answers = eventFlowAnswers(snapshot, profile, draft.timezone);
       if (!answers) {
-        await activeTransport.sendText(draft.chatId, t('official.community-events.invalid'));
+        await activeTransport.sendText(responseChatId, t('official.community-events.invalid'));
         return true;
       }
       const permission = eventProfilePermission(profile);
@@ -619,12 +626,12 @@ function registerEventFlowCompletionHandlers(
         ...(draft.groupWid ? { groupWid: draft.groupWid } : {})
       });
       if (!permissionAllowed) {
-        await activeTransport.sendText(draft.chatId, t('official.community-events.permissionDenied'));
+        await activeTransport.sendText(responseChatId, t('official.community-events.permissionDenied'));
         return true;
       }
       const announcementGroupWid = profile.announcementGroupWid || draft.defaultAnnouncementGroupWid;
       if (!announcementGroupWid) {
-        await activeTransport.sendText(draft.chatId, t('official.community-events.notConfigured'));
+        await activeTransport.sendText(responseChatId, t('official.community-events.notConfigured'));
         return true;
       }
       try {
@@ -752,7 +759,7 @@ function registerEventFlowCompletionHandlers(
           payload: { eventId },
           dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
         });
-        await activeTransport.sendText(draft.chatId, t('official.community-events.pollPublished'));
+        await activeTransport.sendText(responseChatId, t('official.community-events.pollPublished'));
       } catch (error) {
         await appendEventJsonLog(context, {
           action: 'event.publish_failed',
@@ -763,7 +770,7 @@ function registerEventFlowCompletionHandlers(
             reason: error instanceof Error ? error.message : String(error)
           }
         });
-        await activeTransport.sendText(draft.chatId, t('official.community-events.publishFailed', {
+        await activeTransport.sendText(responseChatId, t('official.community-events.publishFailed', {
           reason: error instanceof Error ? error.message : String(error)
         }));
       }
@@ -864,12 +871,25 @@ function eventActorWids(ctx: CommandContext): string[] {
   ]);
 }
 
+function privateFlowDeliveryFallback(ctx: CommandContext, actorWids: string[]): PrivateDeliveryFallback | undefined {
+  const groupWid = ctx.groupWid?.trim() || (ctx.message.context === 'group' ? ctx.message.chatId : '');
+  if (!groupWid.endsWith('@g.us')) {
+    return undefined;
+  }
+  const mentionWid = eventMentionWid(actorWids);
+  return mentionWid ? { chatId: groupWid, mentionedWids: [mentionWid] } : undefined;
+}
+
 function eventPrivateChatWid(actorWids: string[], preferredWid?: string | undefined): string | undefined {
   const preferred = preferredWid?.trim();
   if (preferred && !preferred.endsWith('@g.us')) {
     return preferred;
   }
   return actorWids.find((wid) => wid.endsWith('@c.us')) ?? actorWids.find((wid) => !wid.endsWith('@g.us'));
+}
+
+function eventMentionWid(actorWids: string[]): string | undefined {
+  return actorWids.find((wid) => wid.endsWith('@c.us')) ?? actorWids.find((wid) => wid.endsWith('@lid')) ?? actorWids[0];
 }
 
 function uniqueEventWids(values: Array<string | undefined>): string[] {

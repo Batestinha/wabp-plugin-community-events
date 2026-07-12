@@ -422,11 +422,13 @@ function normalizeEventProfileInput(profile: unknown): unknown {
     return profile;
   }
   const permissionSuffix = legacyPermissionSuffix(profile.permission, profile.permissionSuffix, profile.id);
-  const { permission: _legacyPermission, ...profileWithoutLegacyPermission } = profile;
+  const { permission: _legacyPermission, startsAtQuestionKey: legacyStartsAtQuestionKey, ...profileWithoutLegacyFields } = profile;
+  const normalizedStartQuestions = normalizeEventProfileStartQuestions(profile, legacyStartsAtQuestionKey);
   const normalizedProfile = {
-    ...profileWithoutLegacyPermission,
-    ...(isRecord(profileWithoutLegacyPermission.calendar) ? {
-      calendar: normalizeEventProfileCalendarInput(profileWithoutLegacyPermission.calendar)
+    ...profileWithoutLegacyFields,
+    ...normalizedStartQuestions.keys,
+    ...(isRecord(profileWithoutLegacyFields.calendar) ? {
+      calendar: normalizeEventProfileCalendarInput(profileWithoutLegacyFields.calendar)
     } : {})
   };
   const rawResponseClasses = Array.isArray(profile.poll.responseClasses)
@@ -459,15 +461,109 @@ function normalizeEventProfileInput(profile: unknown): unknown {
   return {
     ...normalizedProfile,
     ...(permissionSuffix ? { permissionSuffix } : {}),
-    questions: Array.isArray(profile.questions)
-      ? profile.questions.map((question) => normalizeEventQuestionInput(question))
-      : profile.questions,
+    questions: normalizedStartQuestions.questions,
     poll: {
       ...profile.poll,
       responseClasses,
       options
     }
   };
+}
+
+function normalizeEventProfileStartQuestions(
+  profile: Record<string, unknown>,
+  legacyStartsAtQuestionKey: unknown
+): { questions: unknown; keys: Record<string, string> } {
+  if (!Array.isArray(profile.questions)) {
+    return { questions: profile.questions, keys: {} };
+  }
+
+  const questions = profile.questions.map((question) => normalizeEventQuestionInput(question));
+  const legacyKey = trimmedString(legacyStartsAtQuestionKey);
+  if (!legacyKey) {
+    return { questions, keys: {} };
+  }
+
+  const questionRecords = questions.filter(isRecord);
+  const explicitDateKey = trimmedString(profile.startsAtDateQuestionKey);
+  const explicitTimeKey = trimmedString(profile.startsAtTimeQuestionKey);
+  const dateKey = explicitDateKey || firstQuestionKeyOfType(questionRecords, EVENT_DATE_QUESTION_TYPE) || uniqueQuestionKey(questionRecords, 'startDate');
+  const timeKey = explicitTimeKey || firstQuestionKeyOfType(questionRecords, EVENT_TIME_QUESTION_TYPE) || uniqueQuestionKey(questionRecords, 'startTime');
+  const hasDateQuestion = questionRecords.some((question) => question.key === dateKey && question.type === EVENT_DATE_QUESTION_TYPE);
+  const hasTimeQuestion = questionRecords.some((question) => question.key === timeKey && question.type === EVENT_TIME_QUESTION_TYPE);
+  const legacyQuestion = questionRecords.find((question) => question.key === legacyKey);
+  const keepLegacyQuestion = Boolean(
+    legacyQuestion &&
+    (legacyQuestion.type === EVENT_DATE_QUESTION_TYPE || legacyQuestion.type === EVENT_TIME_QUESTION_TYPE)
+  );
+
+  const additions = [
+    !hasDateQuestion ? splitStartsAtQuestion(legacyQuestion, dateKey, EVENT_DATE_QUESTION_TYPE) : null,
+    !hasTimeQuestion ? splitStartsAtQuestion(legacyQuestion, timeKey, EVENT_TIME_QUESTION_TYPE) : null
+  ].filter(Boolean);
+
+  let inserted = false;
+  const nextQuestions = questions.flatMap((question) => {
+    if (!isRecord(question) || question.key !== legacyKey) {
+      return [question];
+    }
+    inserted = true;
+    return keepLegacyQuestion ? [question, ...additions] : additions;
+  });
+  if (!inserted) {
+    nextQuestions.push(...additions);
+  }
+
+  return {
+    questions: nextQuestions,
+    keys: {
+      ...(explicitDateKey ? {} : { startsAtDateQuestionKey: dateKey }),
+      ...(explicitTimeKey ? {} : { startsAtTimeQuestionKey: timeKey })
+    }
+  };
+}
+
+function splitStartsAtQuestion(
+  legacyQuestion: Record<string, unknown> | undefined,
+  key: string,
+  type: typeof EVENT_DATE_QUESTION_TYPE | typeof EVENT_TIME_QUESTION_TYPE
+): Record<string, unknown> {
+  return {
+    key,
+    prompt: splitStartsAtPrompt(trimmedString(legacyQuestion?.prompt), type),
+    type,
+    required: typeof legacyQuestion?.required === 'boolean' ? legacyQuestion.required : true,
+    choices: []
+  };
+}
+
+function splitStartsAtPrompt(
+  prompt: string | undefined,
+  type: typeof EVENT_DATE_QUESTION_TYPE | typeof EVENT_TIME_QUESTION_TYPE
+): string {
+  if (!prompt || prompt.toLowerCase() === 'when') {
+    return type === EVENT_DATE_QUESTION_TYPE ? 'Date' : 'Time';
+  }
+  return `${prompt} ${type === EVENT_DATE_QUESTION_TYPE ? 'date' : 'time'}`;
+}
+
+function firstQuestionKeyOfType(questions: Array<Record<string, unknown>>, type: string): string | undefined {
+  const question = questions.find((candidate) => candidate.type === type);
+  return trimmedString(question?.key);
+}
+
+function uniqueQuestionKey(questions: Array<Record<string, unknown>>, preferred: string): string {
+  const keys = new Set(questions.map((question) => trimmedString(question.key)).filter(Boolean));
+  if (!keys.has(preferred)) {
+    return preferred;
+  }
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${preferred}${index}`;
+    if (!keys.has(candidate)) {
+      return candidate;
+    }
+  }
+  return `${preferred}1000`;
 }
 
 function normalizeEventProfileCalendarInput(calendar: Record<string, unknown>): Record<string, unknown> {
@@ -509,6 +605,10 @@ function legacyPermissionSuffix(permission: unknown, permissionSuffix: unknown, 
     return profileId.trim();
   }
   return undefined;
+}
+
+function trimmedString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function legacyResponseClassId(countsAsAttendee: boolean, responseClasses: Array<Record<string, unknown>>): string {

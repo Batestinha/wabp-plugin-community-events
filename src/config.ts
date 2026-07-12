@@ -68,7 +68,12 @@ const eventCalendarResourceSchema = z.object({
   label: z.string().trim().min(1),
   enabled: z.boolean().default(true),
   directory: z.string().trim().min(1).default('calendar'),
-  subscriptionToken: z.string().trim().default('')
+  subscriptionToken: z.string().trim().default(''),
+  piwigo: z.object({
+    enabled: z.boolean().default(false),
+    calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(''),
+    label: z.string().trim().default('')
+  }).strict().default({})
 }).strict();
 
 const eventProfileObjectSchema = z.object({
@@ -246,7 +251,12 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   label: 'Events',
   enabled: true,
   directory: 'calendar',
-  subscriptionToken: ''
+  subscriptionToken: '',
+  piwigo: {
+    enabled: false,
+    calendarId: '',
+    label: ''
+  }
 };
 
 const eventsConfigObjectSchema = z.object({

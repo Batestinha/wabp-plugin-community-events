@@ -5,6 +5,7 @@ import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
 import { calendarResourceForProfile, parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
+import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
 import {
@@ -163,12 +164,20 @@ export async function adoptEventLifecycle(input: {
     }
   }
 
+  const calendarEvents = [...listCalendarEvents(db, adoption.scopeId), event];
   await writeScopeCalendar({
     appConfig: runtime.config,
     config,
     scopeId: adoption.scopeId,
     calendarId: profile.calendar.calendarId,
-    events: [...listCalendarEvents(db, adoption.scopeId), event]
+    events: calendarEvents
+  });
+  const piwigoPublication = await publishScopeCalendarToPiwigo({
+    appConfig: runtime.config,
+    config,
+    scopeId: adoption.scopeId,
+    calendarId: profile.calendar.calendarId,
+    events: calendarEvents
   });
   const calendar = calendarResourceForProfile(config, profile);
   db.transaction(() => {
@@ -212,6 +221,7 @@ export async function adoptEventLifecycle(input: {
       cleanupAt: event.cleanupAt,
       calendarId: calendar?.id ?? '',
       calendarEnabled: calendar?.enabled === true,
+      ...(piwigoPublication ? { piwigoPublication } : {}),
       groupValidation
     }
   });

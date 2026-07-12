@@ -1,6 +1,7 @@
 import type { PluginCommandContext, PluginGroupDecommissionResult } from '../../../platform/pluginRuntime/types';
 import { parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
+import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
 import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
@@ -153,12 +154,21 @@ async function refreshCalendar(
 ): Promise<void> {
   const config = parseEventsConfig(await runtime.configFor(event.scopeId));
   const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+  const calendarId = profile?.calendar.calendarId ?? '';
+  const events = listCalendarEvents(db, event.scopeId);
   await writeScopeCalendar({
     appConfig: runtime.config,
     config,
     scopeId: event.scopeId,
-    calendarId: profile?.calendar.calendarId ?? '',
-    events: listCalendarEvents(db, event.scopeId)
+    calendarId,
+    events
+  });
+  await publishScopeCalendarToPiwigo({
+    appConfig: runtime.config,
+    config,
+    scopeId: event.scopeId,
+    calendarId,
+    events
   });
 }
 

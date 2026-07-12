@@ -17,15 +17,23 @@ export async function writeScopeCalendar(input: {
   if (!calendar || !calendar.enabled) {
     return undefined;
   }
-  const profileIds = new Set(input.config.eventProfiles
-    .filter((profile) => profile.calendar.calendarId === calendar.id)
-    .map((profile) => profile.id));
   const filePath = scopeCalendarPath(input.appConfig, calendar, input.scopeId);
   await mkdir(path.dirname(filePath), { recursive: true });
   const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, renderIcs(input.events.filter((event) => profileIds.has(event.profileId))), 'utf8');
+  await writeFile(tempPath, renderScopeCalendar(input.config, input.calendarId, input.events), 'utf8');
   await rename(tempPath, filePath);
   return filePath;
+}
+
+export function renderScopeCalendar(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): string {
+  const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
+  if (!calendar) {
+    return renderIcs([]);
+  }
+  const profileIds = new Set(config.eventProfiles
+    .filter((profile) => profile.calendar.calendarId === calendar.id)
+    .map((profile) => profile.id));
+  return renderIcs(events.filter((event) => profileIds.has(event.profileId)));
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {

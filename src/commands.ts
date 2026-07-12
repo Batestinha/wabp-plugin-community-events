@@ -9,6 +9,7 @@ import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
 import { writeScopeCalendar } from './ics';
+import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
 import {
   createEventFlowDefinition,
   eventConfirmPurpose,
@@ -723,27 +724,29 @@ function registerEventFlowCompletionHandlers(
           updatedAt: now.toISOString()
         });
         try {
-          const calendar = calendarResourceForProfile(parseEventsConfig({
+          const calendarConfig = parseEventsConfig({
             enabled: true,
             timezone: draft.timezone,
             cleanup: { retryDelaysMinutes: [], lastFailureMessage: '', lastFailureAt: '' },
             adoption: {},
             calendars: draft.calendars,
             eventProfiles: draft.profiles
-          }), profile);
+          });
+          const calendar = calendarResourceForProfile(calendarConfig, profile);
+          const calendarEvents = listCalendarEvents(db, draft.scopeId);
           await writeScopeCalendar({
             appConfig: runtime.config,
-            config: parseEventsConfig({
-              enabled: true,
-              timezone: draft.timezone,
-              cleanup: { retryDelaysMinutes: [], lastFailureMessage: '', lastFailureAt: '' },
-              adoption: {},
-              calendars: draft.calendars,
-              eventProfiles: draft.profiles
-            }),
+            config: calendarConfig,
             scopeId: draft.scopeId,
             calendarId: profile.calendar.calendarId,
-            events: listCalendarEvents(db, draft.scopeId)
+            events: calendarEvents
+          });
+          const piwigoPublication = await publishScopeCalendarToPiwigo({
+            appConfig: runtime.config,
+            config: calendarConfig,
+            scopeId: draft.scopeId,
+            calendarId: profile.calendar.calendarId,
+            events: calendarEvents
           });
           await appendEventJsonLog(context, {
             action: 'calendar.exported',
@@ -752,7 +755,11 @@ function registerEventFlowCompletionHandlers(
             actorWid: draft.actorWid,
             profileId: profile.id,
             pollWaMsgId: sent.messageId,
-            metadata: { calendarEnabled: calendar?.enabled === true, calendarId: profile.calendar.calendarId }
+            metadata: {
+              calendarEnabled: calendar?.enabled === true,
+              calendarId: profile.calendar.calendarId,
+              ...(piwigoPublication ? { piwigoPublication } : {})
+            }
           });
         } catch (error) {
           await appendEventJsonLog(context, {
@@ -893,12 +900,20 @@ async function createUnplannedEventLifecycle(input: {
   try {
     const config = draftEventsConfig(input.draft);
     const calendar = calendarResourceForProfile(config, input.profile);
+    const calendarEvents = listCalendarEvents(input.db, input.draft.scopeId);
     await writeScopeCalendar({
       appConfig: input.runtime.config,
       config,
       scopeId: input.draft.scopeId,
       calendarId: input.profile.calendar.calendarId,
-      events: listCalendarEvents(input.db, input.draft.scopeId)
+      events: calendarEvents
+    });
+    const piwigoPublication = await publishScopeCalendarToPiwigo({
+      appConfig: input.runtime.config,
+      config,
+      scopeId: input.draft.scopeId,
+      calendarId: input.profile.calendar.calendarId,
+      events: calendarEvents
     });
     await appendEventJsonLog(input.context, {
       action: 'calendar.exported',
@@ -907,7 +922,11 @@ async function createUnplannedEventLifecycle(input: {
       actorWid: input.draft.actorWid,
       profileId: input.profile.id,
       subgroupChatId: created.chatId,
-      metadata: { calendarEnabled: calendar?.enabled === true, calendarId: input.profile.calendar.calendarId }
+      metadata: {
+        calendarEnabled: calendar?.enabled === true,
+        calendarId: input.profile.calendar.calendarId,
+        ...(piwigoPublication ? { piwigoPublication } : {})
+      }
     });
   } catch (error) {
     await appendEventJsonLog(input.context, {

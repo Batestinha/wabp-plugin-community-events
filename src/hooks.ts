@@ -9,6 +9,7 @@ import type { PollVoteUpdate } from '../../../platform/transport/transportTypes'
 import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
+import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
@@ -210,12 +211,20 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     const calendar = calendarProfile
       ? config.calendars.find((candidate) => candidate.id === calendarProfile.calendar.calendarId)
       : undefined;
+    const calendarEvents = listCalendarEvents(db, record.scopeId);
     await writeScopeCalendar({
       appConfig: context.config,
       config,
       scopeId: record.scopeId,
       calendarId: calendarProfile?.calendar.calendarId ?? '',
-      events: listCalendarEvents(db, record.scopeId)
+      events: calendarEvents
+    });
+    const piwigoPublication = await publishScopeCalendarToPiwigo({
+      appConfig: context.config,
+      config,
+      scopeId: record.scopeId,
+      calendarId: calendarProfile?.calendar.calendarId ?? '',
+      events: calendarEvents
     });
     await appendJsonLog(context, {
       action: 'calendar.exported',
@@ -225,7 +234,8 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       pollWaMsgId: record.pollWaMsgId,
       metadata: {
         calendarEnabled: calendar?.enabled === true,
-        calendarId: calendar?.id ?? ''
+        calendarId: calendar?.id ?? '',
+        ...(piwigoPublication ? { piwigoPublication } : {})
       }
     });
     return [

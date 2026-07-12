@@ -41,8 +41,8 @@ export const eventsControls: ControlDescriptor[] = [
     builderEndpoints: {
       options: '/api/v1/plugins/official.community-events/profiles/:scopeId/options',
       calendarState: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId',
-      configureFunnel: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/funnel',
-      publishPiwigo: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/piwigo',
+      setFunnel: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/funnel',
+      publish: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish',
       rotateToken: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token'
     }
   }),

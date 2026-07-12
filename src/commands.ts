@@ -9,7 +9,7 @@ import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
 import { writeScopeCalendar } from './ics';
-import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
+import { publishScopeCalendar } from './calendarPublication';
 import {
   createEventFlowDefinition,
   eventConfirmPurpose,
@@ -741,8 +741,7 @@ function registerEventFlowCompletionHandlers(
             calendarId: profile.calendar.calendarId,
             events: calendarEvents
           });
-          const piwigoPublication = await publishScopeCalendarToPiwigo({
-            appConfig: runtime.config,
+          const publication = await publishScopeCalendar({
             config: calendarConfig,
             scopeId: draft.scopeId,
             calendarId: profile.calendar.calendarId,
@@ -758,7 +757,7 @@ function registerEventFlowCompletionHandlers(
             metadata: {
               calendarEnabled: calendar?.enabled === true,
               calendarId: profile.calendar.calendarId,
-              ...(piwigoPublication ? { piwigoPublication } : {})
+              ...(publication ? { publication } : {})
             }
           });
         } catch (error) {
@@ -908,8 +907,7 @@ async function createUnplannedEventLifecycle(input: {
       calendarId: input.profile.calendar.calendarId,
       events: calendarEvents
     });
-    const piwigoPublication = await publishScopeCalendarToPiwigo({
-      appConfig: input.runtime.config,
+    const publication = await publishScopeCalendar({
       config,
       scopeId: input.draft.scopeId,
       calendarId: input.profile.calendar.calendarId,
@@ -925,7 +923,7 @@ async function createUnplannedEventLifecycle(input: {
       metadata: {
         calendarEnabled: calendar?.enabled === true,
         calendarId: input.profile.calendar.calendarId,
-        ...(piwigoPublication ? { piwigoPublication } : {})
+        ...(publication ? { publication } : {})
       }
     });
   } catch (error) {

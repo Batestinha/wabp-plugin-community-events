@@ -63,18 +63,25 @@ export const eventResponseClassSchema = z.object({
   includeInAttendanceCount: z.boolean().default(false)
 }).strict();
 
-const eventCalendarResourceSchema = z.object({
+const eventCalendarResourceObjectSchema = z.object({
   id: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
   label: z.string().trim().min(1),
   enabled: z.boolean().default(true),
   directory: z.string().trim().min(1).default('calendar'),
   subscriptionToken: z.string().trim().default(''),
-  piwigo: z.object({
+  publication: z.object({
     enabled: z.boolean().default(false),
-    calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(''),
-    label: z.string().trim().default('')
+    endpointUrl: z.string().trim().url().or(z.literal('')).default(''),
+    secret: z.string().trim().default(''),
+    secretFieldName: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).or(z.literal('')).default('bot_secret'),
+    feedId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(''),
+    label: z.string().trim().default(''),
+    downloadUrl: z.string().trim().url().or(z.literal('')).default(''),
+    calendarUrl: z.string().trim().url().or(z.literal('')).default('')
   }).strict().default({})
 }).strict();
+
+const eventCalendarResourceSchema = z.preprocess(normalizeEventCalendarResourceInput, eventCalendarResourceObjectSchema);
 
 const eventProfileObjectSchema = z.object({
   id: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
@@ -254,10 +261,15 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   enabled: true,
   directory: 'calendar',
   subscriptionToken: '',
-  piwigo: {
+  publication: {
     enabled: false,
-    calendarId: '',
-    label: ''
+    endpointUrl: '',
+    secret: '',
+    secretFieldName: 'bot_secret',
+    feedId: '',
+    label: '',
+    downloadUrl: '',
+    calendarUrl: ''
   }
 };
 
@@ -425,12 +437,40 @@ function normalizeEventsConfigInput(input: unknown): unknown {
     calendar: _legacyCalendar,
     ...inputWithoutLegacyProfileSettings
   } = input;
+  const normalized = {
+    ...inputWithoutLegacyProfileSettings,
+    calendars: Array.isArray(input.calendars)
+      ? input.calendars.map((calendar) => normalizeEventCalendarResourceInput(calendar))
+      : input.calendars
+  };
   if (!Array.isArray(input.eventProfiles)) {
-    return inputWithoutLegacyProfileSettings;
+    return normalized;
   }
   return {
-    ...inputWithoutLegacyProfileSettings,
+    ...normalized,
     eventProfiles: input.eventProfiles.map((profile) => normalizeEventProfileInput(profile))
+  };
+}
+
+function normalizeEventCalendarResourceInput(calendar: unknown): unknown {
+  if (!isRecord(calendar)) {
+    return calendar;
+  }
+  const { piwigo: legacyPiwigo, publication, ...calendarWithoutLegacy } = calendar;
+  const legacy = isRecord(legacyPiwigo)
+    ? {
+        enabled: legacyPiwigo.enabled,
+        feedId: legacyPiwigo.calendarId,
+        label: legacyPiwigo.label
+      }
+    : {};
+  const current = isRecord(publication) ? publication : {};
+  return {
+    ...calendarWithoutLegacy,
+    publication: {
+      ...legacy,
+      ...current
+    }
   };
 }
 

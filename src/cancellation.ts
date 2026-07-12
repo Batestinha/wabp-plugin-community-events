@@ -1,7 +1,7 @@
 import type { PluginCommandContext, PluginGroupDecommissionResult } from '../../../platform/pluginRuntime/types';
 import { parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
-import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
+import { publishScopeCalendar } from './calendarPublication';
 import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
@@ -163,8 +163,7 @@ async function refreshCalendar(
     calendarId,
     events
   });
-  await publishScopeCalendarToPiwigo({
-    appConfig: runtime.config,
+  await publishScopeCalendar({
     config,
     scopeId: event.scopeId,
     calendarId,

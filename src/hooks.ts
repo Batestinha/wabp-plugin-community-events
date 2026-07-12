@@ -9,7 +9,7 @@ import type { PollVoteUpdate } from '../../../platform/transport/transportTypes'
 import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { parseEventsConfig } from './config';
 import { writeScopeCalendar } from './ics';
-import { publishScopeCalendarToPiwigo } from './piwigoCalendar';
+import { publishScopeCalendar } from './calendarPublication';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
@@ -219,8 +219,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       calendarId: calendarProfile?.calendar.calendarId ?? '',
       events: calendarEvents
     });
-    const piwigoPublication = await publishScopeCalendarToPiwigo({
-      appConfig: context.config,
+    const publication = await publishScopeCalendar({
       config,
       scopeId: record.scopeId,
       calendarId: calendarProfile?.calendar.calendarId ?? '',
@@ -235,7 +234,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       metadata: {
         calendarEnabled: calendar?.enabled === true,
         calendarId: calendar?.id ?? '',
-        ...(piwigoPublication ? { piwigoPublication } : {})
+        ...(publication ? { publication } : {})
       }
     });
     return [

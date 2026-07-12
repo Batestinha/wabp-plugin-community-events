@@ -79,11 +79,12 @@ export function createEventFlowDefinition(input: {
         steps[stepId] = {
           id: stepId,
           kind: 'choice',
-          prompt: question.prompt,
+          prompt: questionPrompt(input.t, profile, question),
           options: question.choices.map((choice) => ({ label: choice.label, value: choice.id })),
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
           presentation: 'text',
+          skipOnSymbolInput: !question.required,
           nextStepId
         };
         continue;
@@ -91,8 +92,9 @@ export function createEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
-        prompt: questionPrompt(input.t, question),
+        prompt: questionPrompt(input.t, profile, question),
         nextStepId,
+        skipOnSymbolInput: !question.required,
         ...(question.type === EVENT_DATE_QUESTION_TYPE
           ? {
               resolveInput: (resolutionInput) => resolveDateQuestionInput({
@@ -345,7 +347,13 @@ function confirmStepId(profile: EventProfile): string {
   return `confirm-${profile.id}`;
 }
 
-function questionPrompt(t: TranslateFn, question: EventQuestion): string {
+function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion): string {
+  const optionalSuffix = optionalQuestionPromptSuffix(t, profile, question);
+  const prompt = questionPromptByType(t, question);
+  return optionalSuffix ? `${prompt}\n${optionalSuffix}` : prompt;
+}
+
+function questionPromptByType(t: TranslateFn, question: EventQuestion): string {
   if (question.type === EVENT_DATE_QUESTION_TYPE) {
     return t('official.community-events.flow.datePrompt', { prompt: question.prompt });
   }
@@ -353,6 +361,13 @@ function questionPrompt(t: TranslateFn, question: EventQuestion): string {
     return t('official.community-events.flow.timePrompt', { prompt: question.prompt });
   }
   return question.prompt;
+}
+
+function optionalQuestionPromptSuffix(t: TranslateFn, profile: EventProfile, question: EventQuestion): string {
+  if (question.required) {
+    return '';
+  }
+  return profile.optionalPromptSuffix.trim() || t('official.community-events.flow.optionalPromptSuffix');
 }
 
 function resolveDateQuestionInput(input: {
@@ -445,6 +460,9 @@ function initialQuestionValue(
 
 function questionComplete(profile: EventProfile, question: EventQuestion, data: Record<string, unknown>): boolean {
   const raw = data[questionStepId(profile, question)];
+  if (!question.required && Object.hasOwn(data, questionStepId(profile, question)) && (raw === null || raw === undefined)) {
+    return true;
+  }
   if (question.type === EVENT_DATE_QUESTION_TYPE) {
     return isEventDateAnswer(raw);
   }
@@ -452,6 +470,9 @@ function questionComplete(profile: EventProfile, question: EventQuestion, data: 
     return isEventTimeAnswer(raw);
   }
   if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
+    if (!question.required && Array.isArray(raw) && raw.length === 0) {
+      return true;
+    }
     return Array.isArray(raw) && raw.some((value) => typeof value === 'string' && value.trim().length > 0);
   }
   return typeof raw === 'string' && raw.trim().length > 0;

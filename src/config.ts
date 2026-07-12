@@ -82,6 +82,7 @@ const eventProfileObjectSchema = z.object({
   permissionSuffix: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).optional(),
   allowScopeMemberCreation: z.boolean().default(false),
   announcementGroupWid: z.string().trim().optional().default(''),
+  optionalPromptSuffix: z.string().trim().max(500).default(''),
   startsAtDateQuestionKey: z.string().trim().min(1).default('startDate'),
   startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
   questions: z.array(eventQuestionSchema).min(1),
@@ -207,6 +208,7 @@ export const defaultClimbingEventProfile: EventProfile = {
   permissionSuffix: 'climbing',
   allowScopeMemberCreation: false,
   announcementGroupWid: '',
+  optionalPromptSuffix: 'Reply with any symbol, such as -, to skip.',
   startsAtDateQuestionKey: 'startDate',
   startsAtTimeQuestionKey: 'startTime',
   questions: [
@@ -317,6 +319,11 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
   return {
     ...profile,
     label: localizeIfDefault(profile.label, defaultClimbingEventProfile.label, () => t('official.community-events.profile.climbing.label')),
+    optionalPromptSuffix: localizeIfDefault(
+      profile.optionalPromptSuffix,
+      defaultClimbingEventProfile.optionalPromptSuffix,
+      () => t('official.community-events.flow.optionalPromptSuffix')
+    ),
     questions: profile.questions.map((question) => ({
       ...question,
       prompt: localizeIfDefault(

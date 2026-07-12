@@ -40,6 +40,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.flow.no': 'No',
   'official.community-events.flow.datePrompt': '{prompt} (for example: 2026-07-11, tomorrow, or 3 days from now)',
   'official.community-events.flow.timePrompt': '{prompt} (for example: 09:30 or 18:30)',
+  'official.community-events.flow.optionalPromptSuffix': 'Reply with any symbol, such as -, to skip.',
   'official.community-events.flow.dateHasTime': 'Send only the date here. I will ask for the time separately.',
   'official.community-events.flow.dateInvalid': 'I could not understand that date. Try an exact date like 2026-07-11, tomorrow, or 3 days from now.',
   'official.community-events.flow.dateUnsupportedLocale': 'Natural date parsing is not available for this language. Use YYYY-MM-DD.',

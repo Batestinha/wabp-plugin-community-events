@@ -114,6 +114,7 @@ export async function adoptEventLifecycle(input: {
     profile,
     answers,
     timezone: config.timezone,
+    locale: adoption.locale ?? 'en',
     creatorDisplayName: adoption.actorLabel || adoption.actorWid
   });
   const eventId = newEventId();

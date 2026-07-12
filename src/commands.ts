@@ -61,6 +61,7 @@ interface EventDraft {
   actorLabel: string;
   defaultAnnouncementGroupWid?: string | undefined;
   timezone: string;
+  locale: string;
   profiles: EventProfile[];
   calendars: EventCalendarResource[];
   prefill: EventFlowPrefill;
@@ -204,6 +205,7 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
     ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {}),
     timezone: config.timezone,
+    locale: ctx.locale,
     profiles: eventProfiles,
     calendars: config.calendars,
     prefill,
@@ -232,6 +234,7 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
     scopeId,
     chatId: ctx.message.chatId,
     query,
+    locale: ctx.locale,
     actorWids: actorAliases
   });
 
@@ -245,6 +248,7 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
   const preselectedEventId = resolution.candidates.length === 1 ? resolution.candidates[0]?.id : undefined;
   const definition = createEventCancelFlowDefinition({
     t: ctx.t,
+    locale: ctx.locale,
     candidates: resolution.candidates,
     preselectedEventId
   });
@@ -354,6 +358,7 @@ function registerEventCancelFlowCompletionHandler(
 
 function createEventCancelFlowDefinition(input: {
   t: CommandContext['t'];
+  locale: string;
   candidates: StoredEventRecord[];
   preselectedEventId?: string | undefined;
 }): FlowDefinition {
@@ -364,7 +369,7 @@ function createEventCancelFlowDefinition(input: {
       kind: 'choice',
       prompt: input.t('official.community-events.cancel.select'),
       options: input.candidates.map((event) => ({
-        label: eventChoiceLabel(event, input.t),
+        label: eventChoiceLabel(event, input.t, input.locale),
         value: event.id
       })),
       minSelections: 1,
@@ -382,6 +387,7 @@ function createEventCancelFlowDefinition(input: {
         state,
         candidates: input.candidates,
         preselectedEventId: input.preselectedEventId,
+        locale: input.locale,
         t: input.t
       })
     }),
@@ -411,6 +417,7 @@ async function resolveEventCancelCandidates(
     scopeId: string;
     chatId: string;
     query: string;
+    locale: string;
     actorWids: string[];
   }
 ): Promise<
@@ -426,7 +433,7 @@ async function resolveEventCancelCandidates(
   const matched = directSubgroupCandidate
     ? [directSubgroupCandidate]
     : input.query
-      ? findEventCancelMatches(allCandidates, input.query)
+      ? findEventCancelMatches(allCandidates, input.query, input.locale)
       : allCandidates;
   if (matched.length === 0) {
     return { status: 'none' };
@@ -477,7 +484,7 @@ async function eventCancellationAllowed(
   return false;
 }
 
-function findEventCancelMatches(events: StoredEventRecord[], query: string): StoredEventRecord[] {
+function findEventCancelMatches(events: StoredEventRecord[], query: string, locale = 'en'): StoredEventRecord[] {
   const normalizedQuery = normalizeEventSearchText(query);
   if (!normalizedQuery) {
     return events;
@@ -486,13 +493,13 @@ function findEventCancelMatches(events: StoredEventRecord[], query: string): Sto
   if (exactId.length > 0) {
     return exactId;
   }
-  const exactTitle = events.filter((event) => eventSearchFields(event).some((field) =>
+  const exactTitle = events.filter((event) => eventSearchFields(event, locale).some((field) =>
     normalizeEventSearchText(field) === normalizedQuery
   ));
   if (exactTitle.length > 0) {
     return uniqueEvents(exactTitle);
   }
-  return uniqueEvents(events.filter((event) => eventSearchFields(event).some((field) =>
+  return uniqueEvents(events.filter((event) => eventSearchFields(event, locale).some((field) =>
     normalizeEventSearchText(field).includes(normalizedQuery)
   )));
 }
@@ -518,6 +525,7 @@ function eventCancelConfirmationSummary(input: {
   state: FlowState;
   candidates: StoredEventRecord[];
   preselectedEventId?: string | undefined;
+  locale: string;
   t: CommandContext['t'];
 }): string {
   const eventId = eventCancelFlowSelectedEventId({ state: input.state }) ?? input.preselectedEventId;
@@ -527,16 +535,16 @@ function eventCancelConfirmationSummary(input: {
   }
   return input.t('official.community-events.cancel.summary', {
     title: eventDisplayTitle(event),
-    startsAt: eventStartsAtLabel(event),
+    startsAt: eventStartsAtLabel(event, input.locale),
     status: eventLifecycleLabel(event),
     eventId: event.id
   });
 }
 
-function eventChoiceLabel(event: StoredEventRecord, t: CommandContext['t']): string {
+function eventChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], locale: string): string {
   return t('official.community-events.cancel.choiceLabel', {
     title: eventDisplayTitle(event),
-    startsAt: eventStartsAtLabel(event),
+    startsAt: eventStartsAtLabel(event, locale),
     status: eventLifecycleLabel(event),
     eventId: event.id
   });
@@ -546,22 +554,22 @@ function eventLifecycleLabel(event: StoredEventRecord): string {
   return `${event.eventStatus}/${event.groupLifecycleStatus}`;
 }
 
-function eventStartsAtLabel(event: StoredEventRecord): string {
-  return formatEventDateTime(new Date(event.startsAt), event.timezone);
+function eventStartsAtLabel(event: StoredEventRecord, locale = 'en'): string {
+  return formatEventDateTime(new Date(event.startsAt), event.timezone, locale);
 }
 
 function eventDisplayTitle(event: StoredEventRecord): string {
   return event.groupTitle || event.pollQuestion || event.id;
 }
 
-function eventSearchFields(event: StoredEventRecord): string[] {
+function eventSearchFields(event: StoredEventRecord, locale = 'en'): string[] {
   return [
     event.id,
     event.groupTitle,
     event.pollQuestion,
     event.subgroupTitle,
     event.profileLabel,
-    eventStartsAtLabel(event)
+    eventStartsAtLabel(event, locale)
   ].filter((value): value is string => Boolean(value));
 }
 
@@ -618,7 +626,7 @@ function registerEventFlowCompletionHandlers(
         return true;
       }
 
-      const answers = eventFlowAnswers(snapshot, profile, draft.timezone);
+      const answers = eventFlowAnswers(snapshot, profile, draft.timezone, draft.locale);
       if (!answers) {
         await activeTransport.sendText(responseChatId, t('official.community-events.invalid'));
         return true;
@@ -649,6 +657,7 @@ function registerEventFlowCompletionHandlers(
           profile,
           answers,
           timezone: draft.timezone,
+          locale: draft.locale,
           creatorDisplayName: draft.actorLabel || draft.actorWid
         });
         const now = new Date();
@@ -947,6 +956,7 @@ async function createUnplannedEventLifecycle(input: {
     answers: input.materialized.answers,
     startsAt: input.materialized.startsAt,
     timezone: input.draft.timezone,
+    locale: input.draft.locale,
     creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
     extraTokens: {
       eventId: event.id,
@@ -1048,10 +1058,10 @@ function eventCommand(input: {
         '--profile <profileId>',
         '--answer <questionKey=value>',
         '--<questionKey> <value>',
-        'Example: /event --profile climbing --place "Sintra" --startsAt "tomorrow at 09:30" --style "Bouldering"'
+        'Example: /event --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
       ],
       examples: [
-        '/event --profile climbing --place "Sintra" --startsAt "tomorrow at 09:30" --style "Bouldering"'
+        '/event --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
       ],
       executable: true,
       requiresConfirmation: true

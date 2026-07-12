@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
 
-export const EVENT_DATETIME_QUESTION_TYPE = 'datetime';
+export const EVENT_DATE_QUESTION_TYPE = 'date';
+export const EVENT_TIME_QUESTION_TYPE = 'time';
 export const EVENT_CHOICE_QUESTION_TYPE = 'choice';
 export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
@@ -17,7 +18,7 @@ export const eventQuestionChoiceSchema = z.object({
 const eventQuestionObjectSchema = z.object({
   key: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
   prompt: z.string().trim().min(1),
-  type: z.enum(['text', EVENT_DATETIME_QUESTION_TYPE, EVENT_CHOICE_QUESTION_TYPE]).default('text'),
+  type: z.enum(['text', EVENT_DATE_QUESTION_TYPE, EVENT_TIME_QUESTION_TYPE, EVENT_CHOICE_QUESTION_TYPE]).default('text'),
   required: z.boolean().default(true),
   choices: z.array(eventQuestionChoiceSchema).max(24).default([])
 }).strict().superRefine((question, ctx) => {
@@ -76,7 +77,8 @@ const eventProfileObjectSchema = z.object({
   permissionSuffix: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).optional(),
   allowScopeMemberCreation: z.boolean().default(false),
   announcementGroupWid: z.string().trim().optional().default(''),
-  startsAtQuestionKey: z.string().trim().min(1).default('startsAt'),
+  startsAtDateQuestionKey: z.string().trim().min(1).default('startDate'),
+  startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
   questions: z.array(eventQuestionSchema).min(1),
   poll: z.object({
     titleTemplate: z.string().trim().min(1),
@@ -138,19 +140,34 @@ const eventProfileObjectSchema = z.object({
       });
     }
   }
-  if (!questionKeys.has(profile.startsAtQuestionKey)) {
+  if (!questionKeys.has(profile.startsAtDateQuestionKey)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `startsAtQuestionKey must reference a question key`,
-      path: ['startsAtQuestionKey']
+      message: `startsAtDateQuestionKey must reference a question key`,
+      path: ['startsAtDateQuestionKey']
     });
   }
-  const startsAt = profile.questions.find((question) => question.key === profile.startsAtQuestionKey);
-  if (startsAt?.type !== EVENT_DATETIME_QUESTION_TYPE) {
+  if (!questionKeys.has(profile.startsAtTimeQuestionKey)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `startsAtQuestionKey must reference a datetime question`,
-      path: ['startsAtQuestionKey']
+      message: `startsAtTimeQuestionKey must reference a question key`,
+      path: ['startsAtTimeQuestionKey']
+    });
+  }
+  const startsAtDate = profile.questions.find((question) => question.key === profile.startsAtDateQuestionKey);
+  if (startsAtDate?.type !== EVENT_DATE_QUESTION_TYPE) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `startsAtDateQuestionKey must reference a date question`,
+      path: ['startsAtDateQuestionKey']
+    });
+  }
+  const startsAtTime = profile.questions.find((question) => question.key === profile.startsAtTimeQuestionKey);
+  if (startsAtTime?.type !== EVENT_TIME_QUESTION_TYPE) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `startsAtTimeQuestionKey must reference a time question`,
+      path: ['startsAtTimeQuestionKey']
     });
   }
   if (profile.calendar.locationQuestionKey && !questionKeys.has(profile.calendar.locationQuestionKey)) {
@@ -185,10 +202,12 @@ export const defaultClimbingEventProfile: EventProfile = {
   permissionSuffix: 'climbing',
   allowScopeMemberCreation: false,
   announcementGroupWid: '',
-  startsAtQuestionKey: 'startsAt',
+  startsAtDateQuestionKey: 'startDate',
+  startsAtTimeQuestionKey: 'startTime',
   questions: [
     { key: 'place', prompt: 'Where', type: 'text', required: true, choices: [] },
-    { key: 'startsAt', prompt: 'When', type: 'datetime', required: true, choices: [] },
+    { key: 'startDate', prompt: 'Date', type: 'date', required: true, choices: [] },
+    { key: 'startTime', prompt: 'Time', type: 'time', required: true, choices: [] },
     { key: 'style', prompt: 'Climbing style', type: 'text', required: true, choices: [] }
   ],
   poll: {
@@ -467,8 +486,10 @@ function normalizeEventQuestionInput(input: unknown): unknown {
   }
   const type = input.type === EVENT_CHOICE_QUESTION_TYPE
     ? EVENT_CHOICE_QUESTION_TYPE
-    : input.type === EVENT_DATETIME_QUESTION_TYPE
-      ? EVENT_DATETIME_QUESTION_TYPE
+    : input.type === EVENT_DATE_QUESTION_TYPE
+      ? EVENT_DATE_QUESTION_TYPE
+      : input.type === EVENT_TIME_QUESTION_TYPE
+        ? EVENT_TIME_QUESTION_TYPE
       : 'text';
   return {
     ...input,

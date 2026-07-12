@@ -25,15 +25,17 @@ export function materializeEventLifecycle(input: {
   profile: EventProfile;
   answers: EventFlowAnswers;
   timezone: string;
+  locale?: string | undefined;
   creatorDisplayName: string;
 }): MaterializedEventLifecycle {
-  const { profile, answers, timezone, creatorDisplayName } = input;
+  const { profile, answers, timezone, locale, creatorDisplayName } = input;
   const pollQuestion = renderEventTemplate({
     template: profile.poll.titleTemplate,
     profile,
     answers: answers.answers,
     startsAt: answers.startsAt,
     timezone,
+    locale,
     creatorDisplayName
   });
   const groupTitle = renderEventTemplate({
@@ -42,12 +44,13 @@ export function materializeEventLifecycle(input: {
     answers: answers.answers,
     startsAt: answers.startsAt,
     timezone,
+    locale,
     creatorDisplayName
   });
   const closeAt = new Date(answers.startsAt.getTime() - profile.poll.closeOffsetHoursBeforeStart * 3_600_000);
   const cleanupAt = new Date(answers.startsAt.getTime() + profile.group.cleanupOffsetHoursAfterStart * 3_600_000);
   const location = calendarLocation(profile, answers.answers);
-  const description = calendarDescription(profile, answers.answers, answers.startsAt, timezone);
+  const description = calendarDescription(profile, answers.answers, answers.startsAt, timezone, locale);
   return {
     pollQuestion,
     groupTitle,

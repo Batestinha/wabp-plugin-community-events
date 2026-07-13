@@ -1031,9 +1031,8 @@ function templateUsesToken(template: string, token: string): boolean {
 }
 
 function eventCreatorParticipantWid(draft: EventDraft): string {
-  const aliases = uniqueEventWids([...(draft.actorAliases ?? []), draft.actorWid]);
-  return aliases.find((wid) => wid.endsWith('@c.us')) ??
-    aliases.find((wid) => !wid.endsWith('@g.us')) ??
+  const aliases = uniqueEventWids([draft.actorWid, ...(draft.actorAliases ?? [])]);
+  return aliases.find((wid) => !wid.endsWith('@g.us')) ??
     draft.actorWid;
 }
 

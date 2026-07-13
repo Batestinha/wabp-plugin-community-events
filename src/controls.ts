@@ -34,7 +34,7 @@ function control(
 
 export const eventsControls: ControlDescriptor[] = [
   control('enabled', 'Enabled', 'Enable guided event creation in this scope.', 10, { type: 'boolean' }, { widget: 'toggle' }),
-  control('timezone', 'Timezone', 'IANA timezone used when combining event date and time answers.', 20, { type: 'string' }, { widget: 'text' }),
+  control('timezone', 'Timezone', 'IANA timezone used when combining event date and time answers.', 20, { type: 'string', format: 'timezone' }, { widget: 'select' }),
   control('eventProfiles', 'Event profiles', 'Event profile definitions managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',

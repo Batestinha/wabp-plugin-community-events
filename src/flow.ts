@@ -316,9 +316,10 @@ function eventFlowAnswersFromData(
       startTime = eventTimePartsFromRaw(raw);
     }
   }
-  if (!startDate || !startTime) {
+  if (!startDate) {
     return undefined;
   }
+  startTime ??= { hour: 0, minute: 0, raw: '00:00' };
   const startsAt = materializeEventStart(startDate, startTime, { timezone, locale, now });
   if (!startsAt) {
     return undefined;

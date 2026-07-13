@@ -61,7 +61,8 @@ export const eventsManifest: PluginManifest = {
       'Create event polls from configured profiles, or create unplanned event subgroups when the poll close time has already passed.',
       'Cancel active event lifecycles by creator or event manager.',
       'Close polls before the event, gather attendees, and create event subgroups.',
-      'Export one calendar file per scope.'
+      'Export one calendar file per scope.',
+      'For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community.'
     ],
     prerequisites: [
       'official.doas must be enabled for the target scope.',

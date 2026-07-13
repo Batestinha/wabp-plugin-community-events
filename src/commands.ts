@@ -213,12 +213,9 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     createdAt: new Date().toISOString()
   };
   await runtime.dataStore.set(eventDraftKey(scopeId, flowSessionId), draft);
-  return {
-    handled: true,
-    text: ctx.message.context === 'group'
-      ? ctx.t('official.community-events.startedPrivate')
-      : ctx.t('official.community-events.started')
-  };
+  return ctx.message.context === 'group'
+    ? { handled: true, text: ctx.t('official.community-events.startedPrivate') }
+    : { handled: true, response: { kind: 'none' as const } };
 }
 
 async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandContext) {

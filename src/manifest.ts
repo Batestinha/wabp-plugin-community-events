@@ -49,6 +49,38 @@ export const eventsManifest: PluginManifest = {
     EVENTS_JOBS.close,
     EVENTS_JOBS.cleanup
   ],
+  cancellation: {
+    workflows: [
+      {
+        id: 'event-create',
+        description: 'Guided event setup before an event poll is published.',
+        mode: 'core-flow',
+        scope: 'actor-chat',
+        commands: ['/event'],
+        cancellableStates: ['active'],
+        terminalStates: ['completed', 'cancelled', 'expired'],
+        effects: ['discard-event-draft']
+      },
+      {
+        id: 'event-cancel-confirmation',
+        description: 'Guided confirmation before cancelling a published event lifecycle.',
+        mode: 'core-flow',
+        scope: 'actor-chat',
+        commands: ['/event cancel'],
+        cancellableStates: ['active'],
+        terminalStates: ['completed', 'cancelled', 'expired'],
+        effects: ['discard-event-cancellation-draft']
+      },
+      {
+        id: 'published-event-lifecycle',
+        description: 'Published event lifecycles must be cancelled with the explicit event cancellation workflow.',
+        mode: 'not-cancellable',
+        scope: 'scope',
+        commands: ['/event cancel'],
+        notCancellableReason: 'Published event cancellation can affect polls, calendars, and managed event groups, so it requires explicit event selection and confirmation.'
+      }
+    ]
+  },
   dependencies: [
     { pluginId: 'official.doas', versionRange: '>=0.1.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' }

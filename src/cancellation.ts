@@ -1,7 +1,6 @@
 import type { PluginCommandContext, PluginGroupDecommissionResult } from '../../../platform/pluginRuntime/types';
 import { parseEventsConfig } from './config';
-import { writeScopeCalendar } from './ics';
-import { publishScopeCalendar } from './calendarPublication';
+import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
@@ -156,14 +155,9 @@ async function refreshCalendar(
   const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
   const calendarId = profile?.calendar.calendarId ?? '';
   const events = listCalendarEvents(db, event.scopeId);
-  await writeScopeCalendar({
+  await writePublishAndRecordScopeCalendar({
     appConfig: runtime.config,
-    config,
-    scopeId: event.scopeId,
-    calendarId,
-    events
-  });
-  await publishScopeCalendar({
+    db,
     config,
     scopeId: event.scopeId,
     calendarId,

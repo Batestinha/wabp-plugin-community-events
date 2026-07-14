@@ -568,7 +568,7 @@ function dateOnlyLabel(date: Date, timezone: string, locale = 'en'): string {
   return `${tokens.weekday}, ${tokens.dd}-${tokens.mm}-${tokens.yy}`;
 }
 
-function formatEventDateParts(date: EventDateParts): string {
+export function formatEventDateParts(date: EventDateParts): string {
   return [
     String(date.year).padStart(4, '0'),
     String(date.month).padStart(2, '0'),
@@ -576,7 +576,7 @@ function formatEventDateParts(date: EventDateParts): string {
   ].join('-');
 }
 
-function formatEventTimeParts(time: EventTimeParts): string {
+export function formatEventTimeParts(time: EventTimeParts): string {
   return `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`;
 }
 

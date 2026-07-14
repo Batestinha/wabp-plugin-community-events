@@ -4,8 +4,7 @@ import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
 import { calendarResourceForProfile, parseEventsConfig } from './config';
-import { writeScopeCalendar } from './ics';
-import { publishScopeCalendar } from './calendarPublication';
+import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
 import {
@@ -138,7 +137,12 @@ export async function adoptEventLifecycle(input: {
     responseClasses: materialized.responseClasses,
     answers: materialized.answers,
     startsAt: materialized.startsAt.toISOString(),
+    startsAtUtc: materialized.startsAt.toISOString(),
     timezone: config.timezone,
+    localDate: materialized.localDate,
+    ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
+    ...(materialized.place ? { place: materialized.place } : {}),
+    ...(materialized.style ? { style: materialized.style } : {}),
     closeAt: materialized.closeAt.toISOString(),
     cleanupAt: materialized.cleanupAt.toISOString(),
     groupTitle: materialized.groupTitle,
@@ -165,14 +169,9 @@ export async function adoptEventLifecycle(input: {
   }
 
   const calendarEvents = [...listCalendarEvents(db, adoption.scopeId), event];
-  await writeScopeCalendar({
+  const publication = await writePublishAndRecordScopeCalendar({
     appConfig: runtime.config,
-    config,
-    scopeId: adoption.scopeId,
-    calendarId: profile.calendar.calendarId,
-    events: calendarEvents
-  });
-  const publication = await publishScopeCalendar({
+    db,
     config,
     scopeId: adoption.scopeId,
     calendarId: profile.calendar.calendarId,

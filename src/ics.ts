@@ -26,14 +26,18 @@ export async function writeScopeCalendar(input: {
 }
 
 export function renderScopeCalendar(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): string {
+  return renderIcs(scopeCalendarEvents(config, calendarId, events));
+}
+
+export function scopeCalendarEvents(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): StoredEventRecord[] {
   const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
   if (!calendar) {
-    return renderIcs([]);
+    return [];
   }
   const profileIds = new Set(config.eventProfiles
     .filter((profile) => profile.calendar.calendarId === calendar.id)
     .map((profile) => profile.id));
-  return renderIcs(events.filter((event) => profileIds.has(event.profileId)));
+  return events.filter((event) => profileIds.has(event.profileId));
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {

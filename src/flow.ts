@@ -9,7 +9,9 @@ import {
   eventDateAndTimeToUtc,
   eventDateTemplateTokens,
   eventTimeAnswer,
+  formatEventDateParts,
   formatEventDateTime,
+  formatEventTimeParts,
   isEventDateAnswer,
   isEventTimeAnswer,
   parseEventDateInput,
@@ -22,6 +24,8 @@ export interface EventFlowAnswers {
   profileId: string;
   answers: Record<string, string>;
   startsAt: Date;
+  localDate: string;
+  localTime?: string | undefined;
 }
 
 export interface EventFlowPrefill {
@@ -36,6 +40,10 @@ export function createEventFlowDefinition(input: {
   timezone?: string | undefined;
   locale?: string | undefined;
   initialData?: Record<string, unknown> | undefined;
+  askPrefilledQuestions?: boolean | undefined;
+  flowTypePrefix?: string | undefined;
+  confirmMessageKey?: string | undefined;
+  completeMessageKey?: string | undefined;
   now?: (() => Date) | undefined;
 }): FlowDefinition {
   const timezone = input.timezone ?? 'UTC';
@@ -68,7 +76,9 @@ export function createEventFlowDefinition(input: {
   };
 
   for (const profile of input.profiles) {
-    const visibleQuestions = initialProfile?.id === profile.id
+    const visibleQuestions = input.askPrefilledQuestions
+      ? profile.questions
+      : initialProfile?.id === profile.id
       ? profile.questions.filter((question) => !questionComplete(profile, question, initialData))
       : profile.questions;
     for (const [index, question] of visibleQuestions.entries()) {
@@ -79,7 +89,7 @@ export function createEventFlowDefinition(input: {
         steps[stepId] = {
           id: stepId,
           kind: 'choice',
-          prompt: questionPrompt(input.t, profile, question),
+          prompt: questionPrompt(input.t, profile, question, input.prefill?.answers[question.key]),
           options: question.choices.map((choice) => ({ label: choice.label, value: choice.id })),
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
@@ -92,7 +102,7 @@ export function createEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
-        prompt: questionPrompt(input.t, profile, question),
+        prompt: questionPrompt(input.t, profile, question, input.prefill?.answers[question.key]),
         nextStepId,
         skipOnSymbolInput: !question.required,
         ...(question.type === EVENT_DATE_QUESTION_TYPE
@@ -122,8 +132,8 @@ export function createEventFlowDefinition(input: {
     steps[confirmStepId(profile)] = {
       id: confirmStepId(profile),
       kind: 'choice',
-      prompt: input.t('official.community-events.flow.confirm', { summary: profile.label }),
-      promptForState: (state) => input.t('official.community-events.flow.confirm', {
+      prompt: input.t(input.confirmMessageKey ?? 'official.community-events.flow.confirm', { summary: profile.label }),
+      promptForState: (state) => input.t(input.confirmMessageKey ?? 'official.community-events.flow.confirm', {
         summary: eventConfirmationSummary(state, profile, timezone, locale, input.t)
       }),
       options: [
@@ -137,14 +147,16 @@ export function createEventFlowDefinition(input: {
   }
 
   return {
-    flowType: `official.community-events.create.${randomUUID()}`,
+    flowType: `${input.flowTypePrefix ?? 'official.community-events.create'}.${randomUUID()}`,
     t: input.t,
     initialStepId: initialProfile
-      ? firstMissingQuestionStepId(initialProfile, initialData) ?? confirmStepId(initialProfile)
+      ? input.askPrefilledQuestions
+        ? firstQuestionStepId(initialProfile)
+        : firstMissingQuestionStepId(initialProfile, initialData) ?? confirmStepId(initialProfile)
       : EVENT_PROFILE_STEP_ID,
     context: 'either',
     timeoutMinutes: 30,
-    completionReply: input.t('official.community-events.flow.complete'),
+    completionReply: input.t(input.completeMessageKey ?? 'official.community-events.flow.complete'),
     steps
   };
 }
@@ -319,15 +331,18 @@ function eventFlowAnswersFromData(
   if (!startDate) {
     return undefined;
   }
-  startTime ??= { hour: 0, minute: 0, raw: '00:00' };
-  const startsAt = materializeEventStart(startDate, startTime, { timezone, locale, now });
+  const explicitStartTime = startTime;
+  const materializedStartTime = explicitStartTime ?? { hour: 0, minute: 0, raw: '00:00' };
+  const startsAt = materializeEventStart(startDate, materializedStartTime, { timezone, locale, now });
   if (!startsAt) {
     return undefined;
   }
   return {
     profileId: profile.id,
     answers,
-    startsAt
+    startsAt,
+    localDate: formatEventDateParts(startDate),
+    ...(explicitStartTime ? { localTime: formatEventTimeParts(explicitStartTime) } : {})
   };
 }
 
@@ -348,9 +363,12 @@ function confirmStepId(profile: EventProfile): string {
   return `confirm-${profile.id}`;
 }
 
-function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion): string {
+function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, currentValue?: string | undefined): string {
   const optionalSuffix = optionalQuestionPromptSuffix(t, profile, question);
-  const prompt = questionPromptByType(t, question);
+  const basePrompt = questionPromptByType(t, question);
+  const prompt = currentValue?.trim()
+    ? t('official.community-events.flow.currentValuePrompt', { prompt: basePrompt, current: currentValue.trim() })
+    : basePrompt;
   return optionalSuffix ? `${prompt}\n${optionalSuffix}` : prompt;
 }
 

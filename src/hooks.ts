@@ -8,8 +8,7 @@ import type {
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { parseEventsConfig } from './config';
-import { writeScopeCalendar } from './ics';
-import { publishScopeCalendar } from './calendarPublication';
+import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
@@ -212,14 +211,9 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ? config.calendars.find((candidate) => candidate.id === calendarProfile.calendar.calendarId)
       : undefined;
     const calendarEvents = listCalendarEvents(db, record.scopeId);
-    await writeScopeCalendar({
+    const publication = await writePublishAndRecordScopeCalendar({
       appConfig: context.config,
-      config,
-      scopeId: record.scopeId,
-      calendarId: calendarProfile?.calendar.calendarId ?? '',
-      events: calendarEvents
-    });
-    const publication = await publishScopeCalendar({
+      db,
       config,
       scopeId: record.scopeId,
       calendarId: calendarProfile?.calendar.calendarId ?? '',
@@ -276,6 +270,23 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
   }
   if (record.eventStatus !== 'scheduled' || (record.groupLifecycleStatus !== 'poll_closed' && record.groupLifecycleStatus !== 'cleanup_failed')) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: `event lifecycle is ${record.eventStatus}/${record.groupLifecycleStatus}` })];
+  }
+
+  const cleanupAt = new Date(record.cleanupAt);
+  const now = new Date();
+  if (Number.isFinite(cleanupAt.getTime()) && cleanupAt.getTime() > now.getTime()) {
+    return [audit('events.cleanup.deferred', {
+      eventId: record.id,
+      cleanupAt: record.cleanupAt
+    }), {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.cleanup,
+      scopeId: record.scopeId,
+      runAt: cleanupAt,
+      payload: { eventId: record.id, attempt: 0 },
+      dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:deferred:${record.cleanupAt}`
+    }];
   }
 
   const config = parseEventsConfig(await context.configFor(record.scopeId));

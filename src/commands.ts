@@ -2,14 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
-import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
-import { writeScopeCalendar } from './ics';
-import { publishScopeCalendar } from './calendarPublication';
+import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import {
   createEventFlowDefinition,
   eventConfirmPurpose,
@@ -26,6 +25,7 @@ import { materializeEventLifecycle, type MaterializedEventLifecycle } from './ma
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import {
+  appendEventLog,
   eventsDatabase,
   getEvent,
   getEventBySubgroupChatId,
@@ -34,6 +34,7 @@ import {
   listCalendarEvents,
   newEventId,
   saveCreatedGroupParticipants,
+  updateEventStructuredData,
   type StoredEventRecord,
 } from './store';
 
@@ -81,8 +82,31 @@ interface EventCancelDraft {
   createdAt: string;
 }
 
+interface EventUpdateDraft {
+  flowSessionId: string;
+  flowType: string;
+  scopeId: string;
+  groupId?: string | undefined;
+  groupWid?: string | undefined;
+  chatId: string;
+  eventId: string;
+  requestedTitle: string;
+  sourcePluginId: string;
+  actorWid: string;
+  actorAliases: string[];
+  actorLabel: string;
+  timezone: string;
+  locale: string;
+  profile: EventProfile;
+  profiles: EventProfile[];
+  calendars: EventCalendarResource[];
+  prefill: EventFlowPrefill;
+  createdAt: string;
+}
+
 interface EventTextTransport {
   sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+  setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
 const EVENT_CANCEL_SELECT_STEP_ID = 'event';
@@ -287,6 +311,399 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
     createdAt: new Date().toISOString()
   } satisfies EventCancelDraft);
   return { handled: true, text: ctx.t('official.community-events.cancel.started') };
+}
+
+export async function handleEventGroupTitleChangeIntent(
+  context: PluginCommandContext,
+  input: PluginGroupTitleChangeIntent
+) {
+  const ctx = input.commandContext;
+  if (!ctx.groupWid) {
+    return undefined;
+  }
+  const runtime = requireOfficialCommandRuntime(context);
+  const scopeId = requireScopeId(ctx);
+  const config = parseEventsConfig(await runtime.configFor(scopeId, ctx.message.senderWid));
+  if (!config.enabled) {
+    return undefined;
+  }
+  const db = eventsDatabase(runtime.databases);
+  const event = getEventBySubgroupChatId(db, ctx.groupWid);
+  if (!event || event.scopeId !== scopeId) {
+    return undefined;
+  }
+
+  const actorAliases = eventActorWids(ctx);
+  if (!await eventUpdateAllowed(context, { event, actorWids: actorAliases })) {
+    return { handled: true, text: ctx.t('official.community-events.update.permissionDenied') };
+  }
+
+  return startEventUpdateFlow(context, ctx, {
+    event,
+    config,
+    requestedTitle: input.requestedTitle,
+    sourcePluginId: input.sourcePluginId
+  });
+}
+
+async function startEventUpdateFlow(
+  context: PluginCommandContext,
+  ctx: CommandContext,
+  input: {
+    event: StoredEventRecord;
+    config: ReturnType<typeof parseEventsConfig>;
+    requestedTitle: string;
+    sourcePluginId: string;
+  }
+) {
+  const runtime = requireOfficialCommandRuntime(context);
+  const eventProfiles = localizeDefaultEventProfiles(input.config.eventProfiles, ctx.t);
+  const profile = eventProfiles.find((candidate) => candidate.id === input.event.profileId);
+  if (!profile) {
+    return { handled: true, text: ctx.t('official.community-events.notConfigured') };
+  }
+
+  const timezone = input.event.timezone || input.config.timezone;
+  const prefill = eventUpdatePrefill(input.event, profile);
+  const startedAt = new Date();
+  const initialData = eventInitialFlowData([profile], prefill, {
+    timezone,
+    locale: ctx.locale,
+    now: startedAt
+  });
+  const definition = createEventFlowDefinition({
+    t: ctx.t,
+    profiles: [profile],
+    prefill,
+    timezone,
+    locale: ctx.locale,
+    initialData,
+    askPrefilledQuestions: true,
+    flowTypePrefix: 'official.community-events.update',
+    confirmMessageKey: 'official.community-events.update.confirm',
+    completeMessageKey: 'official.community-events.update.complete'
+  });
+  registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, ctx.t);
+
+  const actorAliases = eventActorWids(ctx);
+  const privateActorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
+  const conversationChatId = ctx.message.context === 'group'
+    ? privateActorWid
+    : ctx.message.chatId;
+  const flowMessage = ctx.message.context === 'group' && privateActorWid !== ctx.message.senderWid
+    ? {
+        ...ctx.message,
+        senderWid: privateActorWid,
+        authorWid: privateActorWid
+      }
+    : ctx.message;
+
+  let flowSessionId: string;
+  let usedPrivateDeliveryFallback = false;
+  try {
+    const flowStart = await context.flowEngine.startFlow({
+      definition,
+      message: flowMessage,
+      scopeId: input.event.scopeId,
+      conversationChatId,
+      conversationContext: 'private',
+      initialData,
+      ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
+    });
+    flowSessionId = flowStart.flowSessionId;
+    usedPrivateDeliveryFallback = Boolean(flowStart.privateDeliveryFallback);
+  } catch {
+    return {
+      handled: true,
+      text: ctx.message.context === 'group'
+        ? ctx.t('official.community-events.update.privateStartFailed')
+        : ctx.t('official.community-events.update.startFailed')
+    };
+  }
+
+  await runtime.dataStore.set(eventUpdateDraftKey(input.event.scopeId, flowSessionId), {
+    flowSessionId,
+    flowType: definition.flowType,
+    scopeId: input.event.scopeId,
+    ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+    ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+    chatId: conversationChatId,
+    eventId: input.event.id,
+    requestedTitle: input.requestedTitle,
+    sourcePluginId: input.sourcePluginId,
+    actorWid: ctx.message.senderWid,
+    actorAliases,
+    actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+    timezone,
+    locale: ctx.locale,
+    profile,
+    profiles: eventProfiles,
+    calendars: input.config.calendars,
+    prefill,
+    createdAt: new Date().toISOString()
+  } satisfies EventUpdateDraft);
+
+  if (ctx.message.context !== 'group') {
+    return { handled: true, response: { kind: 'none' as const } };
+  }
+  return {
+    handled: true,
+    text: ctx.t(usedPrivateDeliveryFallback
+      ? 'official.community-events.update.startedInGroupFallback'
+      : 'official.community-events.update.startedPrivate')
+  };
+}
+
+function registerEventUpdateFlowCompletionHandler(
+  context: PluginCommandContext,
+  flowType: string,
+  profile: EventProfile,
+  t: CommandContext['t']
+): void {
+  const runtime = requireOfficialCommandRuntime(context);
+  context.flowEngine.registerPromptHandler(eventConfirmPurpose(flowType, profile), async (lock, activeTransport) => {
+    if (!lock.flowSessionId) {
+      return false;
+    }
+    const snapshot = await context.flowEngine.getSessionSnapshot(lock.flowSessionId);
+    if (!snapshot || snapshot.flowType !== flowType || !snapshot.scopeId) {
+      return false;
+    }
+    const draft = await runtime.dataStore.get<EventUpdateDraft>(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
+    if (!draft) {
+      return false;
+    }
+    const responseChatId = snapshot.chatId || draft.chatId;
+    await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
+
+    if (!eventFlowConfirmed(snapshot, draft.profile)) {
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.cancelled'));
+      return true;
+    }
+
+    const db = eventsDatabase(runtime.databases);
+    const event = getEvent(db, draft.eventId);
+    if (!event) {
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
+      return true;
+    }
+    if (!await eventUpdateAllowed(context, { event, actorWids: draft.actorAliases })) {
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.permissionDenied'));
+      return true;
+    }
+
+    const answers = eventFlowAnswers(snapshot, draft.profile, draft.timezone, draft.locale);
+    if (!answers) {
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
+      return true;
+    }
+
+    try {
+      const materialized = materializeEventLifecycle({
+        profile: draft.profile,
+        answers,
+        timezone: draft.timezone,
+        locale: draft.locale,
+        creatorDisplayName: event.actorLabel || event.actorWid
+      });
+      const config = draftEventsConfig({
+        timezone: draft.timezone,
+        calendars: draft.calendars,
+        profiles: draft.profiles
+      });
+      await updateEventLifecycle({
+        context,
+        runtime,
+        activeTransport,
+        db,
+        event,
+        profile: draft.profile,
+        config,
+        materialized,
+        actorWid: draft.actorWid,
+        actorLabel: draft.actorLabel,
+        requestedTitle: draft.requestedTitle,
+        sourcePluginId: draft.sourcePluginId
+      });
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.done', {
+        title: materialized.groupTitle,
+        eventId: event.id
+      }));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await appendEventJsonLog(context, {
+        action: 'event.update_failed',
+        scopeId: draft.scopeId,
+        eventId: draft.eventId,
+        actorWid: draft.actorWid,
+        profileId: draft.profile.id,
+        metadata: { reason, sourcePluginId: draft.sourcePluginId }
+      });
+      await activeTransport.sendText(responseChatId, t('official.community-events.update.failed', {
+        reason
+      }));
+    }
+    return true;
+  });
+}
+
+async function updateEventLifecycle(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  db: ReturnType<typeof eventsDatabase>;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  materialized: MaterializedEventLifecycle;
+  actorWid: string;
+  actorLabel: string;
+  requestedTitle: string;
+  sourcePluginId?: string | undefined;
+}): Promise<void> {
+  const now = new Date();
+  const updatedAt = now.toISOString();
+  updateEventStructuredData(input.db, {
+    eventId: input.event.id,
+    pollQuestion: input.materialized.pollQuestion,
+    pollOptions: input.materialized.pollOptions,
+    responseClasses: input.materialized.responseClasses,
+    answers: input.materialized.answers,
+    startsAt: input.materialized.startsAt.toISOString(),
+    startsAtUtc: input.materialized.startsAt.toISOString(),
+    timezone: input.event.timezone || input.config.timezone,
+    localDate: input.materialized.localDate,
+    ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
+    ...(input.materialized.place ? { place: input.materialized.place } : {}),
+    ...(input.materialized.style ? { style: input.materialized.style } : {}),
+    closeAt: input.materialized.closeAt.toISOString(),
+    cleanupAt: input.materialized.cleanupAt.toISOString(),
+    groupTitle: input.materialized.groupTitle,
+    calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+    ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
+    ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
+    updatedAt
+  });
+
+  if (input.event.subgroupChatId) {
+    const capabilities = await input.context.botCapabilitiesFor?.(input.event.subgroupChatId);
+    if (capabilities && (!capabilities.botIsAdmin || !capabilities.canChangeInfo || !capabilities.canSetSubject)) {
+      throw new Error('Bot cannot change the event subgroup subject.');
+    }
+    await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
+  }
+
+  const calendar = calendarResourceForProfile(input.config, input.profile);
+  const calendarEvents = listCalendarEvents(input.db, input.event.scopeId);
+  const publication = await writePublishAndRecordScopeCalendar({
+    appConfig: input.runtime.config,
+    db: input.db,
+    config: input.config,
+    scopeId: input.event.scopeId,
+    calendarId: input.profile.calendar.calendarId,
+    events: calendarEvents
+  });
+
+  if (
+    input.event.subgroupChatId &&
+    input.event.eventStatus === 'scheduled' &&
+    (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed') &&
+    input.materialized.cleanupAt.getTime() > now.getTime()
+  ) {
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.cleanup,
+      scopeId: input.event.scopeId,
+      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+      runAt: input.materialized.cleanupAt,
+      payload: { eventId: input.event.id, attempt: 0 },
+      dedupeKey: `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${input.materialized.cleanupAt.toISOString()}`
+    });
+  }
+
+  appendEventLog(input.db, {
+    eventId: input.event.id,
+    action: 'events.updated',
+    metadata: {
+      actorWid: input.actorWid,
+      actorLabel: input.actorLabel,
+      sourcePluginId: input.sourcePluginId,
+      requestedTitle: input.requestedTitle,
+      groupTitle: input.materialized.groupTitle,
+      answers: input.materialized.answers,
+      startsAt: input.materialized.startsAt.toISOString(),
+      localDate: input.materialized.localDate,
+      localTime: input.materialized.localTime,
+      calendarId: input.profile.calendar.calendarId,
+      publication
+    }
+  });
+  await appendEventJsonLog(input.context, {
+    action: 'event.updated',
+    scopeId: input.event.scopeId,
+    eventId: input.event.id,
+    actorWid: input.actorWid,
+    profileId: input.profile.id,
+    ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+    ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
+    metadata: {
+      calendarEnabled: calendar?.enabled === true,
+      calendarId: input.profile.calendar.calendarId,
+      sourcePluginId: input.sourcePluginId,
+      requestedTitle: input.requestedTitle,
+      groupTitle: input.materialized.groupTitle,
+      startsAt: input.materialized.startsAt.toISOString(),
+      localDate: input.materialized.localDate,
+      localTime: input.materialized.localTime,
+      ...(publication ? { publication } : {})
+    }
+  });
+}
+
+async function eventUpdateAllowed(
+  context: PluginCommandContext,
+  input: {
+    event: StoredEventRecord;
+    actorWids: string[];
+  }
+): Promise<boolean> {
+  const actorWids = uniqueEventWids(input.actorWids);
+  if (actorWids.includes(input.event.actorWid)) {
+    return true;
+  }
+  if (!context.explainPermission) {
+    return false;
+  }
+  for (const actorWid of actorWids) {
+    const decision = await context.explainPermission({
+      actorWid,
+      action: EVENTS_PERMISSIONS.manage,
+      scopeId: input.event.scopeId,
+      pluginId: EVENTS_PLUGIN_ID,
+      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+      requiresCurrentManagedGroupMembership: false
+    });
+    if (decision.allowed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfile): EventFlowPrefill {
+  const answers = { ...event.answers };
+  if (event.localDate) {
+    answers[profile.startsAtDateQuestionKey] = event.localDate;
+  }
+  if (event.localTime) {
+    answers[profile.startsAtTimeQuestionKey] = event.localTime;
+  }
+  return {
+    profileId: profile.id,
+    answers
+  };
 }
 
 function registerEventCancelFlowCompletionHandler(
@@ -720,7 +1137,12 @@ function registerEventFlowCompletionHandlers(
           responseClasses: materialized.responseClasses,
           answers: materialized.answers,
           startsAt: materialized.startsAt.toISOString(),
+          startsAtUtc: materialized.startsAt.toISOString(),
           timezone: draft.timezone,
+          localDate: materialized.localDate,
+          ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
+          ...(materialized.place ? { place: materialized.place } : {}),
+          ...(materialized.style ? { style: materialized.style } : {}),
           closeAt: materialized.closeAt.toISOString(),
           cleanupAt: materialized.cleanupAt.toISOString(),
           groupTitle: materialized.groupTitle,
@@ -741,14 +1163,9 @@ function registerEventFlowCompletionHandlers(
           });
           const calendar = calendarResourceForProfile(calendarConfig, profile);
           const calendarEvents = listCalendarEvents(db, draft.scopeId);
-          await writeScopeCalendar({
+          const publication = await writePublishAndRecordScopeCalendar({
             appConfig: runtime.config,
-            config: calendarConfig,
-            scopeId: draft.scopeId,
-            calendarId: profile.calendar.calendarId,
-            events: calendarEvents
-          });
-          const publication = await publishScopeCalendar({
+            db,
             config: calendarConfig,
             scopeId: draft.scopeId,
             calendarId: profile.calendar.calendarId,
@@ -872,7 +1289,12 @@ async function createUnplannedEventLifecycle(input: {
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
     startsAt: input.materialized.startsAt.toISOString(),
+    startsAtUtc: input.materialized.startsAt.toISOString(),
     timezone: input.draft.timezone,
+    localDate: input.materialized.localDate,
+    ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
+    ...(input.materialized.place ? { place: input.materialized.place } : {}),
+    ...(input.materialized.style ? { style: input.materialized.style } : {}),
     closeAt: input.materialized.closeAt.toISOString(),
     cleanupAt: input.materialized.cleanupAt.toISOString(),
     groupTitle: input.materialized.groupTitle,
@@ -907,14 +1329,9 @@ async function createUnplannedEventLifecycle(input: {
     const config = draftEventsConfig(input.draft);
     const calendar = calendarResourceForProfile(config, input.profile);
     const calendarEvents = listCalendarEvents(input.db, input.draft.scopeId);
-    await writeScopeCalendar({
+    const publication = await writePublishAndRecordScopeCalendar({
       appConfig: input.runtime.config,
-      config,
-      scopeId: input.draft.scopeId,
-      calendarId: input.profile.calendar.calendarId,
-      events: calendarEvents
-    });
-    const publication = await publishScopeCalendar({
+      db: input.db,
       config,
       scopeId: input.draft.scopeId,
       calendarId: input.profile.calendar.calendarId,
@@ -1005,7 +1422,11 @@ async function createUnplannedEventLifecycle(input: {
   });
 }
 
-function draftEventsConfig(draft: EventDraft) {
+function draftEventsConfig(draft: {
+  timezone: string;
+  calendars: EventCalendarResource[];
+  profiles: EventProfile[];
+}) {
   return parseEventsConfig({
     enabled: true,
     timezone: draft.timezone,
@@ -1261,4 +1682,8 @@ function eventDraftKey(scopeId: string, flowSessionId: string): string {
 
 function eventCancelDraftKey(scopeId: string, flowSessionId: string): string {
   return `event-cancel-draft:${scopeId}:${flowSessionId}`;
+}
+
+function eventUpdateDraftKey(scopeId: string, flowSessionId: string): string {
+  return `event-update-draft:${scopeId}:${flowSessionId}`;
 }

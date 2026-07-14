@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { CreatedGroupParticipantResult, PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
 
 export type EventStatus = 'scheduled' | 'cancelled' | 'failed';
@@ -41,7 +42,12 @@ export interface StoredEventRecord {
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
   startsAt: string;
+  startsAtUtc?: string | undefined;
   timezone: string;
+  localDate?: string | undefined;
+  localTime?: string | undefined;
+  place?: string | undefined;
+  style?: string | undefined;
   closeAt: string;
   cleanupAt: string;
   groupTitle: string;
@@ -81,6 +87,26 @@ export interface StoredCreatedGroupParticipant {
   createdAt: string;
 }
 
+export interface StoredCalendarPublicationStatus {
+  scopeId: string;
+  calendarId: string;
+  generatedAt: string;
+  generatedEventCount: number;
+  publicationEnabled: boolean;
+  attempted: boolean;
+  ok: boolean;
+  endpointUrl?: string | undefined;
+  feedId?: string | undefined;
+  label?: string | undefined;
+  downloadUrl?: string | undefined;
+  calendarUrl?: string | undefined;
+  targetUpdatedAt?: string | undefined;
+  lastSuccessAt?: string | undefined;
+  lastErrorAt?: string | undefined;
+  lastError?: string | undefined;
+  updatedAt: string;
+}
+
 interface EventRow extends PluginDatabaseRow {
   id: string;
   scope_id: string;
@@ -101,7 +127,12 @@ interface EventRow extends PluginDatabaseRow {
   response_classes_json: string;
   answers_json: string;
   starts_at: string;
+  starts_at_utc: string | null;
   timezone: string;
+  local_date: string | null;
+  local_time: string | null;
+  place: string | null;
+  style: string | null;
   close_at: string;
   cleanup_at: string;
   group_title: string;
@@ -131,6 +162,26 @@ interface VoteRow extends PluginDatabaseRow {
   updated_at: string;
 }
 
+interface CalendarPublicationStatusRow extends PluginDatabaseRow {
+  scope_id: string;
+  calendar_id: string;
+  generated_at: string;
+  generated_event_count: number;
+  publication_enabled: number;
+  attempted: number;
+  ok: number;
+  endpoint_url: string | null;
+  feed_id: string | null;
+  label: string | null;
+  download_url: string | null;
+  calendar_url: string | null;
+  target_updated_at: string | null;
+  last_success_at: string | null;
+  last_error_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
 export function eventsDatabase(registry: PluginDatabaseRegistry | undefined): PluginDatabase {
   if (!registry) {
     throw new Error('official.community-events requires its plugin database registry.');
@@ -148,11 +199,12 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
       id, scope_id, group_id, group_wid, profile_id, profile_label, origin,
       event_status, group_lifecycle_status, calendar_status, actor_wid, actor_label,
       announcement_group_wid, poll_wa_msg_id, poll_question, poll_options_json, response_classes_json,
-      answers_json, starts_at, timezone, close_at, cleanup_at, group_title,
+      answers_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
+      close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -172,7 +224,12 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
     JSON.stringify(event.responseClasses),
     JSON.stringify(event.answers),
     event.startsAt,
+    event.startsAtUtc || event.startsAt,
     event.timezone,
+    event.localDate ?? null,
+    event.localTime ?? null,
+    event.place ?? null,
+    event.style ?? null,
     event.closeAt,
     event.cleanupAt,
     event.groupTitle,
@@ -190,6 +247,72 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
     event.cancelledByLabel ?? null,
     event.cancelReason ?? null,
     event.error ?? null
+  );
+}
+
+export function updateEventStructuredData(db: PluginDatabase, input: {
+  eventId: string;
+  pollQuestion: string;
+  pollOptions: StoredEventPollOption[];
+  responseClasses: StoredEventResponseClass[];
+  answers: Record<string, string>;
+  startsAt: string;
+  startsAtUtc: string;
+  timezone: string;
+  localDate: string;
+  localTime?: string | undefined;
+  place?: string | undefined;
+  style?: string | undefined;
+  closeAt: string;
+  cleanupAt: string;
+  groupTitle: string;
+  calendarDurationMinutes: number;
+  calendarLocation?: string | undefined;
+  calendarDescription?: string | undefined;
+  updatedAt: string;
+}): void {
+  db.run(
+    `UPDATE event_records
+        SET poll_question = ?,
+            poll_options_json = ?,
+            response_classes_json = ?,
+            answers_json = ?,
+            starts_at = ?,
+            starts_at_utc = ?,
+            timezone = ?,
+            local_date = ?,
+            local_time = ?,
+            place = ?,
+            style = ?,
+            close_at = ?,
+            cleanup_at = ?,
+            group_title = ?,
+            subgroup_title = CASE WHEN subgroup_chat_id IS NOT NULL THEN ? ELSE subgroup_title END,
+            calendar_duration_minutes = ?,
+            calendar_location = ?,
+            calendar_description = ?,
+            updated_at = ?
+      WHERE id = ?`,
+    input.pollQuestion,
+    JSON.stringify(input.pollOptions),
+    JSON.stringify(input.responseClasses),
+    JSON.stringify(input.answers),
+    input.startsAt,
+    input.startsAtUtc,
+    input.timezone,
+    input.localDate,
+    input.localTime ?? null,
+    input.place ?? null,
+    input.style ?? null,
+    input.closeAt,
+    input.cleanupAt,
+    input.groupTitle,
+    input.groupTitle,
+    input.calendarDurationMinutes,
+    input.calendarLocation ?? null,
+    input.calendarDescription ?? null,
+    input.updatedAt,
+    input.eventId
   );
 }
 
@@ -406,6 +529,85 @@ export function appendEventLog(db: PluginDatabase, input: {
   );
 }
 
+export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
+  scopeId: string;
+  calendarId: string;
+  generatedAt: string;
+  generatedEventCount: number;
+  publication?: CalendarPublicationOutcome | undefined;
+}): void {
+  const publication = input.publication;
+  const updatedAt = new Date().toISOString();
+  const lastSuccessAt = publication?.ok ? publication.updatedAt || updatedAt : null;
+  const lastErrorAt = publication && !publication.ok ? updatedAt : null;
+  const lastError = publication && !publication.ok ? publication.error || 'Calendar publication failed.' : null;
+  db.run(
+    `INSERT INTO event_calendar_publication_status (
+       scope_id, calendar_id, generated_at, generated_event_count,
+       publication_enabled, attempted, ok, endpoint_url, feed_id, label,
+       download_url, calendar_url, target_updated_at, last_success_at,
+       last_error_at, last_error, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(scope_id, calendar_id) DO UPDATE SET
+       generated_at = excluded.generated_at,
+       generated_event_count = excluded.generated_event_count,
+       publication_enabled = excluded.publication_enabled,
+       attempted = excluded.attempted,
+       ok = excluded.ok,
+       endpoint_url = excluded.endpoint_url,
+       feed_id = excluded.feed_id,
+       label = excluded.label,
+       download_url = COALESCE(excluded.download_url, event_calendar_publication_status.download_url),
+       calendar_url = COALESCE(excluded.calendar_url, event_calendar_publication_status.calendar_url),
+       target_updated_at = COALESCE(excluded.target_updated_at, event_calendar_publication_status.target_updated_at),
+       last_success_at = CASE
+         WHEN excluded.last_success_at IS NOT NULL THEN excluded.last_success_at
+         ELSE event_calendar_publication_status.last_success_at
+       END,
+       last_error_at = CASE
+         WHEN excluded.last_error_at IS NOT NULL THEN excluded.last_error_at
+         WHEN excluded.ok = 1 THEN NULL
+         ELSE event_calendar_publication_status.last_error_at
+       END,
+       last_error = CASE
+         WHEN excluded.last_error IS NOT NULL THEN excluded.last_error
+         WHEN excluded.ok = 1 THEN NULL
+         ELSE event_calendar_publication_status.last_error
+       END,
+       updated_at = excluded.updated_at`,
+    input.scopeId,
+    input.calendarId,
+    input.generatedAt,
+    input.generatedEventCount,
+    publication?.enabled ? 1 : 0,
+    publication?.attempted ? 1 : 0,
+    publication ? (publication.ok ? 1 : 0) : 0,
+    publication?.endpointUrl || null,
+    publication?.feedId || null,
+    publication?.label || null,
+    publication?.downloadUrl || null,
+    publication?.calendarUrl || null,
+    publication?.updatedAt || null,
+    lastSuccessAt,
+    lastErrorAt,
+    lastError,
+    updatedAt
+  );
+}
+
+export function getCalendarPublicationStatus(
+  db: PluginDatabase,
+  scopeId: string,
+  calendarId: string
+): StoredCalendarPublicationStatus | undefined {
+  const row = db.get<CalendarPublicationStatusRow>(
+    'SELECT * FROM event_calendar_publication_status WHERE scope_id = ? AND calendar_id = ?',
+    scopeId,
+    calendarId
+  );
+  return row ? calendarPublicationStatusFromRow(row) : undefined;
+}
+
 export function listCalendarEvents(db: PluginDatabase, scopeId: string, profileId?: string | undefined): StoredEventRecord[] {
   const rows = profileId
     ? db.all<EventRow>(
@@ -445,7 +647,12 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
     answers: parseJson<Record<string, string>>(row.answers_json, {}),
     startsAt: row.starts_at,
+    startsAtUtc: row.starts_at_utc || row.starts_at,
     timezone: row.timezone,
+    ...(row.local_date ? { localDate: row.local_date } : {}),
+    ...(row.local_time ? { localTime: row.local_time } : {}),
+    ...(row.place ? { place: row.place } : {}),
+    ...(row.style ? { style: row.style } : {}),
     closeAt: row.close_at,
     cleanupAt: row.cleanup_at,
     groupTitle: row.group_title,
@@ -474,6 +681,28 @@ function voteFromRow(row: VoteRow): StoredEventVote {
     selectedOptionNames: parseJson<string[]>(row.selected_option_names_json, []),
     selectedOptionNumbers: parseJson<number[]>(row.selected_option_numbers_json, []),
     ...(row.interacted_at ? { interactedAt: row.interacted_at } : {}),
+    updatedAt: row.updated_at
+  };
+}
+
+function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): StoredCalendarPublicationStatus {
+  return {
+    scopeId: row.scope_id,
+    calendarId: row.calendar_id,
+    generatedAt: row.generated_at,
+    generatedEventCount: Number(row.generated_event_count),
+    publicationEnabled: row.publication_enabled === 1,
+    attempted: row.attempted === 1,
+    ok: row.ok === 1,
+    ...(row.endpoint_url ? { endpointUrl: row.endpoint_url } : {}),
+    ...(row.feed_id ? { feedId: row.feed_id } : {}),
+    ...(row.label ? { label: row.label } : {}),
+    ...(row.download_url ? { downloadUrl: row.download_url } : {}),
+    ...(row.calendar_url ? { calendarUrl: row.calendar_url } : {}),
+    ...(row.target_updated_at ? { targetUpdatedAt: row.target_updated_at } : {}),
+    ...(row.last_success_at ? { lastSuccessAt: row.last_success_at } : {}),
+    ...(row.last_error_at ? { lastErrorAt: row.last_error_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
     updatedAt: row.updated_at
   };
 }

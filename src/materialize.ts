@@ -14,6 +14,10 @@ export interface MaterializedEventLifecycle {
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
   startsAt: Date;
+  localDate: string;
+  localTime?: string | undefined;
+  place?: string | undefined;
+  style?: string | undefined;
   closeAt: Date;
   cleanupAt: Date;
   calendarDurationMinutes: number;
@@ -67,6 +71,10 @@ export function materializeEventLifecycle(input: {
     })),
     answers: answers.answers,
     startsAt: answers.startsAt,
+    localDate: answers.localDate,
+    ...(answers.localTime ? { localTime: answers.localTime } : {}),
+    ...(answers.answers.place ? { place: answers.answers.place } : {}),
+    ...(answers.answers.style ? { style: answers.answers.style } : {}),
     closeAt,
     cleanupAt,
     calendarDurationMinutes: profile.calendar.durationMinutes,

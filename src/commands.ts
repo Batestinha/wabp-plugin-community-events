@@ -7,6 +7,7 @@ import type { PrivateDeliveryFallback } from '../../../platform/transport/transp
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
+import { eventsCalendarSubscriptionUrl } from './calendarSubscription';
 import { formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import {
@@ -1117,7 +1118,7 @@ function registerEventFlowCompletionHandlers(
         if (!sent?.messageId) {
           throw new Error('doas poll publisher did not return a message id');
         }
-        insertEvent(db, {
+        const event: StoredEventRecord = {
           id: eventId,
           scopeId: draft.scopeId,
           ...(draft.groupId ? { groupId: draft.groupId } : {}),
@@ -1151,7 +1152,8 @@ function registerEventFlowCompletionHandlers(
           ...(materialized.calendarDescription ? { calendarDescription: materialized.calendarDescription } : {}),
           createdAt: now.toISOString(),
           updatedAt: now.toISOString()
-        });
+        };
+        insertEvent(db, event);
         try {
           const calendarConfig = parseEventsConfig({
             enabled: true,
@@ -1222,6 +1224,21 @@ function registerEventFlowCompletionHandlers(
           runAt: materialized.closeAt,
           payload: { eventId },
           dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
+        });
+        await sendEventCalendarHint({
+          context,
+          runtime,
+          activeTransport,
+          trigger: 'poll_published',
+          scopeId: draft.scopeId,
+          announcementGroupWid,
+          event,
+          profile,
+          calendars: draft.calendars,
+          materialized,
+          timezone: draft.timezone,
+          locale: draft.locale,
+          creatorDisplayName: draft.actorLabel || draft.actorWid
         });
         await activeTransport.sendText(responseChatId, t('official.community-events.pollPublished'));
       } catch (error) {
@@ -1420,6 +1437,178 @@ async function createUnplannedEventLifecycle(input: {
       groupJoinUrl
     }
   });
+  await sendEventCalendarHint({
+    context: input.context,
+    runtime: input.runtime,
+    activeTransport: input.activeTransport,
+    trigger: 'unplanned_created',
+    scopeId: input.draft.scopeId,
+    announcementGroupWid: input.announcementGroupWid,
+    event,
+    profile: input.profile,
+    calendars: input.draft.calendars,
+    materialized: input.materialized,
+    timezone: input.draft.timezone,
+    locale: input.draft.locale,
+    creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
+    groupJoinUrl,
+    subgroupChatId: created.chatId
+  });
+}
+
+type CalendarHintTrigger = 'poll_published' | 'unplanned_created';
+
+async function sendEventCalendarHint(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  trigger: CalendarHintTrigger;
+  scopeId: string;
+  announcementGroupWid: string;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  calendars: EventCalendarResource[];
+  materialized: MaterializedEventLifecycle;
+  timezone: string;
+  locale: string;
+  creatorDisplayName: string;
+  groupJoinUrl?: string | undefined;
+  subgroupChatId?: string | undefined;
+}): Promise<void> {
+  const hint = input.profile.calendar.hint;
+  const enabled = input.trigger === 'poll_published'
+    ? hint.sendOnPollPublished
+    : hint.sendOnUnplannedCreated;
+  if (!enabled) {
+    return;
+  }
+  const template = hint.template.trim();
+  const calendarId = input.profile.calendar.calendarId.trim();
+  try {
+    const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;
+    if (!template) {
+      await recordCalendarHintSkipped(input, 'empty_template', calendarId);
+      return;
+    }
+    if (!calendarId || !calendar) {
+      await recordCalendarHintSkipped(input, 'calendar_not_configured', calendarId);
+      return;
+    }
+    if (!calendar.enabled) {
+      await recordCalendarHintSkipped(input, 'calendar_disabled', calendarId);
+      return;
+    }
+    const origin = operatorConsolePublicOriginForRuntime(input.runtime.config);
+    const subscriptionUrl = eventsCalendarSubscriptionUrl({
+      operatorConsolePublicOrigin: origin,
+      runtimeBindingId: input.runtime.config.RUNTIME_BINDING_ID,
+      scopeId: input.scopeId,
+      calendarId,
+      token: calendar.subscriptionToken
+    });
+    if (!subscriptionUrl) {
+      await recordCalendarHintSkipped(input, 'subscription_url_unavailable', calendarId, {
+        tokenConfigured: Boolean(calendar.subscriptionToken.trim()),
+        runtimeBindingIdConfigured: Boolean(input.runtime.config.RUNTIME_BINDING_ID.trim()),
+        operatorConsolePublicOriginConfigured: Boolean(origin)
+      });
+      return;
+    }
+    const groupJoinUrl = input.groupJoinUrl ||
+      (input.subgroupChatId && templateUsesToken(template, 'groupJoinUrl')
+        ? await unplannedGroupJoinUrl(input.context, template, input.subgroupChatId)
+        : '');
+    const text = renderEventTemplate({
+      template,
+      profile: input.profile,
+      answers: input.materialized.answers,
+      startsAt: input.materialized.startsAt,
+      timezone: input.timezone,
+      locale: input.locale,
+      creatorDisplayName: input.creatorDisplayName,
+      extraTokens: {
+        eventId: input.event.id,
+        groupDisplayName: input.event.groupTitle || input.materialized.groupTitle,
+        groupJoinUrl,
+        subgroupChatId: input.subgroupChatId ?? input.event.subgroupChatId,
+        calendarId: calendar.id,
+        calendarDisplayName: calendar.label || calendar.id,
+        calendarSubscriptionUrl: subscriptionUrl
+      }
+    }).trim();
+    if (!text) {
+      await recordCalendarHintSkipped(input, 'empty_rendered_text', calendarId);
+      return;
+    }
+    const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
+    await appendEventJsonLog(input.context, {
+      action: 'event.calendar_hint_sent',
+      scopeId: input.scopeId,
+      eventId: input.event.id,
+      actorWid: input.event.actorWid,
+      profileId: input.profile.id,
+      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+      ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
+      metadata: {
+        trigger: input.trigger,
+        announcementGroupWid: input.announcementGroupWid,
+        calendarId,
+        messageId: sent.messageId
+      }
+    });
+  } catch (error) {
+    await appendEventJsonLog(input.context, {
+      action: 'event.calendar_hint_failed',
+      scopeId: input.scopeId,
+      eventId: input.event.id,
+      actorWid: input.event.actorWid,
+      profileId: input.profile.id,
+      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+      ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
+      metadata: {
+        trigger: input.trigger,
+        announcementGroupWid: input.announcementGroupWid,
+        calendarId,
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    });
+  }
+}
+
+async function recordCalendarHintSkipped(
+  input: {
+    context: PluginCommandContext;
+    trigger: CalendarHintTrigger;
+    scopeId: string;
+    announcementGroupWid: string;
+    event: StoredEventRecord;
+    profile: EventProfile;
+  },
+  reason: string,
+  calendarId: string,
+  metadata: Record<string, unknown> = {}
+): Promise<void> {
+  await appendEventJsonLog(input.context, {
+    action: 'event.calendar_hint_skipped',
+    scopeId: input.scopeId,
+    eventId: input.event.id,
+    actorWid: input.event.actorWid,
+    profileId: input.profile.id,
+    ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+    ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
+    metadata: {
+      trigger: input.trigger,
+      announcementGroupWid: input.announcementGroupWid,
+      calendarId,
+      reason,
+      ...metadata
+    }
+  });
+}
+
+function operatorConsolePublicOriginForRuntime(config: OfficialPluginCommandRuntime['config']): string {
+  const configured = (config as unknown as Record<string, unknown>).OPERATOR_CONSOLE_PUBLIC_ORIGIN;
+  return (typeof configured === 'string' ? configured : process.env.OPERATOR_CONSOLE_PUBLIC_ORIGIN ?? '').trim();
 }
 
 function draftEventsConfig(draft: {

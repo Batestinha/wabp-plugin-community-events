@@ -8,7 +8,9 @@ export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_UNPLANNED_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
+export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
+export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = "Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName}'s calendar by tapping this link: {calendarSubscriptionUrl}";
 
 export const eventQuestionChoiceSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
@@ -111,7 +113,12 @@ const eventProfileObjectSchema = z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
     locationQuestionKey: z.string().trim().min(1).optional(),
-    descriptionTemplate: z.string().trim().optional()
+    descriptionTemplate: z.string().trim().optional(),
+    hint: z.object({
+      sendOnPollPublished: z.boolean().default(false),
+      sendOnUnplannedCreated: z.boolean().default(false),
+      template: z.string().trim().min(1).default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
+    }).strict().default({})
   }).strict().default({})
 }).strict().superRefine((profile, ctx) => {
   const questionKeys = new Set(profile.questions.map((question) => question.key));
@@ -199,12 +206,17 @@ const eventProfileObjectSchema = z.object({
     ...templateTokens,
     ...EVENT_UNPLANNED_TEMPLATE_TOKENS
   ]);
+  const calendarHintTemplateTokens = new Set([
+    ...templateTokens,
+    ...EVENT_CALENDAR_HINT_TEMPLATE_TOKENS
+  ]);
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
   validateEventTemplate(profile.unplanned.announcementTemplate, unplannedTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
   if (profile.calendar.descriptionTemplate) {
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
+  validateEventTemplate(profile.calendar.hint.template, calendarHintTemplateTokens, ['calendar', 'hint', 'template'], ctx);
 });
 
 export const eventProfileSchema = z.preprocess(normalizeEventProfileInput, eventProfileObjectSchema);
@@ -251,7 +263,12 @@ export const defaultClimbingEventProfile: EventProfile = {
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,
     durationMinutes: 240,
-    locationQuestionKey: 'place'
+    locationQuestionKey: 'place',
+    hint: {
+      sendOnPollPublished: false,
+      sendOnUnplannedCreated: false,
+      template: DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE
+    }
   }
 };
 
@@ -383,6 +400,17 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
         defaultClimbingEventProfile.unplanned.announcementTemplate,
         () => t('official.community-events.profile.climbing.unplanned.announcementTemplate')
       )
+    },
+    calendar: {
+      ...profile.calendar,
+      hint: {
+        ...profile.calendar.hint,
+        template: localizeIfDefault(
+          profile.calendar.hint.template,
+          defaultClimbingEventProfile.calendar.hint.template,
+          () => t('official.community-events.profile.climbing.calendar.hint.template')
+        )
+      }
     }
   };
 }

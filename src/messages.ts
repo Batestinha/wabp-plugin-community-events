@@ -70,6 +70,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.profile.climbing.poll.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy} By: {creatorDisplayName}',
   'official.community-events.profile.climbing.group.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
   'official.community-events.profile.climbing.unplanned.announcementTemplate': '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
+  'official.community-events.profile.climbing.calendar.hint.template': "Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName}'s calendar by tapping this link: {calendarSubscriptionUrl}",
   'official.community-events.profile.climbing.responseClass.event_group_member': 'Event group member',
   'official.community-events.profile.climbing.poll.option.going': "I'm going ✅",
   'official.community-events.profile.climbing.poll.option.ride': "I want to go, but I'll need a ride 🚗",

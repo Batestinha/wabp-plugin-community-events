@@ -5,6 +5,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.disabled': 'Events are disabled for this scope.',
   'official.community-events.notConfigured': 'Events are not configured for this scope.',
   'official.community-events.startedPrivate': 'I sent you a private message to finish creating the event.',
+  'official.community-events.startedInGroupFallback': 'I could not message you privately, so I started event setup here.',
   'official.community-events.started': 'Event setup started.',
   'official.community-events.privateStartFailed': 'I could not send the private event setup message. Start a private chat with me and try /event again.',
   'official.community-events.startFailed': 'I could not start the event setup. Try again in a moment.',

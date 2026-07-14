@@ -176,8 +176,9 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
       }
     : ctx.message;
   let flowSessionId: string;
+  let usedPrivateDeliveryFallback = false;
   try {
-    flowSessionId = await context.flowEngine.startFlow({
+    const flowStart = await context.flowEngine.startFlow({
       definition,
       message: flowMessage,
       scopeId,
@@ -186,6 +187,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
       initialData,
       ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
+    flowSessionId = flowStart.flowSessionId;
+    usedPrivateDeliveryFallback = Boolean(flowStart.privateDeliveryFallback);
   } catch {
     return {
       handled: true,
@@ -213,9 +216,15 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     createdAt: new Date().toISOString()
   };
   await runtime.dataStore.set(eventDraftKey(scopeId, flowSessionId), draft);
-  return ctx.message.context === 'group'
-    ? { handled: true, text: ctx.t('official.community-events.startedPrivate') }
-    : { handled: true, response: { kind: 'none' as const } };
+  if (ctx.message.context !== 'group') {
+    return { handled: true, response: { kind: 'none' as const } };
+  }
+  return {
+    handled: true,
+    text: ctx.t(usedPrivateDeliveryFallback
+      ? 'official.community-events.startedInGroupFallback'
+      : 'official.community-events.startedPrivate')
+  };
 }
 
 async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandContext) {
@@ -254,13 +263,14 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
 
   let flowSessionId: string;
   try {
-    flowSessionId = await context.flowEngine.startFlow({
+    const flowStart = await context.flowEngine.startFlow({
       definition,
       message: ctx.message,
       scopeId,
       ...(preselectedEventId ? { initialData: { [EVENT_CANCEL_SELECT_STEP_ID]: preselectedEventId } } : {}),
       ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
+    flowSessionId = flowStart.flowSessionId;
   } catch {
     return { handled: true, text: ctx.t('official.community-events.cancel.startFailed') };
   }
@@ -1134,7 +1144,13 @@ function privateFlowDeliveryFallback(ctx: CommandContext, actorWids: string[]): 
     return undefined;
   }
   const mentionWid = eventMentionWid(actorWids);
-  return mentionWid ? { chatId: groupWid, mentionedWids: [mentionWid] } : undefined;
+  return mentionWid
+    ? {
+        chatId: groupWid,
+        mentionedWids: [mentionWid],
+        ...(ctx.message.context === 'group' ? { quotedMessageId: ctx.message.id } : {})
+      }
+    : undefined;
 }
 
 function eventPrivateChatWid(actorWids: string[], preferredWid?: string | undefined): string | undefined {

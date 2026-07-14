@@ -22,7 +22,7 @@ function control(
     configurable,
     storage: { kind: 'plugin-scope-config', pluginId: 'official.community-events', path },
     schema,
-    ui,
+    ui: { helpText: description, ...ui },
     restartRequirement: 'NO_RESTART',
     dangerous: false,
     sensitivity: { sensitive: false, redact: 'none' },

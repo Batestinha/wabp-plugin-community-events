@@ -11,6 +11,7 @@ export interface CalendarPublicationOutcome {
   endpointUrl: string;
   feedId: string;
   label: string;
+  subscriptionUrl?: string | undefined;
   downloadUrl?: string | undefined;
   calendarUrl?: string | undefined;
   updatedAt?: string | undefined;
@@ -64,6 +65,7 @@ export async function publishCalendarBody(input: {
       endpointUrl: target.endpointUrl,
       feedId: target.feedId,
       label: target.label,
+      subscriptionUrl: result.subscriptionUrl || undefined,
       downloadUrl: result.downloadUrl || target.downloadUrl || undefined,
       calendarUrl: result.calendarUrl || target.calendarUrl || undefined,
       updatedAt: result.updatedAt || undefined
@@ -113,7 +115,7 @@ export function calendarPublicationTarget(
 async function postCalendarPublication(
   target: ReturnType<typeof calendarPublicationTarget>,
   icsBody: string
-): Promise<{ downloadUrl: string; calendarUrl: string; updatedAt: string }> {
+): Promise<{ subscriptionUrl: string; downloadUrl: string; calendarUrl: string; updatedAt: string }> {
   const body = new URLSearchParams();
   if (target.secret) {
     body.set(target.secretFieldName, target.secret);
@@ -145,6 +147,7 @@ async function postCalendarPublication(
     throw new Error(publicationErrorMessage(payload) || 'Calendar publisher rejected the update.');
   }
   return {
+    subscriptionUrl: stringField(result, 'subscriptionUrl') || stringField(result, 'subscription_url'),
     downloadUrl: stringField(result, 'downloadUrl') || stringField(result, 'download_url'),
     calendarUrl: stringField(result, 'calendarUrl') || stringField(result, 'calendar_url'),
     updatedAt: stringField(result, 'updatedAt') || stringField(result, 'updated_on')

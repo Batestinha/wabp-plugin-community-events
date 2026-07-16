@@ -1,0 +1,1 @@
+ALTER TABLE event_calendar_publication_status ADD COLUMN subscription_url TEXT;

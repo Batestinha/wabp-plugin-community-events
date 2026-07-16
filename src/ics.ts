@@ -26,7 +26,8 @@ export async function writeScopeCalendar(input: {
 }
 
 export function renderScopeCalendar(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): string {
-  return renderIcs(scopeCalendarEvents(config, calendarId, events));
+  const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
+  return renderIcs(scopeCalendarEvents(config, calendarId, events), new Date(), calendar?.label || calendarId);
 }
 
 export function scopeCalendarEvents(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): StoredEventRecord[] {
@@ -55,17 +56,19 @@ export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarR
   return resolved;
 }
 
-export function renderIcs(events: StoredEventRecord[], now = new Date()): string {
+export function renderIcs(events: StoredEventRecord[], now = new Date(), calendarName = 'Events'): string {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//whatsapp-bot-platform//official.community-events//EN',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
+    `X-WR-CALNAME:${escapeText(calendarName)}`,
+    `NAME:${escapeText(calendarName)}`,
     ...events.flatMap((event) => renderEvent(event, now)),
     'END:VCALENDAR'
   ];
-  return `${lines.join('\r\n')}\r\n`;
+  return `${lines.flatMap(foldIcsLine).join('\r\n')}\r\n`;
 }
 
 function renderEvent(event: StoredEventRecord, now: Date): string[] {
@@ -97,6 +100,34 @@ function escapeText(value: string): string {
     .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
     .replace(/\r?\n/g, '\\n');
+}
+
+function foldIcsLine(line: string): string[] {
+  if (Buffer.byteLength(line, 'utf8') <= 75) {
+    return [line];
+  }
+
+  const folded: string[] = [];
+  let remaining = line;
+  let first = true;
+  while (remaining.length > 0) {
+    const maxBytes = first ? 75 : 74;
+    let index = 0;
+    let bytes = 0;
+    for (const char of remaining) {
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (bytes + charBytes > maxBytes) {
+        break;
+      }
+      bytes += charBytes;
+      index += char.length;
+    }
+    const chunk = remaining.slice(0, Math.max(index, 1));
+    folded.push(first ? chunk : ` ${chunk}`);
+    remaining = remaining.slice(chunk.length);
+    first = false;
+  }
+  return folded;
 }
 
 function safeRelativeDirectory(input: string): string {

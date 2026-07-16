@@ -7,6 +7,7 @@ import type {
 } from '../../../platform/pluginRuntime/types';
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -18,6 +19,7 @@ import {
   getEvent,
   getActiveEventBySubgroup,
   getEventByPoll,
+  listPendingCleanupEvents,
   listCalendarEvents,
   listVotes,
   markEventCleanupFailed,
@@ -33,6 +35,9 @@ import {
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
 export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeHooks {
+  void recoverEventCleanupJobs(context).catch((error) => {
+    context.logger.error({ error }, 'official.community-events cleanup recovery failed');
+  });
   return {
     async onPollVote(event) {
       await handlePollVote(context, event);
@@ -44,6 +49,30 @@ export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeH
       await handleGroupDecommissioned(context, event);
     }
   };
+}
+
+export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const records = listPendingCleanupEvents(db);
+  let enqueued = 0;
+  for (const record of records) {
+    const cleanupAt = new Date(record.cleanupAt);
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.cleanup,
+      scopeId: record.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      ...(Number.isFinite(cleanupAt.getTime()) ? { runAt: cleanupAt } : {}),
+      payload: { eventId: record.id, attempt: 0 },
+      dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:startup:${record.cleanupAt}:${record.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  if (enqueued > 0) {
+    context.logger.info({ enqueued }, 'Recovered official.community-events cleanup jobs');
+  }
+  return enqueued;
 }
 
 async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVotePluginEvent): Promise<void> {
@@ -303,8 +332,8 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
         chatId: record.subgroupChatId,
         reason: 'event cleanup'
       });
-      if (decommissionResult.failedRemovals.length > 0) {
-        return cleanupFailed(context, db, record, config, attempt, partialCleanupReason(decommissionResult), {
+      if (!decommissionCompleted(decommissionResult)) {
+        return cleanupFailed(context, db, record, config, attempt, decommissionIncompleteReason(decommissionResult), {
           decommissionResult,
           retryable: true
         });
@@ -521,7 +550,19 @@ function partialCleanupReason(result: PluginGroupDecommissionResult): string {
   }`;
 }
 
-function decommissionCompleted(result: PluginGroupDecommissionedEvent['result']): boolean {
+function decommissionIncompleteReason(result: PluginGroupDecommissionResult): string {
+  const reasons = [
+    ...(result.failedRemovals.length > 0 ? [partialCleanupReason(result)] : []),
+    ...(result.leaveFailed ? [`failed to leave subgroup: ${result.leaveFailed}`] : []),
+    ...(result.chatDeleteFailed ? [`failed to delete subgroup chat: ${result.chatDeleteFailed}`] : []),
+    ...(result.managementMarkLeftFailed ? [`failed to mark subgroup left: ${result.managementMarkLeftFailed}`] : [])
+  ];
+  return reasons.length > 0
+    ? reasons.join('; ')
+    : 'subgroup was not left, deleted, or marked left after decommission';
+}
+
+function decommissionCompleted(result: { left: boolean; chatDeleted: boolean; managementMarkedLeft?: boolean | undefined }): boolean {
   return result.left || result.chatDeleted || result.managementMarkedLeft === true;
 }
 

@@ -375,6 +375,15 @@ export function listCancellableEvents(db: PluginDatabase, scopeId: string): Stor
   ).map(eventFromRow);
 }
 
+export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE event_status = 'scheduled'
+        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+      ORDER BY cleanup_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
 export function markEventClosed(db: PluginDatabase, input: {
   eventId: string;
   subgroupChatId?: string | undefined;
@@ -395,7 +404,7 @@ export function markEventClosed(db: PluginDatabase, input: {
 
 export function markEventCleaned(db: PluginDatabase, eventId: string, cleanedAt: string): void {
   db.run(
-    `UPDATE event_records SET group_lifecycle_status = 'cleaned', cleaned_at = ?, updated_at = ? WHERE id = ?`,
+    `UPDATE event_records SET group_lifecycle_status = 'cleaned', cleaned_at = ?, error = NULL, updated_at = ? WHERE id = ?`,
     cleanedAt,
     cleanedAt,
     eventId

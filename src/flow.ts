@@ -386,7 +386,9 @@ function optionalQuestionPromptSuffix(t: TranslateFn, profile: EventProfile, que
   if (question.required) {
     return '';
   }
-  return profile.optionalPromptSuffix.trim() || t('official.community-events.flow.optionalPromptSuffix');
+  return profile.optionalPromptSuffix.trim()
+    ? profile.optionalPromptSuffix
+    : t('official.community-events.flow.optionalPromptSuffix');
 }
 
 function resolveDateQuestionInput(input: {

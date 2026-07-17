@@ -91,7 +91,7 @@ const eventProfileObjectSchema = z.object({
   permissionSuffix: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).optional(),
   allowScopeMemberCreation: z.boolean().default(false),
   announcementGroupWid: z.string().trim().optional().default(''),
-  optionalPromptSuffix: z.string().trim().max(500).default(''),
+  optionalPromptSuffix: z.string().max(500).default(''),
   startsAtDateQuestionKey: z.string().trim().min(1).default('startDate'),
   startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
   questions: z.array(eventQuestionSchema).min(1),

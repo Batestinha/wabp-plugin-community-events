@@ -12,6 +12,9 @@ export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = "Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName}'s calendar by tapping this link: {calendarSubscriptionUrl}";
 
+const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');
+const optionalAuthoredTextSchema = z.string().transform((value) => value.trim() ? value : '');
+
 export const eventQuestionChoiceSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
   label: z.string().trim().min(1)
@@ -96,28 +99,28 @@ const eventProfileObjectSchema = z.object({
   startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
   questions: z.array(eventQuestionSchema).min(1),
   poll: z.object({
-    titleTemplate: z.string().trim().min(1),
+    titleTemplate: authoredTextSchema,
     responseClasses: z.array(eventResponseClassSchema).min(1).max(12),
     options: z.array(eventPollOptionSchema).min(1).max(12),
     allowMultipleAnswers: z.boolean().default(false),
     closeOffsetHoursBeforeStart: z.number().int().min(0).max(24 * 30).default(8)
   }).strict(),
   group: z.object({
-    titleTemplate: z.string().trim().min(1),
+    titleTemplate: authoredTextSchema,
     cleanupOffsetHoursAfterStart: z.number().int().min(0).max(24 * 365).default(48)
   }).strict(),
   unplanned: z.object({
-    announcementTemplate: z.string().trim().min(1).default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}')
+    announcementTemplate: authoredTextSchema.default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}')
   }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
     locationQuestionKey: z.string().trim().min(1).optional(),
-    descriptionTemplate: z.string().trim().optional(),
+    descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
       sendOnPollPublished: z.boolean().default(false),
       sendOnUnplannedCreated: z.boolean().default(false),
-      template: z.string().trim().min(1).default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
+      template: authoredTextSchema.default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
     }).strict().default({})
   }).strict().default({})
 }).strict().superRefine((profile, ctx) => {

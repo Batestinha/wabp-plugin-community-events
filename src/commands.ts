@@ -1483,7 +1483,7 @@ async function sendEventCalendarHint(input: {
   if (!enabled) {
     return;
   }
-  const template = hint.template.trim();
+  const template = hint.template.trim() ? hint.template : '';
   const calendarId = input.profile.calendar.calendarId.trim();
   try {
     const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;

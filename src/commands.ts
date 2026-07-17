@@ -6,7 +6,7 @@ import type { PluginCommandContext, PluginGroupTitleChangeIntent } from '../../.
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
-import { DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE, calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
+import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { eventsCalendarSubscriptionUrl } from './calendarSubscription';
 import { formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
@@ -1098,7 +1098,6 @@ function registerEventFlowCompletionHandlers(
             eventId,
             draft,
             profile,
-            t,
             announcementGroupWid,
             materialized,
             now
@@ -1240,7 +1239,6 @@ function registerEventFlowCompletionHandlers(
           materialized,
           timezone: draft.timezone,
           locale: draft.locale,
-          t,
           creatorDisplayName: draft.actorLabel || draft.actorWid
         });
         await activeTransport.sendText(responseChatId, t('official.community-events.pollPublished'));
@@ -1277,7 +1275,6 @@ async function createUnplannedEventLifecycle(input: {
   eventId: string;
   draft: EventDraft;
   profile: EventProfile;
-  t: CommandContext['t'];
   announcementGroupWid: string;
   materialized: MaterializedEventLifecycle;
   now: Date;
@@ -1454,7 +1451,6 @@ async function createUnplannedEventLifecycle(input: {
     materialized: input.materialized,
     timezone: input.draft.timezone,
     locale: input.draft.locale,
-    t: input.t,
     creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
     groupJoinUrl,
     subgroupChatId: created.chatId
@@ -1476,7 +1472,6 @@ async function sendEventCalendarHint(input: {
   materialized: MaterializedEventLifecycle;
   timezone: string;
   locale: string;
-  t: CommandContext['t'];
   creatorDisplayName: string;
   groupJoinUrl?: string | undefined;
   subgroupChatId?: string | undefined;
@@ -1488,7 +1483,7 @@ async function sendEventCalendarHint(input: {
   if (!enabled) {
     return;
   }
-  const template = calendarHintTemplate(input.profile, hint.template.trim(), input.t);
+  const template = hint.template.trim();
   const calendarId = input.profile.calendar.calendarId.trim();
   try {
     const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;
@@ -1621,13 +1616,6 @@ async function recordCalendarHintSkipped(
 function operatorConsolePublicOriginForRuntime(config: OfficialPluginCommandRuntime['config']): string {
   const configured = (config as unknown as Record<string, unknown>).OPERATOR_CONSOLE_PUBLIC_ORIGIN;
   return (typeof configured === 'string' ? configured : process.env.OPERATOR_CONSOLE_PUBLIC_ORIGIN ?? '').trim();
-}
-
-function calendarHintTemplate(profile: EventProfile, template: string, t: CommandContext['t']): string {
-  if (profile.id === 'climbing' && template === DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE) {
-    return t('official.community-events.profile.climbing.calendar.hint.template');
-  }
-  return template;
 }
 
 function botVisibleCalendarSubscriptionUrl(input: Parameters<typeof eventsCalendarSubscriptionUrl>[0]): string {

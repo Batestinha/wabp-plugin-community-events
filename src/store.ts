@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { CreatedGroupParticipantResult, PollVoteUpdate } from '../../../platform/transport/transportTypes';
+import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
@@ -325,6 +326,22 @@ export function getEvent(db: PluginDatabase, eventId: string): StoredEventRecord
 
 export function getEventByPoll(db: PluginDatabase, pollWaMsgId: string): StoredEventRecord | undefined {
   const row = db.get<EventRow>('SELECT * FROM event_records WHERE poll_wa_msg_id = ?', pollWaMsgId);
+  return row ? eventFromRow(row) : undefined;
+}
+
+export function getEventByEquivalentPoll(db: PluginDatabase, pollWaMsgId: string): StoredEventRecord | undefined {
+  const exact = getEventByPoll(db, pollWaMsgId);
+  if (exact) {
+    return exact;
+  }
+  const rows = db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE poll_wa_msg_id IS NOT NULL
+        AND event_status = 'scheduled'
+        AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
+      ORDER BY starts_at ASC, id ASC`
+  );
+  const row = rows.find((candidate) => equivalentWhatsAppMessageIds(candidate.poll_wa_msg_id ?? undefined, pollWaMsgId));
   return row ? eventFromRow(row) : undefined;
 }
 

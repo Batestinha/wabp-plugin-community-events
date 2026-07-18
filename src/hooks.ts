@@ -18,8 +18,8 @@ import {
   appendEventLog,
   eventsDatabase,
   getEvent,
+  getEventByEquivalentPoll,
   getActiveEventBySubgroup,
-  getEventByPoll,
   listOpenPollEvents,
   listPendingCleanupEvents,
   listCalendarEvents,
@@ -110,7 +110,7 @@ export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Pr
 
 async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVotePluginEvent): Promise<void> {
   const db = eventsDatabase(context.databases);
-  const record = getEventByPoll(db, event.vote.pollWaMsgId);
+  const record = getEventByEquivalentPoll(db, event.vote.pollWaMsgId);
   if (!record) {
     return;
   }

@@ -36,7 +36,7 @@ export const eventsManifest: PluginManifest = {
     '/event status',
     '/event cancel'
   ],
-  eventSubscriptions: ['poll.vote', 'plugin.job', 'group.decommissioned'],
+  eventSubscriptions: ['poll.vote', 'plugin.job', 'group.dismantled'],
   requiredPermissions: [
     EVENTS_PERMISSIONS.configure,
     EVENTS_PERMISSIONS.manage,

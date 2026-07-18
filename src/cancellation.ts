@@ -1,4 +1,4 @@
-import type { PluginCommandContext, PluginGroupDecommissionResult } from '../../../platform/pluginRuntime/types';
+import type { PluginCommandContext, PluginGroupDismantleResult } from '../../../platform/pluginRuntime/types';
 import { parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -16,9 +16,9 @@ export interface EventCancellationActor {
 }
 
 export type EventCancellationResult =
-  | { status: 'cancelled'; cancelledAt: string; decommissionResult?: PluginGroupDecommissionResult | undefined }
+  | { status: 'cancelled'; cancelledAt: string; dismantleResult?: PluginGroupDismantleResult | undefined }
   | { status: 'not_cancellable'; reason: string }
-  | { status: 'cleanup_failed'; reason: string; decommissionResult?: PluginGroupDecommissionResult | undefined };
+  | { status: 'cleanup_failed'; reason: string; dismantleResult?: PluginGroupDismantleResult | undefined };
 
 export async function cancelEventLifecycle(input: {
   context: PluginCommandContext;
@@ -34,23 +34,23 @@ export async function cancelEventLifecycle(input: {
     return { status: 'not_cancellable', reason: `event lifecycle is ${event.eventStatus}/${event.groupLifecycleStatus}` };
   }
 
-  let decommissionResult: PluginGroupDecommissionResult | undefined;
+  let dismantleResult: PluginGroupDismantleResult | undefined;
   if ((event.groupLifecycleStatus === 'poll_closed' || event.groupLifecycleStatus === 'cleanup_failed') && event.subgroupChatId) {
-    if (!context.decommissionManagedGroup) {
-      const reason = 'Plugin runtime does not expose decommissionManagedGroup.';
+    if (!context.dismantleManagedGroup) {
+      const reason = 'Plugin runtime does not expose dismantleManagedGroup.';
       await recordCancellationFailure(context, runtime, db, event, actor, reason);
       return { status: 'cleanup_failed', reason };
     }
     try {
-      decommissionResult = await context.decommissionManagedGroup({
+      dismantleResult = await context.dismantleManagedGroup({
         scopeId: event.scopeId,
         chatId: event.subgroupChatId,
         reason: 'event cancellation'
       });
-      if (decommissionResult.failedRemovals.length > 0) {
-        const reason = partialCancellationCleanupReason(decommissionResult);
-        await recordCancellationFailure(context, runtime, db, event, actor, reason, decommissionResult);
-        return { status: 'cleanup_failed', reason, decommissionResult };
+      if (dismantleResult.failedRemovals.length > 0) {
+        const reason = partialCancellationCleanupReason(dismantleResult);
+        await recordCancellationFailure(context, runtime, db, event, actor, reason, dismantleResult);
+        return { status: 'cleanup_failed', reason, dismantleResult };
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -77,7 +77,7 @@ export async function cancelEventLifecycle(input: {
       actorWid: actor.wid,
       actorLabel: actor.label,
       reason: input.reason,
-      decommissionResult
+      dismantleResult
     }
   });
   await appendEventJsonLog(context, {
@@ -93,14 +93,14 @@ export async function cancelEventLifecycle(input: {
       previousGroupLifecycleStatus: event.groupLifecycleStatus,
       actorLabel: actor.label,
       reason: input.reason,
-      decommissionResult
+      dismantleResult
     }
   });
   await refreshCalendar(runtime, db, event);
   return {
     status: 'cancelled',
     cancelledAt,
-    ...(decommissionResult ? { decommissionResult } : {})
+    ...(dismantleResult ? { dismantleResult } : {})
   };
 }
 
@@ -111,7 +111,7 @@ async function recordCancellationFailure(
   event: StoredEventRecord,
   actor: EventCancellationActor,
   reason: string,
-  decommissionResult?: PluginGroupDecommissionResult | undefined
+  dismantleResult?: PluginGroupDismantleResult | undefined
 ): Promise<void> {
   const failedAt = new Date().toISOString();
   await setCleanupFailureStatus(runtime, event.scopeId, {
@@ -127,7 +127,7 @@ async function recordCancellationFailure(
       reason,
       actorWid: actor.wid,
       actorLabel: actor.label,
-      decommissionResult
+      dismantleResult
     }
   });
   await appendEventJsonLog(context, {
@@ -141,7 +141,7 @@ async function recordCancellationFailure(
     metadata: {
       reason,
       actorLabel: actor.label,
-      decommissionResult
+      dismantleResult
     }
   });
 }
@@ -195,7 +195,7 @@ async function appendEventJsonLog(
   }
 }
 
-function partialCancellationCleanupReason(result: PluginGroupDecommissionResult): string {
+function partialCancellationCleanupReason(result: PluginGroupDismantleResult): string {
   return `failed to remove ${result.failedRemovals.length} subgroup participant${result.failedRemovals.length === 1 ? '' : 's'}: ${
     result.failedRemovals.map((failure) => `${failure.wid} (${failure.reason})`).join(', ')
   }`;

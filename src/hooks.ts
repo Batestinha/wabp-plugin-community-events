@@ -1,12 +1,12 @@
 import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
 import type {
-  PluginGroupDecommissionedEvent,
+  PluginGroupDismantledEvent,
   PluginJobEvent,
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
-import type { PluginGroupDecommissionResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
@@ -45,8 +45,8 @@ export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeH
     async onPluginJob(event) {
       return handleEventJob(context, event);
     },
-    async onGroupDecommissioned(event) {
-      await handleGroupDecommissioned(context, event);
+    async onGroupDismantled(event) {
+      await handleGroupDismantled(context, event);
     }
   };
 }
@@ -107,14 +107,14 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   return [];
 }
 
-async function handleGroupDecommissioned(
+async function handleGroupDismantled(
   context: PluginRuntimeContext,
-  event: PluginGroupDecommissionedEvent
+  event: PluginGroupDismantledEvent
 ): Promise<void> {
   if (event.source?.kind === 'plugin_action' && event.source.pluginId === EVENTS_PLUGIN_ID) {
     return;
   }
-  if (!decommissionCompleted(event.result)) {
+  if (!dismantleCompleted(event.result)) {
     return;
   }
   const db = eventsDatabase(context.databases);
@@ -132,7 +132,7 @@ async function handleGroupDecommissioned(
     action: 'events.cleaned.external',
     metadata: {
       source: event.source,
-      decommissionResult: event.result
+      dismantleResult: event.result
     }
   });
   await appendJsonLog(context, {
@@ -144,7 +144,7 @@ async function handleGroupDecommissioned(
     ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
     metadata: {
       source: event.source,
-      decommissionResult: event.result
+      dismantleResult: event.result
     }
   });
 }
@@ -322,19 +322,19 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
   const attempt = cleanupAttempt(job.payload);
 
   try {
-    let decommissionResult: PluginGroupDecommissionResult | undefined;
+    let dismantleResult: PluginGroupDismantleResult | undefined;
     if (record.subgroupChatId) {
-      if (!context.decommissionManagedGroup) {
-        throw new Error('Plugin runtime does not expose decommissionManagedGroup.');
+      if (!context.dismantleManagedGroup) {
+        throw new Error('Plugin runtime does not expose dismantleManagedGroup.');
       }
-      decommissionResult = await context.decommissionManagedGroup({
+      dismantleResult = await context.dismantleManagedGroup({
         scopeId: record.scopeId,
         chatId: record.subgroupChatId,
         reason: 'event cleanup'
       });
-      if (!decommissionCompleted(decommissionResult)) {
-        return cleanupFailed(context, db, record, config, attempt, decommissionIncompleteReason(decommissionResult), {
-          decommissionResult,
+      if (!dismantleCompleted(dismantleResult)) {
+        return cleanupFailed(context, db, record, config, attempt, dismantleIncompleteReason(dismantleResult), {
+          dismantleResult,
           retryable: true
         });
       }
@@ -345,7 +345,7 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
     appendEventLog(db, {
       eventId: record.id,
       action: 'events.cleaned',
-      metadata: { decommissionResult }
+      metadata: { dismantleResult }
     });
     await appendJsonLog(context, {
       action: 'event.cleaned',
@@ -354,9 +354,9 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
       profileId: record.profileId,
       ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
       ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
-      metadata: { decommissionResult }
+      metadata: { dismantleResult }
     });
-    return [audit('events.cleaned', { eventId: record.id, decommissionResult })];
+    return [audit('events.cleaned', { eventId: record.id, dismantleResult })];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return cleanupFailed(context, db, record, config, attempt, reason, { retryable: true });
@@ -544,13 +544,13 @@ function cleanupAttempt(payload: unknown): number {
     : 0;
 }
 
-function partialCleanupReason(result: PluginGroupDecommissionResult): string {
+function partialCleanupReason(result: PluginGroupDismantleResult): string {
   return `failed to remove ${result.failedRemovals.length} subgroup participant${result.failedRemovals.length === 1 ? '' : 's'}: ${
     result.failedRemovals.map((failure) => `${failure.wid} (${failure.reason})`).join(', ')
   }`;
 }
 
-function decommissionIncompleteReason(result: PluginGroupDecommissionResult): string {
+function dismantleIncompleteReason(result: PluginGroupDismantleResult): string {
   const reasons = [
     ...(result.failedRemovals.length > 0 ? [partialCleanupReason(result)] : []),
     ...(result.leaveFailed ? [`failed to leave subgroup: ${result.leaveFailed}`] : []),
@@ -559,10 +559,10 @@ function decommissionIncompleteReason(result: PluginGroupDecommissionResult): st
   ];
   return reasons.length > 0
     ? reasons.join('; ')
-    : 'subgroup was not left, deleted, or marked left after decommission';
+    : 'subgroup was not left, deleted, or marked left after dismantle';
 }
 
-function decommissionCompleted(result: { left: boolean; chatDeleted: boolean; managementMarkedLeft?: boolean | undefined }): boolean {
+function dismantleCompleted(result: { left: boolean; chatDeleted: boolean; managementMarkedLeft?: boolean | undefined }): boolean {
   return result.left || result.chatDeleted || result.managementMarkedLeft === true;
 }
 

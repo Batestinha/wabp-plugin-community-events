@@ -1,26 +1,14 @@
-import type { CreatedGroup } from '../../../platform/transport/transportTypes';
-import type { ManagedCommunitySubgroupCreationPolicy } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
-import { parseCommunitySubgroupsConfig } from '../community-subgroups/config';
-import { COMMUNITY_SUBGROUPS_PLUGIN_ID } from '../community-subgroups/manifest';
+import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
+import {
+  COMMUNITY_SUBGROUPS_CREATE_METHOD,
+  COMMUNITY_SUBGROUPS_SERVICE_ID,
+  type CommunitySubgroupCreateOutput
+} from '../community-subgroups/serviceApi';
 
 export interface EventSubgroupContext {
-  catalog?: {
-    configFor(pluginId: string, scopeId: string, actorWid?: string | undefined): Promise<Record<string, unknown>>;
-  } | undefined;
+  services?: PluginServiceCaller | undefined;
   communityGroupWidForScope?(scopeId: string): Promise<string | undefined>;
   ensureChatArchivePolicyForScope?(scopeId: string): Promise<unknown>;
-  createManagedCommunitySubgroup?(input: {
-    scopeId: string;
-    actorWid: string;
-    title: string;
-    description?: string | undefined;
-    participantWids: string[];
-    parentCommunityWid: string;
-    creationPolicy: ManagedCommunitySubgroupCreationPolicy;
-  }): Promise<{
-    created: CreatedGroup;
-    participantCount?: number | undefined;
-  }>;
 }
 
 export async function createEventCommunitySubgroup(input: {
@@ -29,33 +17,26 @@ export async function createEventCommunitySubgroup(input: {
   actorWid: string;
   title: string;
   participantWids: string[];
-}): Promise<Awaited<ReturnType<NonNullable<EventSubgroupContext['createManagedCommunitySubgroup']>>>> {
-  if (!input.context.createManagedCommunitySubgroup) {
-    throw new Error('Plugin runtime does not expose createManagedCommunitySubgroup.');
+}): Promise<CommunitySubgroupCreateOutput> {
+  if (!input.context.services) {
+    throw new Error('Plugin runtime does not expose plugin services.');
   }
   await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
   const parentCommunityWid = await input.context.communityGroupWidForScope?.(input.scopeId);
   if (!parentCommunityWid) {
     throw new Error('No parent community is mapped for this scope.');
   }
-  const creationPolicy = await communitySubgroupCreationPolicyForScope(input.context, input.scopeId, input.actorWid);
-  return input.context.createManagedCommunitySubgroup({
+
+  return input.context.services.call<CommunitySubgroupCreateOutput>({
+    serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
+    method: COMMUNITY_SUBGROUPS_CREATE_METHOD,
     scopeId: input.scopeId,
     actorWid: input.actorWid,
-    title: input.title,
-    participantWids: input.participantWids,
-    parentCommunityWid,
-    creationPolicy
+    groupWid: parentCommunityWid,
+    input: {
+      title: input.title,
+      participantWids: input.participantWids,
+      parentCommunityWid
+    }
   });
-}
-
-export async function communitySubgroupCreationPolicyForScope(
-  context: EventSubgroupContext,
-  scopeId: string,
-  actorWid?: string | undefined
-): Promise<ManagedCommunitySubgroupCreationPolicy> {
-  const rawConfig = context.catalog
-    ? await context.catalog.configFor(COMMUNITY_SUBGROUPS_PLUGIN_ID, scopeId, actorWid)
-    : {};
-  return parseCommunitySubgroupsConfig(rawConfig).creationPolicy;
 }

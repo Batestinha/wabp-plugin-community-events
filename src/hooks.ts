@@ -8,7 +8,8 @@ import type {
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
-import { parseEventsConfig } from './config';
+import { parseEventsConfig, type EventProfile } from './config';
+import { eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -19,6 +20,7 @@ import {
   getEvent,
   getActiveEventBySubgroup,
   getEventByPoll,
+  listOpenPollEvents,
   listPendingCleanupEvents,
   listCalendarEvents,
   listVotes,
@@ -27,6 +29,7 @@ import {
   markEventClosed,
   markEventFailed,
   saveCreatedGroupParticipants,
+  updateEventCloseAt,
   upsertVote,
   type StoredEventRecord,
   type StoredEventVote
@@ -35,8 +38,8 @@ import {
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
 export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeHooks {
-  void recoverEventCleanupJobs(context).catch((error) => {
-    context.logger.error({ error }, 'official.community-events cleanup recovery failed');
+  void recoverEventJobs(context).catch((error) => {
+    context.logger.error({ error }, 'official.community-events job recovery failed');
   });
   return {
     async onPollVote(event) {
@@ -49,6 +52,39 @@ export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeH
       await handleGroupDismantled(context, event);
     }
   };
+}
+
+export async function recoverEventJobs(context: PluginRuntimeContext): Promise<number> {
+  const closeJobs = await recoverEventCloseJobs(context);
+  const cleanupJobs = await recoverEventCleanupJobs(context);
+  const enqueued = closeJobs + cleanupJobs;
+  if (enqueued > 0) {
+    context.logger.info({ enqueued, closeJobs, cleanupJobs }, 'Recovered official.community-events jobs');
+  }
+  return enqueued;
+}
+
+export async function recoverEventCloseJobs(context: PluginRuntimeContext): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const records = listOpenPollEvents(db);
+  let enqueued = 0;
+  for (const record of records) {
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const closeAt = effectiveCloseAt(record, config);
+    persistEffectiveCloseAt(db, record, closeAt);
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.close,
+      scopeId: record.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      ...(Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
+      payload: { eventId: record.id },
+      dedupeKey: `${EVENTS_JOBS.close}:${record.id}:startup:${closeAt.toISOString()}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
 }
 
 export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Promise<number> {
@@ -68,9 +104,6 @@ export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Pr
       dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:startup:${record.cleanupAt}:${record.updatedAt}`
     });
     enqueued += 1;
-  }
-  if (enqueued > 0) {
-    context.logger.info({ enqueued }, 'Recovered official.community-events cleanup jobs');
   }
   return enqueued;
 }
@@ -164,6 +197,28 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
   }
 
   try {
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const closeAt = effectiveCloseAt(record, config);
+    persistEffectiveCloseAt(db, record, closeAt);
+    const now = new Date();
+    if (Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now.getTime()) {
+      return [
+        audit('events.close.deferred', {
+          eventId: record.id,
+          effectiveCloseAt: closeAt.toISOString(),
+          storedCloseAt: record.closeAt
+        }),
+        {
+          type: 'plugin.enqueueJob',
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.close,
+          scopeId: record.scopeId,
+          runAt: closeAt,
+          payload: { eventId: record.id },
+          dedupeKey: `${EVENTS_JOBS.close}:${record.id}:deferred:${closeAt.toISOString()}`
+        }
+      ];
+    }
     const liveVotes = context.pollVotesFor ? await context.pollVotesFor(record.pollWaMsgId) : [];
     for (const vote of liveVotes) {
       upsertVote(db, record.id, vote);
@@ -213,6 +268,13 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       });
     }
 
+    const calendarProfile = config.eventProfiles.find((profile) => profile.id === record.profileId);
+    const plannedAnnouncementActions = await plannedEventAnnouncementActions(context, {
+      record,
+      profile: calendarProfile,
+      subgroupChatId,
+      subgroupTitle
+    });
     const closedAt = new Date().toISOString();
     markEventClosed(db, {
       eventId: record.id,
@@ -234,8 +296,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(subgroupChatId ? { subgroupChatId } : {}),
       metadata: { attendeeCount: attendeeWids.length, subgroupTitle }
     });
-    const config = parseEventsConfig(await context.configFor(record.scopeId));
-    const calendarProfile = config.eventProfiles.find((profile) => profile.id === record.profileId);
     const calendar = calendarProfile
       ? config.calendars.find((candidate) => candidate.id === calendarProfile.calendar.calendarId)
       : undefined;
@@ -261,6 +321,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       }
     });
     return [
+      ...plannedAnnouncementActions,
       {
         type: 'plugin.enqueueJob',
         pluginId: EVENTS_PLUGIN_ID,
@@ -285,6 +346,103 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     });
     return [audit('events.close.failed', { eventId: record.id, reason })];
   }
+}
+
+async function plannedEventAnnouncementActions(
+  context: PluginRuntimeContext,
+  input: {
+    record: StoredEventRecord;
+    profile?: EventProfile | undefined;
+    subgroupChatId?: string | undefined;
+    subgroupTitle?: string | undefined;
+  }
+): Promise<PluginAction[]> {
+  const { record, profile, subgroupChatId } = input;
+  if (!profile?.unplanned.sendForPlannedEvents) {
+    return [];
+  }
+  if (!subgroupChatId) {
+    await appendPlannedAnnouncementSkipped(context, record, 'no_event_group');
+    return [];
+  }
+  if (!record.announcementGroupWid) {
+    await appendPlannedAnnouncementSkipped(context, record, 'announcement_group_missing', { subgroupChatId });
+    return [];
+  }
+  const template = profile.unplanned.announcementTemplate.trim();
+  if (!template) {
+    await appendPlannedAnnouncementSkipped(context, record, 'empty_template', { subgroupChatId });
+    return [];
+  }
+
+  try {
+    const groupJoinUrl = await eventGroupJoinUrl(context, template, subgroupChatId);
+    const text = renderEventGroupAnnouncement({
+      template,
+      profile,
+      event: record,
+      groupDisplayName: input.subgroupTitle || record.groupTitle,
+      groupJoinUrl,
+      subgroupChatId
+    });
+    if (!text) {
+      await appendPlannedAnnouncementSkipped(context, record, 'empty_rendered_text', { subgroupChatId });
+      return [];
+    }
+    await appendJsonLog(context, {
+      action: 'event.planned_announcement_queued',
+      scopeId: record.scopeId,
+      eventId: record.id,
+      actorWid: record.actorWid,
+      profileId: record.profileId,
+      ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+      subgroupChatId,
+      metadata: {
+        announcementGroupWid: record.announcementGroupWid,
+        groupJoinUrl
+      }
+    });
+    return [{
+      type: 'message.sendText',
+      chatId: record.announcementGroupWid,
+      text
+    }];
+  } catch (error) {
+    await appendJsonLog(context, {
+      action: 'event.planned_announcement_failed',
+      scopeId: record.scopeId,
+      eventId: record.id,
+      actorWid: record.actorWid,
+      profileId: record.profileId,
+      ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+      subgroupChatId,
+      metadata: {
+        announcementGroupWid: record.announcementGroupWid,
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    });
+    return [];
+  }
+}
+
+async function appendPlannedAnnouncementSkipped(
+  context: PluginRuntimeContext,
+  record: StoredEventRecord,
+  reason: string,
+  metadata: Record<string, unknown> = {}
+): Promise<void> {
+  await appendJsonLog(context, {
+    action: 'event.planned_announcement_skipped',
+    scopeId: record.scopeId,
+    eventId: record.id,
+    actorWid: record.actorWid,
+    profileId: record.profileId,
+    ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+    metadata: {
+      reason,
+      ...metadata
+    }
+  });
 }
 
 async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {
@@ -483,6 +641,48 @@ function voterWidsForResponseBehavior(
     }
   }
   return [...voters].sort();
+}
+
+function effectiveCloseAt(record: StoredEventRecord, config: ReturnType<typeof parseEventsConfig>): Date {
+  const startsAt = new Date(record.startsAtUtc || record.startsAt);
+  const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
+  if (!profile || !Number.isFinite(startsAt.getTime())) {
+    return validDateOrNow(record.closeAt);
+  }
+  return new Date(startsAt.getTime() - profile.poll.closeOffsetHoursBeforeStart * 3_600_000);
+}
+
+function persistEffectiveCloseAt(
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  closeAt: Date
+): void {
+  if (!Number.isFinite(closeAt.getTime())) {
+    return;
+  }
+  const closeAtIso = closeAt.toISOString();
+  if (record.closeAt === closeAtIso) {
+    return;
+  }
+  const updatedAt = new Date().toISOString();
+  updateEventCloseAt(db, {
+    eventId: record.id,
+    closeAt: closeAtIso,
+    updatedAt
+  });
+  appendEventLog(db, {
+    eventId: record.id,
+    action: 'events.close.rescheduled',
+    metadata: {
+      previousCloseAt: record.closeAt,
+      effectiveCloseAt: closeAtIso
+    }
+  });
+}
+
+function validDateOrNow(value: string): Date {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : new Date();
 }
 
 function selectedEventOptionIds(record: StoredEventRecord, vote: PollVoteUpdate): string[] {

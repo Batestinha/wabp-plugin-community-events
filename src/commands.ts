@@ -22,6 +22,7 @@ import {
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
+import { eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
@@ -1408,21 +1409,16 @@ async function createUnplannedEventLifecycle(input: {
     dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:unplanned`
   });
 
-  const groupJoinUrl = await unplannedGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId);
-  const announcementText = renderEventTemplate({
+  const groupJoinUrl = await eventGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId);
+  const announcementText = renderEventGroupAnnouncement({
     template: input.profile.unplanned.announcementTemplate,
     profile: input.profile,
-    answers: input.materialized.answers,
-    startsAt: input.materialized.startsAt,
-    timezone: input.draft.timezone,
+    event,
+    groupDisplayName: created.title || input.materialized.groupTitle,
+    groupJoinUrl,
+    subgroupChatId: created.chatId,
     locale: input.draft.locale,
-    creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
-    extraTokens: {
-      eventId: event.id,
-      groupDisplayName: created.title || input.materialized.groupTitle,
-      groupJoinUrl,
-      subgroupChatId: created.chatId
-    }
+    creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
   });
   const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
   await appendEventJsonLog(input.context, {
@@ -1523,7 +1519,7 @@ async function sendEventCalendarHint(input: {
     }
     const groupJoinUrl = input.groupJoinUrl ||
       (input.subgroupChatId && templateUsesToken(template, 'groupJoinUrl')
-        ? await unplannedGroupJoinUrl(input.context, template, input.subgroupChatId)
+        ? await eventGroupJoinUrl(input.context, template, input.subgroupChatId)
         : '');
     const text = renderEventTemplate({
       template,
@@ -1660,30 +1656,6 @@ function draftEventsConfig(draft: {
     calendars: draft.calendars,
     eventProfiles: draft.profiles
   });
-}
-
-async function unplannedGroupJoinUrl(
-  context: PluginCommandContext,
-  template: string,
-  subgroupChatId: string
-): Promise<string> {
-  if (!templateUsesToken(template, 'groupJoinUrl')) {
-    return '';
-  }
-  if (!context.getGroupInviteCode) {
-    throw new Error('Plugin runtime does not expose getGroupInviteCode.');
-  }
-  const inviteCode = await context.getGroupInviteCode(subgroupChatId);
-  if (!inviteCode) {
-    throw new Error('No invite link is available for the event group.');
-  }
-  return inviteCode.startsWith('http')
-    ? inviteCode
-    : `https://chat.whatsapp.com/${inviteCode}`;
-}
-
-function templateUsesToken(template: string, token: string): boolean {
-  return new RegExp(`\\{${token}\\}`).test(template);
 }
 
 function eventCreatorParticipantWid(draft: EventDraft): string {

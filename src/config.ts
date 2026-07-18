@@ -110,7 +110,8 @@ const eventProfileObjectSchema = z.object({
     cleanupOffsetHoursAfterStart: z.number().int().min(0).max(24 * 365).default(48)
   }).strict(),
   unplanned: z.object({
-    announcementTemplate: authoredTextSchema.default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}')
+    announcementTemplate: authoredTextSchema.default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}'),
+    sendForPlannedEvents: z.boolean().default(false)
   }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
@@ -261,7 +262,8 @@ export const defaultClimbingEventProfile: EventProfile = {
     cleanupOffsetHoursAfterStart: 48
   },
   unplanned: {
-    announcementTemplate: '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}'
+    announcementTemplate: '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
+    sendForPlannedEvents: false
   },
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,

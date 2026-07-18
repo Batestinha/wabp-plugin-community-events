@@ -386,6 +386,33 @@ export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[
   ).map(eventFromRow);
 }
 
+export function listOpenPollEvents(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE event_status = 'scheduled'
+        AND group_lifecycle_status = 'poll_open'
+        AND poll_wa_msg_id IS NOT NULL
+      ORDER BY close_at ASC, starts_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
+export function updateEventCloseAt(db: PluginDatabase, input: {
+  eventId: string;
+  closeAt: string;
+  updatedAt: string;
+}): void {
+  db.run(
+    `UPDATE event_records
+        SET close_at = ?, updated_at = ?
+      WHERE id = ?
+        AND event_status = 'scheduled'
+        AND group_lifecycle_status = 'poll_open'`,
+    input.closeAt,
+    input.updatedAt,
+    input.eventId
+  );
+}
+
 export function markEventClosed(db: PluginDatabase, input: {
   eventId: string;
   subgroupChatId?: string | undefined;

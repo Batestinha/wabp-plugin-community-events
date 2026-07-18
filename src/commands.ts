@@ -27,6 +27,11 @@ import { materializeEventLifecycle, type MaterializedEventLifecycle } from './ma
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import {
+  DOAS_POLL_PUBLISH_METHOD,
+  DOAS_POLL_SERVICE_ID,
+  type DoasPollPublishOutput
+} from '../doas/serviceApi';
+import {
   appendEventLog,
   eventsDatabase,
   getCalendarPublicationStatus,
@@ -1106,19 +1111,30 @@ function registerEventFlowCompletionHandlers(
           await activeTransport.sendText(responseChatId, t('official.community-events.unplannedPublished'));
           return true;
         }
-        const sent = await context.doasPublishPoll?.({
-          actorWid: draft.actorWid,
+        if (!context.services) {
+          throw new Error('Plugin service registry is unavailable.');
+        }
+        const sent = await context.services.call<DoasPollPublishOutput>({
+          serviceId: DOAS_POLL_SERVICE_ID,
+          method: DOAS_POLL_PUBLISH_METHOD,
           scopeId: draft.scopeId,
+          actorWid: draft.actorWid,
           ...(draft.groupId ? { groupId: draft.groupId } : {}),
-          groupWid: announcementGroupWid,
-          question: materialized.pollQuestion,
-          options: selectedOptionLabels(profile),
-          allowMultipleAnswers: profile.poll.allowMultipleAnswers,
-          reason: `event ${profile.id}`,
-          sourcePluginId: EVENTS_PLUGIN_ID
+          ...(draft.groupWid ? { groupWid: draft.groupWid } : {}),
+          input: {
+            actorWid: draft.actorWid,
+            scopeId: draft.scopeId,
+            ...(draft.groupId ? { groupId: draft.groupId } : {}),
+            groupWid: announcementGroupWid,
+            question: materialized.pollQuestion,
+            options: selectedOptionLabels(profile),
+            allowMultipleAnswers: profile.poll.allowMultipleAnswers,
+            reason: `event ${profile.id}`,
+            sourcePluginId: EVENTS_PLUGIN_ID
+          }
         });
         if (!sent?.messageId) {
-          throw new Error('doas poll publisher did not return a message id');
+          throw new Error('doas poll service did not return a message id');
         }
         const event: StoredEventRecord = {
           id: eventId,

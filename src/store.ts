@@ -6,7 +6,7 @@ import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
 
 export type EventStatus = 'scheduled' | 'cancelled' | 'failed';
-export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'none';
+export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
 
@@ -504,6 +504,23 @@ export function markEventFailed(db: PluginDatabase, eventId: string, reason: str
       WHERE id = ?`,
     reason,
     failedAt,
+    eventId
+  );
+}
+
+export function markEventMissed(db: PluginDatabase, eventId: string, reason: string, missedAt: string): void {
+  db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'missed',
+            calendar_status = 'hidden',
+            error = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND event_status = 'scheduled'
+        AND group_lifecycle_status = 'poll_open'`,
+    reason,
+    missedAt,
     eventId
   );
 }

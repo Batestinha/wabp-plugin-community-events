@@ -28,6 +28,7 @@ import {
   markEventCleaned,
   markEventClosed,
   markEventFailed,
+  markEventMissed,
   saveCreatedGroupParticipants,
   updateEventCloseAt,
   upsertVote,
@@ -37,10 +38,20 @@ import {
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
-export function createEventsHooks(context: PluginRuntimeContext): PluginRuntimeHooks {
-  void recoverEventJobs(context).catch((error) => {
-    context.logger.error({ error }, 'official.community-events job recovery failed');
-  });
+interface EventRecoveryOptions {
+  now?: Date | undefined;
+}
+
+interface EventsHooksOptions {
+  recoverJobs?: boolean | undefined;
+}
+
+export function createEventsHooks(context: PluginRuntimeContext, options: EventsHooksOptions = {}): PluginRuntimeHooks {
+  if (options.recoverJobs !== false) {
+    void recoverEventJobs(context).catch((error) => {
+      context.logger.error({ error }, 'official.community-events job recovery failed');
+    });
+  }
   return {
     async onPollVote(event) {
       await handlePollVote(context, event);
@@ -64,23 +75,30 @@ export async function recoverEventJobs(context: PluginRuntimeContext): Promise<n
   return enqueued;
 }
 
-export async function recoverEventCloseJobs(context: PluginRuntimeContext): Promise<number> {
+export async function recoverEventCloseJobs(context: PluginRuntimeContext, options: EventRecoveryOptions = {}): Promise<number> {
   const db = eventsDatabase(context.databases);
   const records = listOpenPollEvents(db);
+  const now = options.now ?? new Date();
   let enqueued = 0;
   for (const record of records) {
     const config = parseEventsConfig(await context.configFor(record.scopeId));
     const closeAt = effectiveCloseAt(record, config);
     persistEffectiveCloseAt(db, record, closeAt);
+    const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : 'invalid';
+    const due = Number.isFinite(closeAt.getTime()) && closeAt.getTime() <= now.getTime();
+    if (due && eventScheduledDateHasPassed(record, now)) {
+      await markStartupEventMissed(context, db, record, config, closeAt, now);
+      continue;
+    }
     await enqueuePluginJob(context.queue, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.close,
       scopeId: record.scopeId,
       ...(record.groupId ? { groupId: record.groupId } : {}),
       ...(record.groupWid ? { groupWid: record.groupWid } : {}),
-      ...(Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
+      ...(!due && Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
       payload: { eventId: record.id },
-      dedupeKey: `${EVENTS_JOBS.close}:${record.id}:startup:${closeAt.toISOString()}`
+      dedupeKey: `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
     });
     enqueued += 1;
   }
@@ -678,6 +696,100 @@ function persistEffectiveCloseAt(
       effectiveCloseAt: closeAtIso
     }
   });
+}
+
+async function markStartupEventMissed(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  config: ReturnType<typeof parseEventsConfig>,
+  closeAt: Date,
+  now: Date
+): Promise<void> {
+  const missedAt = now.toISOString();
+  const scheduledLocalDate = eventScheduledLocalDate(record) ?? 'unknown';
+  const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : record.closeAt;
+  const reason = `Startup recovery found the poll close due at ${closeAtIso} after the scheduled event date ${scheduledLocalDate}.`;
+  markEventMissed(db, record.id, reason, missedAt);
+  appendEventLog(db, {
+    eventId: record.id,
+    action: 'events.close.missed',
+    metadata: {
+      reason,
+      effectiveCloseAt: closeAtIso,
+      scheduledLocalDate
+    }
+  });
+  await appendJsonLog(context, {
+    action: 'event.close_missed',
+    scopeId: record.scopeId,
+    eventId: record.id,
+    profileId: record.profileId,
+    ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+    metadata: {
+      reason,
+      effectiveCloseAt: closeAtIso,
+      scheduledLocalDate
+    }
+  });
+  await refreshCalendarAfterStartupMiss(context, db, config, record);
+}
+
+async function refreshCalendarAfterStartupMiss(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  config: ReturnType<typeof parseEventsConfig>,
+  record: StoredEventRecord
+): Promise<void> {
+  const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
+  try {
+    await writePublishAndRecordScopeCalendar({
+      appConfig: context.config,
+      db,
+      config,
+      scopeId: record.scopeId,
+      calendarId: profile?.calendar.calendarId ?? '',
+      events: listCalendarEvents(db, record.scopeId)
+    });
+  } catch (error) {
+    context.logger.warn({ error, eventId: record.id, scopeId: record.scopeId }, 'Unable to refresh event calendar after marking startup event missed');
+  }
+}
+
+function eventScheduledDateHasPassed(record: StoredEventRecord, now: Date): boolean {
+  const scheduledLocalDate = eventScheduledLocalDate(record);
+  const currentLocalDate = localDateKey(now, record.timezone);
+  return Boolean(scheduledLocalDate && currentLocalDate && currentLocalDate > scheduledLocalDate);
+}
+
+function eventScheduledLocalDate(record: StoredEventRecord): string | undefined {
+  const stored = record.localDate?.trim();
+  if (stored && /^\d{4}-\d{2}-\d{2}$/.test(stored)) {
+    return stored;
+  }
+  const startsAt = new Date(record.startsAtUtc || record.startsAt);
+  return localDateKey(startsAt, record.timezone);
+}
+
+function localDateKey(date: Date, timezone: string): string | undefined {
+  if (!Number.isFinite(date.getTime())) {
+    return undefined;
+  }
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(date);
+    const value = (type: string) => parts.find((part) => part.type === type)?.value;
+    const year = value('year');
+    const month = value('month');
+    const day = value('day');
+    return year && month && day ? `${year}-${month}-${day}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function validDateOrNow(value: string): Date {

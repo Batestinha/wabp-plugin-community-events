@@ -15,6 +15,11 @@ import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import {
+  eventWeatherForecastJobAction,
+  eventWeatherForecastJobRequest,
+  handleEventWeatherForecastJob
+} from './weather';
+import {
   appendEventLog,
   eventsDatabase,
   getEvent,
@@ -23,6 +28,7 @@ import {
   listOpenPollEvents,
   listPendingCleanupEvents,
   listCalendarEvents,
+  listWeatherForecastCandidateEvents,
   listVotes,
   markEventCleanupFailed,
   markEventCleaned,
@@ -68,9 +74,10 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
 export async function recoverEventJobs(context: PluginRuntimeContext): Promise<number> {
   const closeJobs = await recoverEventCloseJobs(context);
   const cleanupJobs = await recoverEventCleanupJobs(context);
-  const enqueued = closeJobs + cleanupJobs;
+  const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
+  const enqueued = closeJobs + cleanupJobs + weatherForecastJobs;
   if (enqueued > 0) {
-    context.logger.info({ enqueued, closeJobs, cleanupJobs }, 'Recovered official.community-events jobs');
+    context.logger.info({ enqueued, closeJobs, cleanupJobs, weatherForecastJobs }, 'Recovered official.community-events jobs');
   }
   return enqueued;
 }
@@ -126,6 +133,33 @@ export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Pr
   return enqueued;
 }
 
+export async function recoverEventWeatherForecastJobs(context: PluginRuntimeContext): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const records = listWeatherForecastCandidateEvents(db);
+  let enqueued = 0;
+  const now = new Date();
+  for (const record of records) {
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
+    const request = eventWeatherForecastJobRequest({ event: record, profile, now });
+    if (!request) {
+      continue;
+    }
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: request.jobName,
+      scopeId: request.scopeId,
+      ...(request.groupId ? { groupId: request.groupId } : {}),
+      ...(request.groupWid ? { groupWid: request.groupWid } : {}),
+      ...(request.runAt ? { runAt: request.runAt } : {}),
+      payload: request.payload,
+      dedupeKey: `${request.dedupeKey}:startup:${record.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
 async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVotePluginEvent): Promise<void> {
   const db = eventsDatabase(context.databases);
   const record = getEventByEquivalentPoll(db, event.vote.pollWaMsgId);
@@ -154,6 +188,16 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
+  }
+  if (event.jobName === EVENTS_JOBS.weatherForecast) {
+    const db = eventsDatabase(context.databases);
+    const eventId = jobPayloadEventId(event.payload);
+    const record = eventId ? getEvent(db, eventId) : undefined;
+    const config = record ? parseEventsConfig(await context.configFor(record.scopeId)) : undefined;
+    const profile = record && config
+      ? config.eventProfiles.find((candidate) => candidate.id === record.profileId)
+      : undefined;
+    return handleEventWeatherForecastJob(context, db, event, profile);
   }
   return [];
 }
@@ -293,6 +337,16 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       subgroupChatId,
       subgroupTitle
     });
+    const closedEvent: StoredEventRecord = {
+      ...record,
+      groupLifecycleStatus: 'poll_closed',
+      ...(subgroupChatId ? { subgroupChatId } : {}),
+      ...(subgroupTitle ? { subgroupTitle } : {})
+    };
+    const weatherForecastAction = eventWeatherForecastJobAction({
+      event: closedEvent,
+      profile: calendarProfile
+    });
     const closedAt = new Date().toISOString();
     markEventClosed(db, {
       eventId: record.id,
@@ -340,6 +394,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     });
     return [
       ...plannedAnnouncementActions,
+      ...(weatherForecastAction ? [weatherForecastAction] : []),
       {
         type: 'plugin.enqueueJob',
         pluginId: EVENTS_PLUGIN_ID,

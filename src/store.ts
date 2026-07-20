@@ -9,6 +9,7 @@ export type EventStatus = 'scheduled' | 'cancelled' | 'failed';
 export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
+export type EventWeatherDeliveryStatus = 'queued' | 'skipped' | 'failed';
 
 export interface StoredEventPollOption {
   id: string;
@@ -109,6 +110,18 @@ export interface StoredCalendarPublicationStatus {
   updatedAt: string;
 }
 
+export interface StoredEventWeatherDelivery {
+  eventId: string;
+  kind: string;
+  scheduledAt: string;
+  status: EventWeatherDeliveryStatus;
+  queuedAt?: string | undefined;
+  skippedAt?: string | undefined;
+  failedAt?: string | undefined;
+  error?: string | undefined;
+  updatedAt: string;
+}
+
 interface EventRow extends PluginDatabaseRow {
   id: string;
   scope_id: string;
@@ -182,6 +195,18 @@ interface CalendarPublicationStatusRow extends PluginDatabaseRow {
   last_success_at: string | null;
   last_error_at: string | null;
   last_error: string | null;
+  updated_at: string;
+}
+
+interface EventWeatherDeliveryRow extends PluginDatabaseRow {
+  event_id: string;
+  kind: string;
+  scheduled_at: string;
+  status: EventWeatherDeliveryStatus;
+  queued_at: string | null;
+  skipped_at: string | null;
+  failed_at: string | null;
+  error: string | null;
   updated_at: string;
 }
 
@@ -403,6 +428,20 @@ export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[
   ).map(eventFromRow);
 }
 
+export function listWeatherForecastCandidateEvents(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT event_records.* FROM event_records
+      LEFT JOIN event_weather_deliveries
+        ON event_weather_deliveries.event_id = event_records.id
+       AND event_weather_deliveries.kind = 'forecast'
+      WHERE event_records.event_status = 'scheduled'
+        AND event_records.group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        AND event_records.subgroup_chat_id IS NOT NULL
+        AND event_weather_deliveries.status IS NULL
+      ORDER BY event_records.starts_at ASC, event_records.id ASC`
+  ).map(eventFromRow);
+}
+
 export function listOpenPollEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
@@ -601,6 +640,51 @@ export function appendEventLog(db: PluginDatabase, input: {
   );
 }
 
+export function getEventWeatherDelivery(
+  db: PluginDatabase,
+  eventId: string,
+  kind: string
+): StoredEventWeatherDelivery | undefined {
+  const row = db.get<EventWeatherDeliveryRow>(
+    'SELECT * FROM event_weather_deliveries WHERE event_id = ? AND kind = ?',
+    eventId,
+    kind
+  );
+  return row ? eventWeatherDeliveryFromRow(row) : undefined;
+}
+
+export function recordEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  kind: string;
+  scheduledAt: string;
+  status: EventWeatherDeliveryStatus;
+  at: string;
+  error?: string | undefined;
+}): void {
+  db.run(
+    `INSERT INTO event_weather_deliveries (
+       event_id, kind, scheduled_at, status, queued_at, skipped_at, failed_at, error, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(event_id, kind) DO UPDATE SET
+       scheduled_at = excluded.scheduled_at,
+       status = excluded.status,
+       queued_at = excluded.queued_at,
+       skipped_at = excluded.skipped_at,
+       failed_at = excluded.failed_at,
+       error = excluded.error,
+       updated_at = excluded.updated_at`,
+    input.eventId,
+    input.kind,
+    input.scheduledAt,
+    input.status,
+    input.status === 'queued' ? input.at : null,
+    input.status === 'skipped' ? input.at : null,
+    input.status === 'failed' ? input.at : null,
+    input.error ?? null,
+    input.at
+  );
+}
+
 export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
   scopeId: string;
   calendarId: string;
@@ -778,6 +862,20 @@ function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): St
     ...(row.last_success_at ? { lastSuccessAt: row.last_success_at } : {}),
     ...(row.last_error_at ? { lastErrorAt: row.last_error_at } : {}),
     ...(row.last_error ? { lastError: row.last_error } : {}),
+    updatedAt: row.updated_at
+  };
+}
+
+function eventWeatherDeliveryFromRow(row: EventWeatherDeliveryRow): StoredEventWeatherDelivery {
+  return {
+    eventId: row.event_id,
+    kind: row.kind,
+    scheduledAt: row.scheduled_at,
+    status: row.status,
+    ...(row.queued_at ? { queuedAt: row.queued_at } : {}),
+    ...(row.skipped_at ? { skippedAt: row.skipped_at } : {}),
+    ...(row.failed_at ? { failedAt: row.failed_at } : {}),
+    ...(row.error ? { error: row.error } : {}),
     updatedAt: row.updated_at
   };
 }

@@ -7,7 +7,8 @@ export const EVENTS_DATABASE = 'events';
 
 export const EVENTS_JOBS = {
   close: 'event.close',
-  cleanup: 'event.cleanup'
+  cleanup: 'event.cleanup',
+  weatherForecast: 'event.weatherForecast'
 } as const;
 
 export const EVENTS_PERMISSIONS = {
@@ -47,7 +48,8 @@ export const eventsManifest: PluginManifest = {
   dangerousActions: [],
   backgroundJobs: [
     EVENTS_JOBS.close,
-    EVENTS_JOBS.cleanup
+    EVENTS_JOBS.cleanup,
+    EVENTS_JOBS.weatherForecast
   ],
   cancellation: {
     workflows: [
@@ -83,7 +85,8 @@ export const eventsManifest: PluginManifest = {
   },
   dependencies: [
     { pluginId: 'official.doas', versionRange: '>=0.1.0' },
-    { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' }
+    { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
+    { pluginId: 'official.weather', versionRange: '>=0.1.0', optional: true }
   ],
   databases: eventsDatabases,
   dataVersion: '1',
@@ -94,6 +97,7 @@ export const eventsManifest: PluginManifest = {
       'Cancel active event lifecycles by creator or event manager.',
       'Close polls before the event, gather attendees, and create event subgroups.',
       'Export one calendar file per scope.',
+      'Optionally queue an event-day weather forecast into created event groups when official.weather is installed and enabled.',
       'For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community.'
     ],
     prerequisites: [
@@ -101,7 +105,8 @@ export const eventsManifest: PluginManifest = {
       'official.community-subgroups must be installed so event subgroups use the shared creation policy.',
       'The bot must be an admin of the announcement and community groups.',
       'The caller needs the configured profile-specific events.create.* permission to create events.',
-      'The event creator or an events.manage actor can cancel active events.'
+      'The event creator or an events.manage actor can cancel active events.',
+      'Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope unless the event profile supplies an explicit weather location.'
     ],
     workflows: [
       {

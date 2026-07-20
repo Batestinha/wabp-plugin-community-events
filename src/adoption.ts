@@ -7,6 +7,7 @@ import { calendarResourceForProfile, parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
+import { eventWeatherForecastJobRequest } from './weather';
 import {
   appendEventLog,
   eventsDatabase,
@@ -233,6 +234,12 @@ export async function adoptEventLifecycle(input: {
       ? `${EVENTS_JOBS.close}:${event.id}`
       : `${EVENTS_JOBS.cleanup}:${event.id}:adopted`
   });
+  if (origin !== 'adopted_poll') {
+    const weatherRequest = eventWeatherForecastJobRequest({ event, profile, now });
+    if (weatherRequest) {
+      await runtime.enqueuePluginJob(weatherRequest);
+    }
+  }
 
   return {
     status: 'adopted',

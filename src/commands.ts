@@ -26,6 +26,7 @@ import { eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } fr
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
+import { eventWeatherForecastJobRequest } from './weather';
 import {
   DOAS_POLL_PUBLISH_METHOD,
   DOAS_POLL_SERVICE_ID,
@@ -628,6 +629,30 @@ async function updateEventLifecycle(input: {
       payload: { eventId: input.event.id, attempt: 0 },
       dedupeKey: `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${input.materialized.cleanupAt.toISOString()}`
     });
+  }
+  if (
+    input.event.subgroupChatId &&
+    input.event.eventStatus === 'scheduled' &&
+    (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed')
+  ) {
+    const weatherRequest = eventWeatherForecastJobRequest({
+      event: {
+        ...input.event,
+        startsAt: input.materialized.startsAt.toISOString(),
+        startsAtUtc: input.materialized.startsAt.toISOString(),
+        timezone: input.event.timezone || input.config.timezone,
+        localDate: input.materialized.localDate,
+        ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
+        closeAt: input.materialized.closeAt.toISOString(),
+        cleanupAt: input.materialized.cleanupAt.toISOString(),
+        groupTitle: input.materialized.groupTitle,
+        ...(input.event.subgroupTitle || input.materialized.groupTitle ? { subgroupTitle: input.materialized.groupTitle } : {})
+      },
+      profile: input.profile
+    });
+    if (weatherRequest) {
+      await input.runtime.enqueuePluginJob(weatherRequest);
+    }
   }
 
   appendEventLog(input.db, {
@@ -1424,6 +1449,10 @@ async function createUnplannedEventLifecycle(input: {
     payload: { eventId: event.id, attempt: 0 },
     dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:unplanned`
   });
+  const weatherRequest = eventWeatherForecastJobRequest({ event, profile: input.profile, now: input.now });
+  if (weatherRequest) {
+    await input.runtime.enqueuePluginJob(weatherRequest);
+  }
 
   const groupJoinUrl = await eventGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId);
   const announcementText = renderEventGroupAnnouncement({

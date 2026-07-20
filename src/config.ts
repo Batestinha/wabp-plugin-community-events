@@ -9,11 +9,29 @@ export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_UNPLANNED_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
 export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
+export const EVENT_WEATHER_TEMPLATE_TOKENS = [
+  'eventId',
+  'groupDisplayName',
+  'subgroupChatId',
+  'weatherDate',
+  'weatherLocation',
+  'weatherSummary',
+  'temperatureMax',
+  'temperatureMin',
+  'precipitation',
+  'precipitationProbability',
+  'windSpeed',
+  'windGust',
+  'windDirection',
+  'weatherCode'
+] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = "Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName}'s calendar by tapping this link: {calendarSubscriptionUrl}";
+export const DEFAULT_EVENT_WEATHER_TEMPLATE = 'Weather for {groupDisplayName} on {weatherDate}: {weatherSummary}';
 
 const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');
 const optionalAuthoredTextSchema = z.string().transform((value) => value.trim() ? value : '');
+const localTimeSchema = z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
 export const eventQuestionChoiceSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
@@ -88,6 +106,29 @@ const eventCalendarResourceObjectSchema = z.object({
 
 const eventCalendarResourceSchema = z.preprocess(normalizeEventCalendarResourceInput, eventCalendarResourceObjectSchema);
 
+export const eventWeatherMetricFlagsSchema = z.object({
+  temperature: z.boolean().default(true),
+  precipitation: z.boolean().default(true),
+  wind: z.boolean().default(true),
+  weatherCode: z.boolean().default(true)
+}).strict().default({});
+
+export const eventWeatherLocationOverrideSchema = z.object({
+  label: z.string().trim().default(''),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  timezone: z.string().trim().default('')
+}).strict().default({});
+
+export const eventWeatherConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  sendAtLocalTime: localTimeSchema.default('07:00'),
+  locationSource: z.enum(['weather-scope', 'profile-override']).default('weather-scope'),
+  location: eventWeatherLocationOverrideSchema,
+  metrics: eventWeatherMetricFlagsSchema,
+  template: authoredTextSchema.default(DEFAULT_EVENT_WEATHER_TEMPLATE)
+}).strict().default({});
+
 const eventProfileObjectSchema = z.object({
   id: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
   label: z.string().trim().min(1),
@@ -123,7 +164,8 @@ const eventProfileObjectSchema = z.object({
       sendOnUnplannedCreated: z.boolean().default(false),
       template: authoredTextSchema.default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
     }).strict().default({})
-  }).strict().default({})
+  }).strict().default({}),
+  weather: eventWeatherConfigSchema
 }).strict().superRefine((profile, ctx) => {
   const questionKeys = new Set(profile.questions.map((question) => question.key));
   for (const question of profile.questions) {
@@ -201,6 +243,36 @@ const eventProfileObjectSchema = z.object({
       path: ['calendar', 'locationQuestionKey']
     });
   }
+  if (profile.weather.enabled && profile.weather.locationSource === 'profile-override') {
+    if (!profile.weather.location.label.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `weather.location.label is required when using a profile weather location`,
+        path: ['weather', 'location', 'label']
+      });
+    }
+    if (profile.weather.location.latitude === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `weather.location.latitude is required when using a profile weather location`,
+        path: ['weather', 'location', 'latitude']
+      });
+    }
+    if (profile.weather.location.longitude === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `weather.location.longitude is required when using a profile weather location`,
+        path: ['weather', 'location', 'longitude']
+      });
+    }
+    if (!profile.weather.location.timezone.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `weather.location.timezone is required when using a profile weather location`,
+        path: ['weather', 'location', 'timezone']
+      });
+    }
+  }
   const templateTokens = new Set([
     ...questionKeys,
     ...EVENT_DATE_TEMPLATE_TOKENS,
@@ -214,6 +286,10 @@ const eventProfileObjectSchema = z.object({
     ...templateTokens,
     ...EVENT_CALENDAR_HINT_TEMPLATE_TOKENS
   ]);
+  const weatherTemplateTokens = new Set([
+    ...templateTokens,
+    ...EVENT_WEATHER_TEMPLATE_TOKENS
+  ]);
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
   validateEventTemplate(profile.unplanned.announcementTemplate, unplannedTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
@@ -221,6 +297,7 @@ const eventProfileObjectSchema = z.object({
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
   validateEventTemplate(profile.calendar.hint.template, calendarHintTemplateTokens, ['calendar', 'hint', 'template'], ctx);
+  validateEventTemplate(profile.weather.template, weatherTemplateTokens, ['weather', 'template'], ctx);
 });
 
 export const eventProfileSchema = z.preprocess(normalizeEventProfileInput, eventProfileObjectSchema);
@@ -274,6 +351,22 @@ export const defaultClimbingEventProfile: EventProfile = {
       sendOnUnplannedCreated: false,
       template: DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE
     }
+  },
+  weather: {
+    enabled: false,
+    sendAtLocalTime: '07:00',
+    locationSource: 'weather-scope',
+    location: {
+      label: '',
+      timezone: ''
+    },
+    metrics: {
+      temperature: true,
+      precipitation: true,
+      wind: true,
+      weatherCode: true
+    },
+    template: DEFAULT_EVENT_WEATHER_TEMPLATE
   }
 };
 
@@ -327,6 +420,8 @@ export type EventQuestionChoice = z.infer<typeof eventQuestionChoiceSchema>;
 export type EventPollOption = z.infer<typeof eventPollOptionSchema>;
 export type EventResponseClass = z.infer<typeof eventResponseClassSchema>;
 export type EventCalendarResource = z.infer<typeof eventCalendarResourceSchema>;
+export type EventWeatherConfig = z.infer<typeof eventWeatherConfigSchema>;
+export type EventWeatherMetricFlags = z.infer<typeof eventWeatherMetricFlagsSchema>;
 export type EventProfile = z.infer<typeof eventProfileSchema>;
 export type EventsConfig = z.infer<typeof eventsConfigSchema>;
 
@@ -416,6 +511,14 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
           () => t('official.community-events.profile.climbing.calendar.hint.template')
         )
       }
+    },
+    weather: {
+      ...profile.weather,
+      template: localizeIfDefault(
+        profile.weather.template,
+        defaultClimbingEventProfile.weather.template,
+        () => t('official.community-events.profile.climbing.weather.template')
+      )
     }
   };
 }

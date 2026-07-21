@@ -44,7 +44,7 @@ export function scopeCalendarEvents(config: EventsConfig, calendarId: string, ev
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {
   const root = path.resolve(
     appConfig.PLUGIN_DATABASE_DIR,
-    sanitizePathSegment(appConfig.BOT_PROFILE_ID),
+    sanitizePathSegment(appConfig.WHATSAPP_ACCOUNT_ID),
     'official.community-events',
     CALENDAR_EXPORT_ROOT
   );

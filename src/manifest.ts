@@ -20,7 +20,7 @@ export const EVENTS_PERMISSIONS = {
 export const eventsDatabases = [{
   name: EVENTS_DATABASE,
   engine: 'sqlite' as const,
-  scope: 'botProfile' as const,
+  scope: 'account' as const,
   migrations: 'migrations/events'
 }];
 

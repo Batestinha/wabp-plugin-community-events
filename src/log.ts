@@ -30,7 +30,7 @@ export async function appendScopeEventJsonLog(input: {
 export function eventJsonLogPath(appConfig: AppConfig, scopeId: string): string {
   return path.resolve(
     appConfig.PLUGIN_DATABASE_DIR,
-    sanitizePathSegment(appConfig.BOT_PROFILE_ID),
+    sanitizePathSegment(appConfig.WHATSAPP_ACCOUNT_ID),
     'official.community-events',
     'logs',
     `${sanitizePathSegment(scopeId)}.jsonl`

@@ -26,7 +26,7 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'weatherCode'
 ] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
-export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = "Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName}'s calendar by tapping this link: {calendarSubscriptionUrl}";
+export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = 'Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName} by tapping this link: {calendarSubscriptionUrl}';
 export const DEFAULT_EVENT_WEATHER_TEMPLATE = 'Weather for {groupDisplayName} on {weatherDate}: {weatherSummary}';
 
 const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');

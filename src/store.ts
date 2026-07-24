@@ -430,14 +430,10 @@ export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[
 
 export function listWeatherForecastCandidateEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
-    `SELECT event_records.* FROM event_records
-      LEFT JOIN event_weather_deliveries
-        ON event_weather_deliveries.event_id = event_records.id
-       AND event_weather_deliveries.kind = 'forecast'
+    `SELECT * FROM event_records
       WHERE event_records.event_status = 'scheduled'
         AND event_records.group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
         AND event_records.subgroup_chat_id IS NOT NULL
-        AND event_weather_deliveries.status IS NULL
       ORDER BY event_records.starts_at ASC, event_records.id ASC`
   ).map(eventFromRow);
 }

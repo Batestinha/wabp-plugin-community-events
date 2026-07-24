@@ -122,6 +122,8 @@ export const eventWeatherLocationOverrideSchema = z.object({
 
 export const eventWeatherConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  sendOnPollClose: z.boolean().default(true),
+  sendDaily: z.boolean().default(false),
   sendAtLocalTime: localTimeSchema.default('07:00'),
   locationSource: z.enum(['weather-scope', 'profile-override']).default('weather-scope'),
   location: eventWeatherLocationOverrideSchema,
@@ -243,6 +245,13 @@ const eventProfileObjectSchema = z.object({
       path: ['calendar', 'locationQuestionKey']
     });
   }
+  if (profile.weather.enabled && !profile.weather.sendOnPollClose && !profile.weather.sendDaily) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `weather requires at least one send trigger`,
+      path: ['weather']
+    });
+  }
   if (profile.weather.enabled && profile.weather.locationSource === 'profile-override') {
     if (!profile.weather.location.label.trim()) {
       ctx.addIssue({
@@ -354,6 +363,8 @@ export const defaultClimbingEventProfile: EventProfile = {
   },
   weather: {
     enabled: false,
+    sendOnPollClose: true,
+    sendDaily: false,
     sendAtLocalTime: '07:00',
     locationSource: 'weather-scope',
     location: {

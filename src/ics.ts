@@ -1,10 +1,12 @@
-import { mkdir, rename, writeFile } from 'node:fs/promises';
+import { chown, lstat, mkdir, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { EventCalendarResource, EventsConfig } from './config';
 import type { StoredEventRecord } from './store';
 
 const CALENDAR_EXPORT_ROOT = 'calendar-exports';
+const DEFAULT_CONTAINER_APP_UID = 1000;
+const DEFAULT_CONTAINER_APP_GID = 1000;
 
 export async function writeScopeCalendar(input: {
   appConfig: AppConfig;
@@ -19,9 +21,12 @@ export async function writeScopeCalendar(input: {
   }
   const filePath = scopeCalendarPath(input.appConfig, calendar, input.scopeId);
   await mkdir(path.dirname(filePath), { recursive: true });
+  await chownCalendarExportTree(calendarExportRoot(input.appConfig));
   const tempPath = `${filePath}.tmp`;
   await writeFile(tempPath, renderScopeCalendar(input.config, input.calendarId, input.events), 'utf8');
+  await chownCalendarExportPath(tempPath);
   await rename(tempPath, filePath);
+  await chownCalendarExportPath(filePath);
   return filePath;
 }
 
@@ -42,12 +47,7 @@ export function scopeCalendarEvents(config: EventsConfig, calendarId: string, ev
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {
-  const root = path.resolve(
-    appConfig.PLUGIN_DATABASE_DIR,
-    sanitizePathSegment(appConfig.WHATSAPP_ACCOUNT_ID),
-    'official.community-events',
-    CALENDAR_EXPORT_ROOT
-  );
+  const root = calendarExportRoot(appConfig);
   const directory = safeRelativeDirectory(calendar.directory);
   const resolved = path.resolve(root, directory, sanitizePathSegment(scopeId), `${sanitizePathSegment(calendar.id)}.ics`);
   if (!resolved.startsWith(`${root}${path.sep}`) && resolved !== root) {
@@ -145,4 +145,102 @@ function safeRelativeDirectory(input: string): string {
 function sanitizePathSegment(input: string): string {
   const sanitized = input.trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^\.+/, '');
   return sanitized || 'scope';
+}
+
+function calendarExportRoot(appConfig: AppConfig): string {
+  return path.resolve(
+    appConfig.PLUGIN_DATABASE_DIR,
+    sanitizePathSegment(appConfig.WHATSAPP_ACCOUNT_ID),
+    'official.community-events',
+    CALENDAR_EXPORT_ROOT
+  );
+}
+
+async function chownCalendarExportTree(root: string): Promise<void> {
+  const owner = calendarExportOwner();
+  if (!owner) {
+    return;
+  }
+  await chownPathAndChildren(root, owner);
+}
+
+async function chownCalendarExportPath(targetPath: string): Promise<void> {
+  const owner = calendarExportOwner();
+  if (!owner) {
+    return;
+  }
+  await chownPath(targetPath, owner);
+}
+
+async function chownPathAndChildren(targetPath: string, owner: CalendarExportOwner): Promise<void> {
+  const stat = await statOrMissing(targetPath);
+  if (!stat) {
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    return;
+  }
+  if (stat.isDirectory()) {
+    for (const entry of await readdir(targetPath)) {
+      await chownPathAndChildren(path.join(targetPath, entry), owner);
+    }
+  }
+  await chown(targetPath, owner.uid, owner.gid);
+}
+
+async function chownPath(targetPath: string, owner: CalendarExportOwner): Promise<void> {
+  const stat = await statOrMissing(targetPath);
+  if (!stat || stat.isSymbolicLink()) {
+    return;
+  }
+  await chown(targetPath, owner.uid, owner.gid);
+}
+
+async function statOrMissing(targetPath: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  try {
+    return await lstat(targetPath);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+interface CalendarExportOwner {
+  uid: number;
+  gid: number;
+}
+
+function calendarExportOwner(): CalendarExportOwner | undefined {
+  // The Docker console runs as root, while the bot writes the same export tree as node.
+  if (process.env.WA_BOT_CONTAINER_RUNTIME !== 'docker') {
+    return undefined;
+  }
+  if (typeof process.getuid !== 'function' || process.getuid() !== 0) {
+    return undefined;
+  }
+  return {
+    uid: integerEnv(process.env.WABP_APP_UID) ?? DEFAULT_CONTAINER_APP_UID,
+    gid: integerEnv(process.env.WABP_APP_GID) ?? DEFAULT_CONTAINER_APP_GID
+  };
+}
+
+function integerEnv(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(value)) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
 }

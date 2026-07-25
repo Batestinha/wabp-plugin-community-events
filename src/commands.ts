@@ -44,7 +44,6 @@ import {
   newEventId,
   saveCreatedGroupParticipants,
   updateEventStructuredData,
-  upsertVote,
   type StoredEventRecord,
 } from './store';
 
@@ -1269,42 +1268,6 @@ function registerEventFlowCompletionHandlers(
           payload: { eventId },
           dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
         });
-        if (context.pollVotesFor) {
-          try {
-            const initialVotes = await context.pollVotesFor(sent.messageId);
-            for (const vote of initialVotes) {
-              upsertVote(db, eventId, vote);
-            }
-            await appendEventJsonLog(context, {
-              action: 'poll.hydrate.initial',
-              scopeId: draft.scopeId,
-              eventId,
-              actorWid: draft.actorWid,
-              profileId: profile.id,
-              pollWaMsgId: sent.messageId,
-              metadata: { liveVoteCount: initialVotes.length }
-            });
-          } catch (error) {
-            await appendEventJsonLog(context, {
-              action: 'poll.hydrate.initial_failed',
-              scopeId: draft.scopeId,
-              eventId,
-              actorWid: draft.actorWid,
-              profileId: profile.id,
-              pollWaMsgId: sent.messageId,
-              metadata: { reason: error instanceof Error ? error.message : String(error) }
-            });
-          }
-          await runtime.enqueuePluginJob({
-            jobName: EVENTS_JOBS.pollHydrate,
-            scopeId: draft.scopeId,
-            ...(draft.groupId ? { groupId: draft.groupId } : {}),
-            ...(draft.groupWid ? { groupWid: draft.groupWid } : {}),
-            runAt: new Date(Math.min(now.getTime() + 2 * 60_000, materialized.closeAt.getTime())),
-            payload: { eventId },
-            dedupeKey: `${EVENTS_JOBS.pollHydrate}:${eventId}:publish`
-          });
-        }
         await sendEventCalendarHint({
           context,
           runtime,

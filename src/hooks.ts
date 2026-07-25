@@ -281,6 +281,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       ];
     }
+    const liveVoteReadbackEnabled = Boolean(context.pollVotesFor);
     const liveVotes = context.pollVotesFor ? await context.pollVotesFor(record.pollWaMsgId) : [];
     for (const vote of liveVotes) {
       upsertVote(db, record.id, vote);
@@ -298,7 +299,11 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       });
     }
-    const votes = liveVotes.length > 0 ? liveVotes : votesFromStore(listVotes(db, record.id), record);
+    const storedVotes = votesFromStore(listVotes(db, record.id), record);
+    if (liveVoteReadbackEnabled && liveVotes.length === 0 && storedVotes.length > 0) {
+      throw new Error('Poll vote readback returned no live voters while stored vote rows exist; refusing stale stored-vote fallback.');
+    }
+    const votes = liveVoteReadbackEnabled ? liveVotes : storedVotes;
     const attendeeWids = voterWidsForResponseBehavior(record, votes, 'includeInEventGroup');
     let subgroupChatId: string | undefined;
     let subgroupTitle: string | undefined;

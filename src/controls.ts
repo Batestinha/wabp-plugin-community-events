@@ -32,6 +32,34 @@ function control(
   });
 }
 
+const eventsPanelControl = defineControl({
+  id: 'plugin.official.community-events.eventsPanel',
+  label: 'Events',
+  description: 'Published events recorded for this scope.',
+  plane: 'plugin-scope-config',
+  domain: 'official-plugin-settings',
+  section: 'Community Events',
+  order: 68,
+  visibility: 'bot_admin',
+  configurable: false,
+  storage: { kind: 'internal', reason: 'Read-only scoped events panel; data is loaded from the events plugin database.' },
+  schema: { type: 'object', properties: {} },
+  ui: {
+    widget: 'builder',
+    builderId: 'official.community-events.events.v1',
+    builderEndpoints: {
+      state: '/api/v1/plugins/official.community-events/events/:scopeId'
+    },
+    helpText: 'Published events recorded for this scope.'
+  },
+  restartRequirement: 'NO_RESTART',
+  dangerous: false,
+  sensitivity: { sensitive: false, redact: 'none' },
+  auditExemptReason: 'Read-only scoped events panel.',
+  relatedCommandIds: ['/event'],
+  relatedActionIds: []
+});
+
 export const eventsControls: ControlDescriptor[] = [
   control('enabled', 'Enabled', 'Enable guided event creation in this scope.', 10, { type: 'boolean' }, { widget: 'toggle' }),
   control('timezone', 'Timezone', 'IANA timezone used when combining event date and time answers.', 20, { type: 'string', format: 'timezone' }, { widget: 'select' }),
@@ -51,6 +79,7 @@ export const eventsControls: ControlDescriptor[] = [
     builderId: 'official.community-events.event-profiles.v1',
     hideWhenBuilderMounted: true
   }),
+  eventsPanelControl,
   control('adoption', 'Adopt existing event', 'Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management.', 70, { type: 'object', properties: {} }, {
     widget: 'builder',
     builderId: 'official.community-events.adoption.v1',

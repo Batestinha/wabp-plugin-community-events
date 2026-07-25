@@ -780,6 +780,15 @@ export function listCalendarEvents(db: PluginDatabase, scopeId: string, profileI
   return rows.map(eventFromRow);
 }
 
+export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE scope_id = ?
+      ORDER BY starts_at ASC, id ASC`,
+    scopeId
+  ).map(eventFromRow);
+}
+
 function eventFromRow(row: EventRow): StoredEventRecord {
   return {
     id: row.id,

@@ -8,6 +8,7 @@ export const EVENTS_DATABASE = 'events';
 export const EVENTS_JOBS = {
   close: 'event.close',
   cleanup: 'event.cleanup',
+  pollHydrate: 'event.pollHydrate',
   weatherForecast: 'event.weatherForecast'
 } as const;
 
@@ -49,6 +50,7 @@ export const eventsManifest: PluginManifest = {
   backgroundJobs: [
     EVENTS_JOBS.close,
     EVENTS_JOBS.cleanup,
+    EVENTS_JOBS.pollHydrate,
     EVENTS_JOBS.weatherForecast
   ],
   cancellation: {

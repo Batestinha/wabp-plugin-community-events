@@ -74,10 +74,11 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
 export async function recoverEventJobs(context: PluginRuntimeContext): Promise<number> {
   const closeJobs = await recoverEventCloseJobs(context);
   const cleanupJobs = await recoverEventCleanupJobs(context);
+  const pollHydrateJobs = await recoverEventPollHydrationJobs(context);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
-  const enqueued = closeJobs + cleanupJobs + weatherForecastJobs;
+  const enqueued = closeJobs + cleanupJobs + pollHydrateJobs + weatherForecastJobs;
   if (enqueued > 0) {
-    context.logger.info({ enqueued, closeJobs, cleanupJobs, weatherForecastJobs }, 'Recovered official.community-events jobs');
+    context.logger.info({ enqueued, closeJobs, cleanupJobs, pollHydrateJobs, weatherForecastJobs }, 'Recovered official.community-events jobs');
   }
   return enqueued;
 }
@@ -106,6 +107,30 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       ...(!due && Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
       payload: { eventId: record.id },
       dedupeKey: `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
+export async function recoverEventPollHydrationJobs(context: PluginRuntimeContext, options: EventRecoveryOptions = {}): Promise<number> {
+  if (!context.pollVotesFor) {
+    return 0;
+  }
+  const db = eventsDatabase(context.databases);
+  const records = listOpenPollEvents(db);
+  const now = options.now ?? new Date();
+  let enqueued = 0;
+  for (const record of records) {
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const closeAt = effectiveCloseAt(record, config);
+    persistEffectiveCloseAt(db, record, closeAt);
+    if (!record.pollWaMsgId || !Number.isFinite(closeAt.getTime()) || closeAt.getTime() <= now.getTime()) {
+      continue;
+    }
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      ...pollHydrationJobRequest(record, now, closeAt, 'startup')
     });
     enqueued += 1;
   }
@@ -186,6 +211,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.close) {
     return closeEvent(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.pollHydrate) {
+    return hydrateOpenPoll(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
   }
@@ -200,6 +228,41 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
     return handleEventWeatherForecastJob(context, db, event, profile);
   }
   return [];
+}
+
+async function hydrateOpenPoll(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {
+  const db = eventsDatabase(context.databases);
+  const eventId = jobPayloadEventId(job.payload);
+  if (!eventId) {
+    return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
+  }
+  const record = getEvent(db, eventId);
+  if (!record || record.eventStatus !== 'scheduled' || record.groupLifecycleStatus !== 'poll_open') {
+    return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or poll not open' })];
+  }
+  if (!record.pollWaMsgId || !context.pollVotesFor) {
+    return [audit('events.poll_hydrate.skipped', { eventId: record.id, reason: 'poll readback unavailable' })];
+  }
+
+  const config = parseEventsConfig(await context.configFor(record.scopeId));
+  const closeAt = effectiveCloseAt(record, config);
+  persistEffectiveCloseAt(db, record, closeAt);
+  const now = new Date();
+  const liveVotes = await context.pollVotesFor(record.pollWaMsgId);
+  for (const vote of liveVotes) {
+    upsertVote(db, record.id, vote);
+  }
+  if (!Number.isFinite(closeAt.getTime()) || closeAt.getTime() <= now.getTime()) {
+    return [audit('events.poll_hydrate.finished', { eventId: record.id, liveVoteCount: liveVotes.length })];
+  }
+  return [
+    {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      ...pollHydrationJobRequest(record, now, closeAt, 'watch')
+    },
+    audit('events.poll_hydrate.refreshed', { eventId: record.id, liveVoteCount: liveVotes.length })
+  ];
 }
 
 async function handleGroupDismantled(
@@ -899,6 +962,25 @@ function votesFromStore(votes: StoredEventVote[], record: StoredEventRecord): Po
     selectedOptionNumbers: vote.selectedOptionNumbers,
     ...(vote.interactedAt ? { interactedAt: new Date(vote.interactedAt) } : {})
   }));
+}
+
+function pollHydrationJobRequest(
+  record: StoredEventRecord,
+  now: Date,
+  closeAt: Date,
+  reason: 'startup' | 'publish' | 'watch'
+): Omit<PluginEnqueueJobAction, 'type' | 'pluginId'> {
+  const runAtMs = Math.min(now.getTime() + 2 * 60_000, closeAt.getTime());
+  const runAt = new Date(runAtMs);
+  return {
+    jobName: EVENTS_JOBS.pollHydrate,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt,
+    payload: { eventId: record.id },
+    dedupeKey: `${EVENTS_JOBS.pollHydrate}:${record.id}:${reason}:${runAt.toISOString()}`
+  };
 }
 
 function jobPayloadEventId(payload: unknown): string | undefined {

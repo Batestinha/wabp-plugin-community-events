@@ -334,7 +334,6 @@ function weatherForecastServiceInput(event: StoredEventRecord, profile: EventPro
       metrics: {
         temperature: profile.weather.metrics.temperature,
         apparentTemperature: false,
-        relativeHumidity: false,
         wind: profile.weather.metrics.wind,
         precipitation: profile.weather.metrics.precipitation,
         weatherCode: profile.weather.metrics.weatherCode,
@@ -367,6 +366,11 @@ function weatherSummary(day: WeatherForecastDay, t: TranslateFn): string {
     weatherMetricSection(t, 'official.community-events.weather.section.temperature', [
       labeledMetric(t, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
       labeledMetric(t, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin)
+    ]),
+    weatherMetricSection(t, 'official.community-events.weather.section.relativeHumidity', [
+      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMax', day.relativeHumidityMax),
+      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMin', day.relativeHumidityMin),
+      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMean', day.relativeHumidityMean)
     ]),
     weatherMetricSection(t, 'official.community-events.weather.section.precipitation', [
       formatMetric(day.precipitationSum),

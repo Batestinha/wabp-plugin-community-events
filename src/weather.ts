@@ -12,7 +12,7 @@ import { eventDateAndTimeToUtc } from './datetime';
 import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
-import type { EventProfile } from './config';
+import { localizeDefaultEventProfiles, type EventProfile } from './config';
 import type { StoredEventRecord } from './store';
 import {
   appendEventLog,
@@ -221,9 +221,10 @@ export async function handleEventWeatherForecastJob(
       ];
     }
     const t = await context.i18n.translatorForIdentity(event.subgroupChatId ?? event.scopeId, event.scopeId);
+    const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
     const text = renderEventWeatherForecast({
       event,
-      profile,
+      profile: localizedProfile,
       report,
       forecastDay,
       t
@@ -362,19 +363,31 @@ function selectForecastDay(report: WeatherForecastOutput, event: StoredEventReco
 }
 
 function weatherSummary(day: WeatherForecastDay, t: TranslateFn): string {
-  const parts = [
-    labeledMetric(t, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
-    labeledMetric(t, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin),
-    labeledMetric(t, 'official.community-events.weather.metric.precipitation', day.precipitationSum),
-    labeledMetric(t, 'official.community-events.weather.metric.precipitationProbability', day.precipitationProbabilityMax),
-    labeledMetric(t, 'official.community-events.weather.metric.windSpeed', day.windSpeedMax),
-    labeledMetric(t, 'official.community-events.weather.metric.windGust', day.windGustsMax),
-    labeledMetric(t, 'official.community-events.weather.metric.windDirection', day.windDirectionDominant),
-    day.weatherCode !== undefined
-      ? `${t('official.community-events.weather.metric.weatherCode')}: ${day.weatherCode}`
-      : undefined
+  const sections = [
+    weatherMetricSection(t, 'official.community-events.weather.section.temperature', [
+      labeledMetric(t, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
+      labeledMetric(t, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin)
+    ]),
+    weatherMetricSection(t, 'official.community-events.weather.section.precipitation', [
+      formatMetric(day.precipitationSum),
+      labeledMetric(
+        t,
+        'official.community-events.weather.metric.precipitationProbability',
+        day.precipitationProbabilityMax
+      )
+    ]),
+    weatherMetricSection(t, 'official.community-events.weather.section.wind', [
+      labeledMetric(t, 'official.community-events.weather.metric.windSpeed', day.windSpeedMax),
+      labeledMetric(t, 'official.community-events.weather.metric.windGust', day.windGustsMax),
+      labeledMetric(t, 'official.community-events.weather.metric.windDirection', day.windDirectionDominant)
+    ])
   ].filter((value): value is string => Boolean(value));
-  return parts.join(', ') || t('official.community-events.weather.none');
+  return sections.join('\n') || t('official.community-events.weather.none');
+}
+
+function weatherMetricSection(t: TranslateFn, key: string, metrics: Array<string | undefined>): string | undefined {
+  const values = metrics.filter((value): value is string => Boolean(value));
+  return values.length > 0 ? `*${t(key)}*: ${values.join(', ')}` : undefined;
 }
 
 function labeledMetric(t: TranslateFn, key: string, metric?: WeatherMetricValue | undefined): string | undefined {

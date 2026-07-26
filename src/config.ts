@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
+import { eventsMessages } from './messages';
 
 export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
@@ -27,7 +28,9 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
 ] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = 'Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName} by tapping this link: {calendarSubscriptionUrl}';
-export const DEFAULT_EVENT_WEATHER_TEMPLATE = 'Weather for {groupDisplayName} on {weatherDate}: {weatherSummary}';
+export const DEFAULT_EVENT_WEATHER_TEMPLATE = eventsMessages[
+  'official.community-events.profile.climbing.weather.template'
+]!;
 
 const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');
 const optionalAuthoredTextSchema = z.string().transform((value) => value.trim() ? value : '');

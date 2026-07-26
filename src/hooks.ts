@@ -6,6 +6,10 @@ import type {
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
+import {
+  IncompletePollVoteReadbackError,
+  requireCompletePollVotes
+} from '../../../platform/transport/pollVoteReadback';
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
@@ -29,17 +33,16 @@ import {
   listPendingCleanupEvents,
   listCalendarEvents,
   listWeatherForecastCandidateEvents,
-  listVotes,
   markEventCleanupFailed,
   markEventCleaned,
   markEventClosed,
   markEventFailed,
   markEventMissed,
+  replaceVotes,
   saveCreatedGroupParticipants,
   updateEventCloseAt,
   upsertVote,
-  type StoredEventRecord,
-  type StoredEventVote
+  type StoredEventRecord
 } from './store';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
@@ -281,9 +284,20 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       ];
     }
-    const liveVotes = context.pollVotesFor ? await context.pollVotesFor(record.pollWaMsgId) : [];
+    if (!context.pollVoteReadbackFor) {
+      throw new IncompletePollVoteReadbackError({
+        pollWaMsgId: record.pollWaMsgId,
+        coverage: 'incomplete',
+        source: 'plugin-runtime',
+        votes: [],
+        reason: 'poll_readback_not_configured'
+      });
+    }
+    const liveVotes = requireCompletePollVotes(
+      await context.pollVoteReadbackFor(record.pollWaMsgId)
+    );
+    replaceVotes(db, record.id, liveVotes);
     for (const vote of liveVotes) {
-      upsertVote(db, record.id, vote);
       await appendJsonLog(context, {
         action: 'poll.vote.snapshot',
         scopeId: record.scopeId,
@@ -298,7 +312,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       });
     }
-    const votes = liveVotes.length > 0 ? liveVotes : votesFromStore(listVotes(db, record.id), record);
+    const votes = liveVotes;
     const attendeeWids = voterWidsForResponseBehavior(record, votes, 'includeInEventGroup');
     let subgroupChatId: string | undefined;
     let subgroupTitle: string | undefined;
@@ -407,6 +421,47 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     ];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (error instanceof IncompletePollVoteReadbackError) {
+      const retryAt = new Date(Date.now() + 60_000);
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.close.readback_incomplete',
+        metadata: {
+          reason,
+          source: error.readback.source,
+          retryAt: retryAt.toISOString()
+        }
+      });
+      await appendJsonLog(context, {
+        action: 'event.close_readback_incomplete',
+        scopeId: record.scopeId,
+        eventId: record.id,
+        profileId: record.profileId,
+        pollWaMsgId: record.pollWaMsgId,
+        metadata: {
+          reason,
+          source: error.readback.source,
+          retryAt: retryAt.toISOString()
+        }
+      });
+      return [
+        {
+          type: 'plugin.enqueueJob',
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.close,
+          scopeId: record.scopeId,
+          runAt: retryAt,
+          payload: { eventId: record.id },
+          dedupeKey: `${EVENTS_JOBS.close}:${record.id}:readback:${retryAt.toISOString()}`
+        },
+        audit('events.close.readback_incomplete', {
+          eventId: record.id,
+          reason,
+          source: error.readback.source,
+          retryAt: retryAt.toISOString()
+        })
+      ];
+    }
     markEventFailed(db, record.id, reason, new Date().toISOString());
     appendEventLog(db, { eventId: record.id, action: 'events.close.failed', metadata: { reason } });
     await appendJsonLog(context, {
@@ -881,19 +936,6 @@ function selectedEventOptionIds(record: StoredEventRecord, vote: PollVoteUpdate)
     }
   }
   return [...selected];
-}
-
-function votesFromStore(votes: StoredEventVote[], record: StoredEventRecord): PollVoteUpdate[] {
-  return votes.map((vote) => ({
-    pollWaMsgId: record.pollWaMsgId ?? '',
-    pollChatId: record.announcementGroupWid,
-    voterWid: vote.voterWid,
-    selectedOptions: [],
-    selectedOptionIds: vote.selectedOptionIds,
-    selectedOptionNames: vote.selectedOptionNames,
-    selectedOptionNumbers: vote.selectedOptionNumbers,
-    ...(vote.interactedAt ? { interactedAt: new Date(vote.interactedAt) } : {})
-  }));
 }
 
 function jobPayloadEventId(payload: unknown): string | undefined {

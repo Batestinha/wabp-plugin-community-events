@@ -583,6 +583,15 @@ export function upsertVote(db: PluginDatabase, eventId: string, vote: PollVoteUp
   );
 }
 
+export function replaceVotes(db: PluginDatabase, eventId: string, votes: PollVoteUpdate[]): void {
+  db.transaction(() => {
+    db.run('DELETE FROM event_votes WHERE event_id = ?', eventId);
+    for (const vote of votes) {
+      upsertVote(db, eventId, vote);
+    }
+  });
+}
+
 export function listVotes(db: PluginDatabase, eventId: string): StoredEventVote[] {
   return db.all<VoteRow>(
     'SELECT * FROM event_votes WHERE event_id = ? ORDER BY voter_wid ASC',

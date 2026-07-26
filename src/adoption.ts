@@ -1,5 +1,9 @@
 import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
 import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
+import {
+  IncompletePollVoteReadbackError,
+  requireCompletePollVotes
+} from '../../../platform/transport/pollVoteReadback';
 import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from '../shared';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
@@ -159,14 +163,20 @@ export async function adoptEventLifecycle(input: {
 
   let snapshotVoteCount = 0;
   let snapshotVotes: PollVoteUpdate[] = [];
-  if (adoption.pollWaMsgId && input.context.pollVotesFor) {
-    try {
-      snapshotVotes = await input.context.pollVotesFor(adoption.pollWaMsgId);
-      snapshotVoteCount = snapshotVotes.length;
-    } catch {
-      snapshotVotes = [];
-      snapshotVoteCount = 0;
+  if (adoption.pollWaMsgId) {
+    if (!input.context.pollVoteReadbackFor) {
+      throw new IncompletePollVoteReadbackError({
+        pollWaMsgId: adoption.pollWaMsgId,
+        coverage: 'incomplete',
+        source: 'plugin-runtime',
+        votes: [],
+        reason: 'poll_readback_not_configured'
+      });
     }
+    snapshotVotes = requireCompletePollVotes(
+      await input.context.pollVoteReadbackFor(adoption.pollWaMsgId)
+    );
+    snapshotVoteCount = snapshotVotes.length;
   }
 
   const calendarEvents = [...listCalendarEvents(db, adoption.scopeId), event];

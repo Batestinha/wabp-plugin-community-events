@@ -130,7 +130,7 @@ export async function adoptEventLifecycle(input: {
     profileId: profile.id,
     profileLabel: profile.label,
     origin,
-    eventStatus: 'scheduled',
+    eventStatus: 'active',
     groupLifecycleStatus: origin === 'adopted_poll' ? 'poll_open' : 'poll_closed',
     calendarStatus: 'included',
     actorWid: adoption.actorWid,

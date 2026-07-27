@@ -809,7 +809,7 @@ async function updateEventLifecycle(input: {
 
   if (
     input.event.subgroupChatId &&
-    input.event.eventStatus === 'scheduled' &&
+    input.event.eventStatus === 'active' &&
     (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed') &&
     input.materialized.cleanupAt.getTime() > now.getTime()
   ) {
@@ -825,7 +825,7 @@ async function updateEventLifecycle(input: {
   }
   if (
     input.event.subgroupChatId &&
-    input.event.eventStatus === 'scheduled' &&
+    input.event.eventStatus === 'active' &&
     (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed')
   ) {
     const weatherRequest = eventWeatherForecastJobRequest({
@@ -1574,7 +1574,7 @@ async function publishConfirmedEvent(input: {
       profileId: input.profile.id,
       profileLabel: input.profile.label,
       origin: 'created',
-      eventStatus: 'scheduled',
+      eventStatus: 'active',
       groupLifecycleStatus: 'poll_open',
       calendarStatus: 'included',
       actorWid: input.draft.actorWid,
@@ -1739,7 +1739,7 @@ async function createUnplannedEventLifecycle(input: {
     profileId: input.profile.id,
     profileLabel: input.profile.label,
     origin: 'unplanned',
-    eventStatus: 'scheduled',
+    eventStatus: 'active',
     groupLifecycleStatus: 'poll_closed',
     calendarStatus: 'included',
     actorWid: input.draft.actorWid,

@@ -217,7 +217,7 @@ async function handleGroupDismantled(
   }
   const db = eventsDatabase(context.databases);
   const record = getActiveEventBySubgroup(db, event.chatId);
-  if (!record || record.eventStatus !== 'scheduled' ||
+  if (!record || record.eventStatus !== 'active' ||
       (record.groupLifecycleStatus !== 'poll_closed' && record.groupLifecycleStatus !== 'cleanup_failed')) {
     return;
   }
@@ -254,7 +254,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
   }
   const record = getEvent(db, eventId);
-  if (!record || record.eventStatus !== 'scheduled' || record.groupLifecycleStatus !== 'poll_open') {
+  if (!record || record.eventStatus !== 'active' || record.groupLifecycleStatus !== 'poll_open') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or poll not open' })];
   }
   if (!record.pollWaMsgId) {
@@ -583,7 +583,7 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
   if (!record || record.groupLifecycleStatus === 'cleaned') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or already cleaned' })];
   }
-  if (record.eventStatus !== 'scheduled' || (record.groupLifecycleStatus !== 'poll_closed' && record.groupLifecycleStatus !== 'cleanup_failed')) {
+  if (record.eventStatus !== 'active' || (record.groupLifecycleStatus !== 'poll_closed' && record.groupLifecycleStatus !== 'cleanup_failed')) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: `event lifecycle is ${record.eventStatus}/${record.groupLifecycleStatus}` })];
   }
 

@@ -5,7 +5,7 @@ import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
 
-export type EventStatus = 'scheduled' | 'cancelled' | 'failed';
+export type EventStatus = 'active' | 'completed' | 'cancelled' | 'failed';
 export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
@@ -380,7 +380,7 @@ export function getEventByEquivalentPoll(db: PluginDatabase, pollWaMsgId: string
   const rows = db.all<EventRow>(
     `SELECT * FROM event_records
       WHERE poll_wa_msg_id IS NOT NULL
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
       ORDER BY starts_at ASC, id ASC`
   );
@@ -392,7 +392,7 @@ export function getActiveEventByPoll(db: PluginDatabase, pollWaMsgId: string): S
   const row = db.get<EventRow>(
     `SELECT * FROM event_records
       WHERE poll_wa_msg_id = ?
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
       ORDER BY starts_at ASC, id ASC
       LIMIT 1`,
@@ -405,7 +405,7 @@ export function getActiveEventBySubgroup(db: PluginDatabase, subgroupChatId: str
   const row = db.get<EventRow>(
     `SELECT * FROM event_records
       WHERE subgroup_chat_id = ?
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
       ORDER BY starts_at ASC, id ASC
       LIMIT 1`,
@@ -416,12 +416,15 @@ export function getActiveEventBySubgroup(db: PluginDatabase, subgroupChatId: str
 
 export function getEventBySubgroupChatId(db: PluginDatabase, subgroupChatId: string): StoredEventRecord | undefined {
   const row = db.get<EventRow>(
-    'SELECT * FROM event_records WHERE subgroup_chat_id = ? AND event_status = ? AND group_lifecycle_status IN (?, ?, ?) ORDER BY starts_at ASC, id ASC LIMIT 1',
+    `SELECT * FROM event_records
+      WHERE subgroup_chat_id = ?
+        AND (
+          (event_status = 'active' AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+          OR (event_status = 'completed' AND group_lifecycle_status = 'cleaned')
+        )
+      ORDER BY starts_at ASC, id ASC
+      LIMIT 1`,
     subgroupChatId,
-    'scheduled',
-    'poll_closed',
-    'cleanup_failed',
-    'cleaned'
   );
   return row ? eventFromRow(row) : undefined;
 }
@@ -430,7 +433,7 @@ export function listCancellableEvents(db: PluginDatabase, scopeId: string): Stor
   return db.all<EventRow>(
     `SELECT * FROM event_records
       WHERE scope_id = ?
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
       ORDER BY starts_at ASC, id ASC`,
     scopeId
@@ -440,7 +443,7 @@ export function listCancellableEvents(db: PluginDatabase, scopeId: string): Stor
 export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
-      WHERE event_status = 'scheduled'
+      WHERE event_status = 'active'
         AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
       ORDER BY cleanup_at ASC, id ASC`
   ).map(eventFromRow);
@@ -449,7 +452,7 @@ export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[
 export function listWeatherForecastCandidateEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
-      WHERE event_records.event_status = 'scheduled'
+      WHERE event_records.event_status = 'active'
         AND event_records.group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
         AND event_records.subgroup_chat_id IS NOT NULL
       ORDER BY event_records.starts_at ASC, event_records.id ASC`
@@ -459,7 +462,7 @@ export function listWeatherForecastCandidateEvents(db: PluginDatabase): StoredEv
 export function listOpenPollEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
-      WHERE event_status = 'scheduled'
+      WHERE event_status = 'active'
         AND group_lifecycle_status = 'poll_open'
         AND poll_wa_msg_id IS NOT NULL
       ORDER BY close_at ASC, starts_at ASC, id ASC`
@@ -475,7 +478,7 @@ export function updateEventCloseAt(db: PluginDatabase, input: {
     `UPDATE event_records
         SET close_at = ?, updated_at = ?
       WHERE id = ?
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status = 'poll_open'`,
     input.closeAt,
     input.updatedAt,
@@ -503,7 +506,13 @@ export function markEventClosed(db: PluginDatabase, input: {
 
 export function markEventCleaned(db: PluginDatabase, eventId: string, cleanedAt: string): void {
   db.run(
-    `UPDATE event_records SET group_lifecycle_status = 'cleaned', cleaned_at = ?, error = NULL, updated_at = ? WHERE id = ?`,
+    `UPDATE event_records
+        SET event_status = 'completed',
+            group_lifecycle_status = 'cleaned',
+            cleaned_at = ?,
+            error = NULL,
+            updated_at = ?
+      WHERE id = ?`,
     cleanedAt,
     cleanedAt,
     eventId
@@ -570,7 +579,7 @@ export function markEventMissed(db: PluginDatabase, eventId: string, reason: str
             error = ?,
             updated_at = ?
       WHERE id = ?
-        AND event_status = 'scheduled'
+        AND event_status = 'active'
         AND group_lifecycle_status = 'poll_open'`,
     reason,
     missedAt,

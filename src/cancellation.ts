@@ -29,7 +29,7 @@ export async function cancelEventLifecycle(input: {
   reason?: string | undefined;
 }): Promise<EventCancellationResult> {
   const { context, runtime, db, event, actor } = input;
-  if (event.eventStatus !== 'scheduled' ||
+  if (event.eventStatus !== 'active' ||
       (event.groupLifecycleStatus !== 'poll_open' && event.groupLifecycleStatus !== 'poll_closed' && event.groupLifecycleStatus !== 'cleanup_failed')) {
     return { status: 'not_cancellable', reason: `event lifecycle is ${event.eventStatus}/${event.groupLifecycleStatus}` };
   }

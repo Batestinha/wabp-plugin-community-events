@@ -580,7 +580,7 @@ function forecastDaysForEvent(event: StoredEventRecord, now: Date): number {
 }
 
 function weatherRuntimeSkipReason(event: StoredEventRecord, scheduledAt: Date, now: Date): string | undefined {
-  if (event.eventStatus !== 'scheduled') {
+  if (event.eventStatus !== 'active') {
     return `event_status_${event.eventStatus}`;
   }
   if (event.groupLifecycleStatus !== 'poll_closed' && event.groupLifecycleStatus !== 'cleanup_failed') {

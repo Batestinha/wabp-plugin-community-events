@@ -27,7 +27,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.3.0',
+  version: '0.4.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -90,7 +90,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
   databases: eventsDatabases,
-  dataVersion: '2',
+  dataVersion: '3',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [
@@ -123,7 +123,7 @@ export const eventsManifest: PluginManifest = {
       },
       {
         intent: 'event_cancel',
-        description: 'Cancel a scheduled or open event lifecycle.',
+        description: 'Cancel an active event lifecycle.',
         commands: ['/event cancel']
       }
     ]

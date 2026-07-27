@@ -261,6 +261,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event has no poll' })];
   }
 
+  let closePersisted = false;
   try {
     const config = parseEventsConfig(await context.configFor(record.scopeId));
     const closeAt = effectiveCloseAt(record, config);
@@ -368,6 +369,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(subgroupTitle ? { subgroupTitle } : {}),
       closedAt
     });
+    closePersisted = true;
     appendEventLog(db, {
       eventId: record.id,
       action: 'events.closed',
@@ -386,41 +388,34 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ? config.calendars.find((candidate) => candidate.id === calendarProfile.calendar.calendarId)
       : undefined;
     const calendarEvents = listCalendarEvents(db, record.scopeId);
-    const publication = await writePublishAndRecordScopeCalendar({
-      appConfig: context.config,
+    const calendarFailureAudit = await publishClosedEventCalendar(context, {
       db,
       config,
-      scopeId: record.scopeId,
+      record,
       calendarId: calendarProfile?.calendar.calendarId ?? '',
+      calendarEnabled: calendar?.enabled === true,
       events: calendarEvents
-    });
-    await appendJsonLog(context, {
-      action: 'calendar.exported',
-      scopeId: record.scopeId,
-      eventId: record.id,
-      profileId: record.profileId,
-      pollWaMsgId: record.pollWaMsgId,
-      metadata: {
-        calendarEnabled: calendar?.enabled === true,
-        calendarId: calendar?.id ?? '',
-        ...(publication ? { publication } : {})
-      }
     });
     return [
       ...plannedAnnouncementActions,
       ...(weatherForecastAction ? [weatherForecastAction] : []),
-      {
-        type: 'plugin.enqueueJob',
-        pluginId: EVENTS_PLUGIN_ID,
-        jobName: EVENTS_JOBS.cleanup,
-        scopeId: record.scopeId,
-        runAt: new Date(record.cleanupAt),
-        payload: { eventId: record.id, attempt: 0 }
-      },
+      closeCleanupAction(record),
+      ...(calendarFailureAudit ? [calendarFailureAudit] : []),
       audit('events.closed', { eventId: record.id, attendeeCount: attendeeWids.length, subgroupChatId })
     ];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    if (closePersisted) {
+      context.logger.error(
+        { error, eventId: record.id, scopeId: record.scopeId },
+        'Event close side effect failed after poll closure was persisted'
+      );
+      await recordPostCloseFailure(context, db, record, reason);
+      return [
+        closeCleanupAction(record),
+        audit('events.close.side_effect_failed', { eventId: record.id, reason })
+      ];
+    }
     if (error instanceof IncompletePollVoteReadbackError) {
       const retryAt = new Date(Date.now() + 60_000);
       appendEventLog(db, {
@@ -474,6 +469,133 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     });
     return [audit('events.close.failed', { eventId: record.id, reason })];
   }
+}
+
+async function publishClosedEventCalendar(
+  context: PluginRuntimeContext,
+  input: {
+    db: ReturnType<typeof eventsDatabase>;
+    config: ReturnType<typeof parseEventsConfig>;
+    record: StoredEventRecord;
+    calendarId: string;
+    calendarEnabled: boolean;
+    events: StoredEventRecord[];
+  }
+): Promise<PluginAction | undefined> {
+  try {
+    const publication = await writePublishAndRecordScopeCalendar({
+      appConfig: context.config,
+      db: input.db,
+      config: input.config,
+      scopeId: input.record.scopeId,
+      calendarId: input.calendarId,
+      events: input.events
+    });
+    if (publication && !publication.ok) {
+      return recordCalendarPublicationFailure(
+        context,
+        input.db,
+        input.record,
+        publication.error || 'Calendar publisher rejected the event update.',
+        { publication }
+      );
+    }
+    await appendJsonLog(context, {
+      action: 'calendar.exported',
+      scopeId: input.record.scopeId,
+      eventId: input.record.id,
+      profileId: input.record.profileId,
+      pollWaMsgId: input.record.pollWaMsgId,
+      metadata: {
+        calendarEnabled: input.calendarEnabled,
+        calendarId: input.calendarId,
+        ...(publication ? { publication } : {})
+      }
+    });
+    return undefined;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return recordCalendarPublicationFailure(context, input.db, input.record, reason);
+  }
+}
+
+async function recordCalendarPublicationFailure(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  reason: string,
+  metadata: Record<string, unknown> = {}
+): Promise<PluginAction> {
+  context.logger.warn(
+    { reason, eventId: record.id, scopeId: record.scopeId },
+    'Event calendar publication failed after poll closure was persisted'
+  );
+  try {
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.calendar.publication.failed',
+      metadata: { reason, ...metadata }
+    });
+  } catch (error) {
+    context.logger.warn(
+      { error, eventId: record.id, scopeId: record.scopeId },
+      'Unable to persist event calendar publication failure log'
+    );
+  }
+  await appendJsonLog(context, {
+    action: 'calendar.publication_failed',
+    scopeId: record.scopeId,
+    eventId: record.id,
+    profileId: record.profileId,
+    ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+    metadata: { reason, ...metadata }
+  });
+  return audit('events.calendar.publication.failed', {
+    eventId: record.id,
+    reason,
+    ...metadata
+  });
+}
+
+async function recordPostCloseFailure(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  reason: string
+): Promise<void> {
+  try {
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.close.side_effect_failed',
+      metadata: { reason }
+    });
+  } catch (error) {
+    context.logger.warn(
+      { error, eventId: record.id, scopeId: record.scopeId },
+      'Unable to persist post-close event side-effect failure log'
+    );
+  }
+  await appendJsonLog(context, {
+    action: 'event.close_side_effect_failed',
+    scopeId: record.scopeId,
+    eventId: record.id,
+    profileId: record.profileId,
+    ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
+    metadata: { reason }
+  });
+}
+
+function closeCleanupAction(record: StoredEventRecord): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.cleanup,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt: new Date(record.cleanupAt),
+    payload: { eventId: record.id, attempt: 0 }
+  };
 }
 
 async function plannedEventAnnouncementActions(

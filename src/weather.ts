@@ -3,9 +3,13 @@ import type { PluginServiceCallInput } from '../../../platform/pluginRuntime/plu
 import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { PluginJobEvent } from '../../../platform/pluginRuntime/types';
-import type { WeatherForecastOutput, WeatherMetricValue } from '../weather/serviceApi';
+import type {
+  WeatherForecastOutput,
+  WeatherMetricValue,
+  WeatherQueryOutput
+} from '../weather/serviceApi';
 import {
-  WEATHER_FORECAST_METHOD,
+  WEATHER_QUERY_METHOD,
   WEATHER_SERVICE_ID
 } from '../weather/serviceApi';
 import { renderMarineForecast } from '../weather/marineForecast';
@@ -228,7 +232,11 @@ export async function handleEventWeatherForecastJob(
   }
 
   try {
-    const report = await context.services.call<WeatherForecastOutput>(weatherForecastServiceInput(event, now));
+    const result = await context.services.call<WeatherQueryOutput>(weatherForecastServiceInput(event, now));
+    if (result.kind !== 'forecast') {
+      throw new Error('weather query returned current conditions for a forecast request');
+    }
+    const report = result.report;
     const forecastDay = selectForecastDay(report, event);
     if (!forecastDay) {
       await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, 'event_day_forecast_unavailable');
@@ -381,13 +389,17 @@ function weatherForecastServiceInput(event: StoredEventRecord, now: Date): Plugi
   }
   return {
     serviceId: WEATHER_SERVICE_ID,
-    method: WEATHER_FORECAST_METHOD,
+    method: WEATHER_QUERY_METHOD,
     scopeId: event.scopeId,
     actorWid: event.actorWid,
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
     input: {
-      days: forecastDaysForEvent(event, now),
+      selection: {
+        startDay: 0,
+        endDay: forecastDaysForEvent(event, now) - 1
+      },
+      includeMarine: true,
       location: {
         label: event.eventLocation.displayLabel,
         latitude: event.eventLocation.latitude,

@@ -5,7 +5,7 @@ import {
   renderEventTemplate
 } from './flow';
 import type { EventProfile } from './config';
-import type { StoredEventPollOption, StoredEventResponseClass } from './store';
+import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseClass } from './store';
 
 export interface MaterializedEventLifecycle {
   pollQuestion: string;
@@ -13,6 +13,7 @@ export interface MaterializedEventLifecycle {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  eventLocation?: StoredEventLocation | undefined;
   startsAt: Date;
   localDate: string;
   localTime?: string | undefined;
@@ -31,6 +32,7 @@ export function materializeEventLifecycle(input: {
   timezone: string;
   locale?: string | undefined;
   creatorDisplayName: string;
+  eventLocation?: StoredEventLocation | undefined;
 }): MaterializedEventLifecycle {
   const { profile, answers, timezone, locale, creatorDisplayName } = input;
   const pollQuestion = renderEventTemplate({
@@ -53,7 +55,7 @@ export function materializeEventLifecycle(input: {
   });
   const closeAt = new Date(answers.startsAt.getTime() - profile.poll.closeOffsetHoursBeforeStart * 3_600_000);
   const cleanupAt = new Date(answers.startsAt.getTime() + profile.group.cleanupOffsetHoursAfterStart * 3_600_000);
-  const location = calendarLocation(profile, answers.answers);
+  const location = input.eventLocation?.displayLabel ?? calendarLocation(profile, answers.answers);
   const description = calendarDescription(profile, answers.answers, answers.startsAt, timezone, locale);
   return {
     pollQuestion,
@@ -70,6 +72,7 @@ export function materializeEventLifecycle(input: {
       includeInAttendanceCount: responseClass.includeInAttendanceCount
     })),
     answers: answers.answers,
+    ...(input.eventLocation ? { eventLocation: input.eventLocation } : {}),
     startsAt: answers.startsAt,
     localDate: answers.localDate,
     ...(answers.localTime ? { localTime: answers.localTime } : {}),

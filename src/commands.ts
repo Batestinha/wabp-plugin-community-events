@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { PollSelectionRule } from '@prisma/client';
 import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
-import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
+import type { PrivateDeliveryFallback, TransportAdapter } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
@@ -19,14 +20,22 @@ import {
   eventFlowSelectedProfileId,
   renderEventTemplate,
   selectedOptionLabels,
+  type EventFlowAnswers,
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import { eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
+import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import { eventWeatherForecastJobRequest } from './weather';
+import {
+  GEOCODER_GEOCODE_METHOD,
+  GEOCODER_SERVICE_ID,
+  type GeocodeOutput,
+  type GeocoderPlace
+} from '../geocoder/serviceApi';
 import {
   DOAS_POLL_PUBLISH_METHOD,
   DOAS_POLL_SERVICE_ID,
@@ -44,6 +53,7 @@ import {
   newEventId,
   saveCreatedGroupParticipants,
   updateEventStructuredData,
+  type StoredEventLocation,
   type StoredEventRecord,
 } from './store';
 
@@ -113,17 +123,44 @@ interface EventUpdateDraft {
   createdAt: string;
 }
 
-interface EventTextTransport {
-  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
-  setGroupSubject(chatId: string, subject: string): Promise<void>;
+type EventTextTransport = TransportAdapter;
+
+interface PendingCreateEventLocationSelection {
+  kind: 'create';
+  id: string;
+  responseChatId: string;
+  draft: EventDraft;
+  profile: EventProfile;
+  answers: EventFlowAnswers;
+  announcementGroupWid: string;
+  provider: string;
+  candidates: GeocoderPlace[];
 }
+
+interface PendingUpdateEventLocationSelection {
+  kind: 'update';
+  id: string;
+  responseChatId: string;
+  draft: EventUpdateDraft;
+  answers: EventFlowAnswers;
+  eventId: string;
+  provider: string;
+  candidates: GeocoderPlace[];
+}
+
+type PendingEventLocationSelection =
+  | PendingCreateEventLocationSelection
+  | PendingUpdateEventLocationSelection;
 
 const EVENT_CANCEL_SELECT_STEP_ID = 'event';
 const EVENT_CANCEL_CONFIRM_STEP_ID = 'confirm';
+const EVENT_LOCATION_SELECTION_PURPOSE = 'official.community-events.location.select';
+const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
 
 export function registerEventsCommands(context: PluginCommandContext): void {
   const runtime = requireOfficialCommandRuntime(context);
   const router = context.router;
+  registerEventLocationSelectionHandler(context);
 
   router.register('event', 'status', eventCommand({
     mutation: 'none',
@@ -508,53 +545,205 @@ function registerEventUpdateFlowCompletionHandler(
       return true;
     }
 
-    try {
-      const materialized = materializeEventLifecycle({
-        profile: draft.profile,
-        answers,
-        timezone: draft.timezone,
-        locale: draft.locale,
-        creatorDisplayName: event.actorLabel || event.actorWid
-      });
-      const config = draftEventsConfig({
-        timezone: draft.timezone,
-        calendars: draft.calendars,
-        profiles: draft.profiles
-      });
-      await updateEventLifecycle({
-        context,
-        runtime,
-        activeTransport,
-        db,
-        event,
-        profile: draft.profile,
-        config,
-        materialized,
-        actorWid: draft.actorWid,
-        actorLabel: draft.actorLabel,
-        requestedTitle: draft.requestedTitle,
-        sourcePluginId: draft.sourcePluginId
-      });
-      await activeTransport.sendText(responseChatId, t('official.community-events.update.done', {
-        title: materialized.groupTitle,
-        eventId: event.id
-      }));
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      await appendEventJsonLog(context, {
-        action: 'event.update_failed',
-        scopeId: draft.scopeId,
-        eventId: draft.eventId,
-        actorWid: draft.actorWid,
-        profileId: draft.profile.id,
-        metadata: { reason, sourcePluginId: draft.sourcePluginId }
-      });
-      await activeTransport.sendText(responseChatId, t('official.community-events.update.failed', {
-        reason
-      }));
-    }
+    await beginEventUpdateLocationSelection({
+      context,
+      runtime,
+      activeTransport,
+      responseChatId,
+      draft,
+      event,
+      answers,
+      t
+    });
     return true;
   });
+}
+
+async function beginEventUpdateLocationSelection(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  responseChatId: string;
+  draft: EventUpdateDraft;
+  event: StoredEventRecord;
+  answers: EventFlowAnswers;
+  t: CommandContext['t'];
+}): Promise<void> {
+  const fixedLocation = fixedEventLocation(input.draft.profile, input.draft.timezone);
+  if (fixedLocation) {
+    await completeEventUpdate({ ...input, eventId: input.event.id, eventLocation: fixedLocation });
+    return;
+  }
+  const query = eventLocationQuery(input.draft.profile, input.answers.answers);
+  if (!query) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.missing')
+    );
+    return;
+  }
+  if (
+    input.event.eventLocation?.source === 'question' &&
+    input.event.eventLocation.query === query
+  ) {
+    await completeEventUpdate({
+      ...input,
+      eventId: input.event.id,
+      eventLocation: input.event.eventLocation
+    });
+    return;
+  }
+  if (!input.context.services) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  try {
+    const output = await input.context.services.call<GeocodeOutput>({
+      serviceId: GEOCODER_SERVICE_ID,
+      method: GEOCODER_GEOCODE_METHOD,
+      scopeId: input.draft.scopeId,
+      actorWid: input.draft.actorWid,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      input: {
+        query,
+        language: input.draft.locale,
+        limit: 5
+      }
+    });
+    if (!output.results.length) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.location.noResults', { query })
+      );
+      return;
+    }
+    const pending: PendingEventLocationSelection = {
+      kind: 'update',
+      id: randomUUID(),
+      responseChatId: input.responseChatId,
+      draft: input.draft,
+      answers: input.answers,
+      eventId: input.event.id,
+      provider: output.provider,
+      candidates: output.results
+    };
+    await input.runtime.ephemeralStore.set(
+      eventLocationSelectionKey(pending.id),
+      pending,
+      EVENT_LOCATION_SELECTION_TTL_SECONDS
+    );
+    try {
+      await input.context.flowEngine.promptChoice({
+        purpose: EVENT_LOCATION_SELECTION_PURPOSE,
+        subjectType: 'CommunityEventLocation',
+        subjectId: pending.id,
+        question: input.t('official.community-events.location.select', { query }),
+        options: pending.candidates.map((candidate, index) => ({
+          id: String(index),
+          label: candidate.label
+        })),
+        recipientWids: [input.responseChatId],
+        eligibleVoterWids: input.draft.actorAliases,
+        selectionRule: PollSelectionRule.SINGLE,
+        minSelections: 1,
+        maxSelections: 1,
+        presentation: 'text',
+        expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
+        t: input.t
+      }, input.activeTransport);
+    } catch (error) {
+      await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
+      throw error;
+    }
+  } catch {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+  }
+}
+
+async function completeEventUpdate(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  responseChatId: string;
+  draft: EventUpdateDraft;
+  eventId: string;
+  answers: EventFlowAnswers;
+  eventLocation: StoredEventLocation;
+  t: CommandContext['t'];
+}): Promise<void> {
+  const db = eventsDatabase(input.runtime.databases);
+  const event = getEvent(db, input.eventId);
+  if (!event) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.update.invalid')
+    );
+    return;
+  }
+  if (!await eventUpdateAllowed(input.context, { event, actorWids: input.draft.actorAliases })) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.update.permissionDenied')
+    );
+    return;
+  }
+  try {
+    const materialized = materializeEventLifecycle({
+      profile: input.draft.profile,
+      answers: input.answers,
+      timezone: input.draft.timezone,
+      locale: input.draft.locale,
+      creatorDisplayName: event.actorLabel || event.actorWid,
+      eventLocation: input.eventLocation
+    });
+    const config = draftEventsConfig({
+      timezone: input.draft.timezone,
+      calendars: input.draft.calendars,
+      profiles: input.draft.profiles
+    });
+    await updateEventLifecycle({
+      context: input.context,
+      runtime: input.runtime,
+      activeTransport: input.activeTransport,
+      db,
+      event,
+      profile: input.draft.profile,
+      config,
+      materialized,
+      actorWid: input.draft.actorWid,
+      actorLabel: input.draft.actorLabel,
+      requestedTitle: input.draft.requestedTitle,
+      sourcePluginId: input.draft.sourcePluginId
+    });
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.update.done', {
+        title: materialized.groupTitle,
+        eventId: event.id
+      })
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await appendEventJsonLog(input.context, {
+      action: 'event.update_failed',
+      scopeId: input.draft.scopeId,
+      eventId: input.draft.eventId,
+      actorWid: input.draft.actorWid,
+      profileId: input.draft.profile.id,
+      metadata: { reason, sourcePluginId: input.draft.sourcePluginId }
+    });
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.update.failed', { reason })
+    );
+  }
 }
 
 async function updateEventLifecycle(input: {
@@ -579,6 +768,7 @@ async function updateEventLifecycle(input: {
     pollOptions: input.materialized.pollOptions,
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
+    ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
     timezone: input.event.timezone || input.config.timezone,
@@ -641,6 +831,7 @@ async function updateEventLifecycle(input: {
         startsAt: input.materialized.startsAt.toISOString(),
         startsAtUtc: input.materialized.startsAt.toISOString(),
         timezone: input.event.timezone || input.config.timezone,
+        ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
         localDate: input.materialized.localDate,
         ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
         closeAt: input.materialized.closeAt.toISOString(),
@@ -1107,205 +1298,411 @@ function registerEventFlowCompletionHandlers(
         await activeTransport.sendText(responseChatId, t('official.community-events.notConfigured'));
         return true;
       }
-      const eventId = newEventId();
-      let creationMode: 'poll' | 'unplanned' = 'poll';
-      try {
-        const db = eventsDatabase(runtime.databases);
-        const materialized = materializeEventLifecycle({
-          profile,
-          answers,
-          timezone: draft.timezone,
-          locale: draft.locale,
-          creatorDisplayName: draft.actorLabel || draft.actorWid
-        });
-        const now = new Date();
-        creationMode = materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
-        if (creationMode === 'unplanned') {
-          await createUnplannedEventLifecycle({
-            context,
-            runtime,
-            activeTransport,
-            db,
-            eventId,
-            draft,
-            profile,
-            announcementGroupWid,
-            materialized,
-            now
-          });
-          await activeTransport.sendText(responseChatId, t('official.community-events.unplannedPublished'));
-          return true;
-        }
-        if (!context.services) {
-          throw new Error('Plugin service registry is unavailable.');
-        }
-        const sent = await context.services.call<DoasPollPublishOutput>({
-          serviceId: DOAS_POLL_SERVICE_ID,
-          method: DOAS_POLL_PUBLISH_METHOD,
-          scopeId: draft.scopeId,
-          actorWid: draft.actorWid,
-          ...(draft.groupId ? { groupId: draft.groupId } : {}),
-          ...(draft.groupWid ? { groupWid: draft.groupWid } : {}),
-          input: {
-            actorWid: draft.actorWid,
-            scopeId: draft.scopeId,
-            ...(draft.groupId ? { groupId: draft.groupId } : {}),
-            groupWid: announcementGroupWid,
-            question: materialized.pollQuestion,
-            options: selectedOptionLabels(profile),
-            allowMultipleAnswers: profile.poll.allowMultipleAnswers,
-            reason: `event ${profile.id}`,
-            sourcePluginId: EVENTS_PLUGIN_ID
-          }
-        });
-        if (!sent?.messageId) {
-          throw new Error('doas poll service did not return a message id');
-        }
-        const event: StoredEventRecord = {
-          id: eventId,
-          scopeId: draft.scopeId,
-          ...(draft.groupId ? { groupId: draft.groupId } : {}),
-          ...(draft.groupWid ? { groupWid: draft.groupWid } : {}),
-          profileId: profile.id,
-          profileLabel: profile.label,
-          origin: 'created',
-          eventStatus: 'scheduled',
-          groupLifecycleStatus: 'poll_open',
-          calendarStatus: 'included',
-          actorWid: draft.actorWid,
-          actorLabel: draft.actorLabel,
-          announcementGroupWid,
-          pollWaMsgId: sent.messageId,
-          pollQuestion: materialized.pollQuestion,
-          pollOptions: materialized.pollOptions,
-          responseClasses: materialized.responseClasses,
-          answers: materialized.answers,
-          startsAt: materialized.startsAt.toISOString(),
-          startsAtUtc: materialized.startsAt.toISOString(),
-          timezone: draft.timezone,
-          localDate: materialized.localDate,
-          ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
-          ...(materialized.place ? { place: materialized.place } : {}),
-          ...(materialized.style ? { style: materialized.style } : {}),
-          closeAt: materialized.closeAt.toISOString(),
-          cleanupAt: materialized.cleanupAt.toISOString(),
-          groupTitle: materialized.groupTitle,
-          calendarDurationMinutes: materialized.calendarDurationMinutes,
-          ...(materialized.calendarLocation ? { calendarLocation: materialized.calendarLocation } : {}),
-          ...(materialized.calendarDescription ? { calendarDescription: materialized.calendarDescription } : {}),
-          createdAt: now.toISOString(),
-          updatedAt: now.toISOString()
-        };
-        insertEvent(db, event);
-        try {
-          const calendarConfig = parseEventsConfig({
-            enabled: true,
-            timezone: draft.timezone,
-            cleanup: { retryDelaysMinutes: [], lastFailureMessage: '', lastFailureAt: '' },
-            adoption: {},
-            calendars: draft.calendars,
-            eventProfiles: draft.profiles
-          });
-          const calendar = calendarResourceForProfile(calendarConfig, profile);
-          const calendarEvents = listCalendarEvents(db, draft.scopeId);
-          const publication = await writePublishAndRecordScopeCalendar({
-            appConfig: runtime.config,
-            db,
-            config: calendarConfig,
-            scopeId: draft.scopeId,
-            calendarId: profile.calendar.calendarId,
-            events: calendarEvents
-          });
-          await appendEventJsonLog(context, {
-            action: 'calendar.exported',
-            scopeId: draft.scopeId,
-            eventId,
-            actorWid: draft.actorWid,
-            profileId: profile.id,
-            pollWaMsgId: sent.messageId,
-            metadata: {
-              calendarEnabled: calendar?.enabled === true,
-              calendarId: profile.calendar.calendarId,
-              ...(publication ? { publication } : {})
-            }
-          });
-        } catch (error) {
-          await appendEventJsonLog(context, {
-            action: 'calendar.export_failed',
-            scopeId: draft.scopeId,
-            eventId,
-            actorWid: draft.actorWid,
-            profileId: profile.id,
-            pollWaMsgId: sent.messageId,
-            metadata: { reason: error instanceof Error ? error.message : String(error) }
-          });
-        }
-        await appendEventJsonLog(context, {
-          action: 'event.created',
-          scopeId: draft.scopeId,
-          eventId,
-          actorWid: draft.actorWid,
-          profileId: profile.id,
-          pollWaMsgId: sent.messageId,
-          metadata: {
-            announcementGroupWid,
-            pollQuestion: materialized.pollQuestion,
-            pollOptions: materialized.pollOptions,
-            responseClasses: materialized.responseClasses,
-            answers: materialized.answers,
-            startsAt: materialized.startsAt.toISOString(),
-            closeAt: materialized.closeAt.toISOString(),
-            cleanupAt: materialized.cleanupAt.toISOString(),
-            prefill: draft.prefill
-          }
-        });
-        await runtime.enqueuePluginJob({
-          jobName: EVENTS_JOBS.close,
-          scopeId: draft.scopeId,
-          ...(draft.groupId ? { groupId: draft.groupId } : {}),
-          ...(draft.groupWid ? { groupWid: draft.groupWid } : {}),
-          runAt: materialized.closeAt,
-          payload: { eventId },
-          dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
-        });
-        await sendEventCalendarHint({
-          context,
-          runtime,
-          activeTransport,
-          trigger: 'poll_published',
-          scopeId: draft.scopeId,
-          announcementGroupWid,
-          event,
-          profile,
-          calendars: draft.calendars,
-          materialized,
-          timezone: draft.timezone,
-          locale: draft.locale,
-          creatorDisplayName: draft.actorLabel || draft.actorWid
-        });
-        await activeTransport.sendText(responseChatId, t('official.community-events.pollPublished'));
-      } catch (error) {
-        await appendEventJsonLog(context, {
-          action: creationMode === 'unplanned' ? 'event.unplanned_failed' : 'event.publish_failed',
-          scopeId: draft.scopeId,
-          eventId,
-          actorWid: draft.actorWid,
-          profileId: profile.id,
-          metadata: {
-            reason: error instanceof Error ? error.message : String(error)
-          }
-        });
-        await activeTransport.sendText(responseChatId, t(
-          creationMode === 'unplanned'
-            ? 'official.community-events.unplannedPublishFailed'
-            : 'official.community-events.publishFailed',
-          {
-            reason: error instanceof Error ? error.message : String(error)
-          }
-        ));
-      }
+      await beginEventLocationSelection({
+        context,
+        runtime,
+        activeTransport,
+        responseChatId,
+        draft,
+        profile,
+        answers,
+        announcementGroupWid,
+        t
+      });
       return true;
     });
+  }
+}
+
+function registerEventLocationSelectionHandler(context: PluginCommandContext): void {
+  const runtime = requireOfficialCommandRuntime(context);
+  context.flowEngine.registerPromptHandler(EVENT_LOCATION_SELECTION_PURPOSE, async (lock, activeTransport) => {
+    const pending = lock.subjectId
+      ? await runtime.ephemeralStore.get<PendingEventLocationSelection>(eventLocationSelectionKey(lock.subjectId))
+      : undefined;
+    if (!pending) {
+      return false;
+    }
+    await runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
+    const t = await context.i18n.translatorForIdentity(pending.draft.actorWid, pending.draft.scopeId);
+    const actorAliases = pending.draft.actorAliases ?? [pending.draft.actorWid];
+    if (!actorAliases.includes(lock.voterWid)) {
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t('official.community-events.location.wrongRequester')
+      );
+      return true;
+    }
+    const selected = lock.selectedOptions[0];
+    const candidateIndex = selected ? Number(selected.id) : Number.NaN;
+    const candidate = Number.isSafeInteger(candidateIndex)
+      ? pending.candidates[candidateIndex]
+      : undefined;
+    if (!candidate) {
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t('official.community-events.location.invalid')
+      );
+      return true;
+    }
+    const profile = pending.kind === 'create' ? pending.profile : pending.draft.profile;
+    const query = eventLocationQuery(profile, pending.answers.answers);
+    if (!query) {
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t('official.community-events.location.invalid')
+      );
+      return true;
+    }
+    const eventLocation = geocodedEventLocation({
+      query,
+      timezone: pending.draft.timezone,
+      provider: pending.provider,
+      place: candidate
+    });
+    if (pending.kind === 'create') {
+      await publishConfirmedEvent({
+        context,
+        runtime,
+        activeTransport,
+        responseChatId: pending.responseChatId,
+        draft: pending.draft,
+        profile: pending.profile,
+        answers: pending.answers,
+        announcementGroupWid: pending.announcementGroupWid,
+        eventLocation,
+        t
+      });
+    } else {
+      await completeEventUpdate({
+        context,
+        runtime,
+        activeTransport,
+        responseChatId: pending.responseChatId,
+        draft: pending.draft,
+        eventId: pending.eventId,
+        answers: pending.answers,
+        eventLocation,
+        t
+      });
+    }
+    return true;
+  });
+}
+
+async function beginEventLocationSelection(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  responseChatId: string;
+  draft: EventDraft;
+  profile: EventProfile;
+  answers: EventFlowAnswers;
+  announcementGroupWid: string;
+  t: CommandContext['t'];
+}): Promise<void> {
+  const fixedLocation = fixedEventLocation(input.profile, input.draft.timezone);
+  if (fixedLocation) {
+    await publishConfirmedEvent({
+      ...input,
+      eventLocation: fixedLocation
+    });
+    return;
+  }
+  const query = eventLocationQuery(input.profile, input.answers.answers);
+  if (!query) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.missing')
+    );
+    return;
+  }
+  if (!input.context.services) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  try {
+    const output = await input.context.services.call<GeocodeOutput>({
+      serviceId: GEOCODER_SERVICE_ID,
+      method: GEOCODER_GEOCODE_METHOD,
+      scopeId: input.draft.scopeId,
+      actorWid: input.draft.actorWid,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      input: {
+        query,
+        language: input.draft.locale,
+        limit: 5
+      }
+    });
+    if (!output.results.length) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.location.noResults', { query })
+      );
+      return;
+    }
+    const pending: PendingEventLocationSelection = {
+      kind: 'create',
+      id: randomUUID(),
+      responseChatId: input.responseChatId,
+      draft: input.draft,
+      profile: input.profile,
+      answers: input.answers,
+      announcementGroupWid: input.announcementGroupWid,
+      provider: output.provider,
+      candidates: output.results
+    };
+    await input.runtime.ephemeralStore.set(
+      eventLocationSelectionKey(pending.id),
+      pending,
+      EVENT_LOCATION_SELECTION_TTL_SECONDS
+    );
+    try {
+      await input.context.flowEngine.promptChoice({
+        purpose: EVENT_LOCATION_SELECTION_PURPOSE,
+        subjectType: 'CommunityEventLocation',
+        subjectId: pending.id,
+        question: input.t('official.community-events.location.select', { query }),
+        options: pending.candidates.map((candidate, index) => ({
+          id: String(index),
+          label: candidate.label
+        })),
+        recipientWids: [input.responseChatId],
+        eligibleVoterWids: input.draft.actorAliases ?? [input.draft.actorWid],
+        selectionRule: PollSelectionRule.SINGLE,
+        minSelections: 1,
+        maxSelections: 1,
+        presentation: 'text',
+        expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
+        t: input.t
+      }, input.activeTransport);
+    } catch (error) {
+      await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
+      throw error;
+    }
+  } catch {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+  }
+}
+
+async function publishConfirmedEvent(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  responseChatId: string;
+  draft: EventDraft;
+  profile: EventProfile;
+  answers: EventFlowAnswers;
+  announcementGroupWid: string;
+  eventLocation: StoredEventLocation;
+  t: CommandContext['t'];
+}): Promise<void> {
+  const eventId = newEventId();
+  let creationMode: 'poll' | 'unplanned' = 'poll';
+  try {
+    const db = eventsDatabase(input.runtime.databases);
+    const materialized = materializeEventLifecycle({
+      profile: input.profile,
+      answers: input.answers,
+      timezone: input.draft.timezone,
+      locale: input.draft.locale,
+      creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
+      eventLocation: input.eventLocation
+    });
+    const now = new Date();
+    creationMode = materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
+    if (creationMode === 'unplanned') {
+      await createUnplannedEventLifecycle({
+        context: input.context,
+        runtime: input.runtime,
+        activeTransport: input.activeTransport,
+        db,
+        eventId,
+        draft: input.draft,
+        profile: input.profile,
+        announcementGroupWid: input.announcementGroupWid,
+        materialized,
+        now
+      });
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.unplannedPublished')
+      );
+      return;
+    }
+    if (!input.context.services) {
+      throw new Error('Plugin service registry is unavailable.');
+    }
+    const sent = await input.context.services.call<DoasPollPublishOutput>({
+      serviceId: DOAS_POLL_SERVICE_ID,
+      method: DOAS_POLL_PUBLISH_METHOD,
+      scopeId: input.draft.scopeId,
+      actorWid: input.draft.actorWid,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      input: {
+        actorWid: input.draft.actorWid,
+        scopeId: input.draft.scopeId,
+        ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+        groupWid: input.announcementGroupWid,
+        question: materialized.pollQuestion,
+        options: selectedOptionLabels(input.profile),
+        allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
+        reason: `event ${input.profile.id}`,
+        sourcePluginId: EVENTS_PLUGIN_ID
+      }
+    });
+    if (!sent?.messageId) {
+      throw new Error('doas poll service did not return a message id');
+    }
+    const nowIso = now.toISOString();
+    const event: StoredEventRecord = {
+      id: eventId,
+      scopeId: input.draft.scopeId,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      profileId: input.profile.id,
+      profileLabel: input.profile.label,
+      origin: 'created',
+      eventStatus: 'scheduled',
+      groupLifecycleStatus: 'poll_open',
+      calendarStatus: 'included',
+      actorWid: input.draft.actorWid,
+      actorLabel: input.draft.actorLabel,
+      announcementGroupWid: input.announcementGroupWid,
+      pollWaMsgId: sent.messageId,
+      pollQuestion: materialized.pollQuestion,
+      pollOptions: materialized.pollOptions,
+      responseClasses: materialized.responseClasses,
+      answers: materialized.answers,
+      eventLocation: input.eventLocation,
+      startsAt: materialized.startsAt.toISOString(),
+      startsAtUtc: materialized.startsAt.toISOString(),
+      timezone: input.draft.timezone,
+      localDate: materialized.localDate,
+      ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
+      ...(materialized.place ? { place: materialized.place } : {}),
+      ...(materialized.style ? { style: materialized.style } : {}),
+      closeAt: materialized.closeAt.toISOString(),
+      cleanupAt: materialized.cleanupAt.toISOString(),
+      groupTitle: materialized.groupTitle,
+      calendarDurationMinutes: materialized.calendarDurationMinutes,
+      ...(materialized.calendarLocation ? { calendarLocation: materialized.calendarLocation } : {}),
+      ...(materialized.calendarDescription ? { calendarDescription: materialized.calendarDescription } : {}),
+      createdAt: nowIso,
+      updatedAt: nowIso
+    };
+    insertEvent(db, event);
+    try {
+      const calendarConfig = draftEventsConfig(input.draft);
+      const calendar = calendarResourceForProfile(calendarConfig, input.profile);
+      const calendarEvents = listCalendarEvents(db, input.draft.scopeId);
+      const publication = await writePublishAndRecordScopeCalendar({
+        appConfig: input.runtime.config,
+        db,
+        config: calendarConfig,
+        scopeId: input.draft.scopeId,
+        calendarId: input.profile.calendar.calendarId,
+        events: calendarEvents
+      });
+      await appendEventJsonLog(input.context, {
+        action: 'calendar.exported',
+        scopeId: input.draft.scopeId,
+        eventId,
+        actorWid: input.draft.actorWid,
+        profileId: input.profile.id,
+        pollWaMsgId: sent.messageId,
+        metadata: {
+          calendarEnabled: calendar?.enabled === true,
+          calendarId: input.profile.calendar.calendarId,
+          ...(publication ? { publication } : {})
+        }
+      });
+    } catch (error) {
+      await appendEventJsonLog(input.context, {
+        action: 'calendar.export_failed',
+        scopeId: input.draft.scopeId,
+        eventId,
+        actorWid: input.draft.actorWid,
+        profileId: input.profile.id,
+        pollWaMsgId: sent.messageId,
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+    await appendEventJsonLog(input.context, {
+      action: 'event.created',
+      scopeId: input.draft.scopeId,
+      eventId,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      pollWaMsgId: sent.messageId,
+      metadata: {
+        announcementGroupWid: input.announcementGroupWid,
+        pollQuestion: materialized.pollQuestion,
+        pollOptions: materialized.pollOptions,
+        responseClasses: materialized.responseClasses,
+        answers: materialized.answers,
+        eventLocation: input.eventLocation,
+        startsAt: materialized.startsAt.toISOString(),
+        closeAt: materialized.closeAt.toISOString(),
+        cleanupAt: materialized.cleanupAt.toISOString(),
+        prefill: input.draft.prefill
+      }
+    });
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.close,
+      scopeId: input.draft.scopeId,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      runAt: materialized.closeAt,
+      payload: { eventId },
+      dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
+    });
+    await sendEventCalendarHint({
+      context: input.context,
+      runtime: input.runtime,
+      activeTransport: input.activeTransport,
+      trigger: 'poll_published',
+      scopeId: input.draft.scopeId,
+      announcementGroupWid: input.announcementGroupWid,
+      event,
+      profile: input.profile,
+      calendars: input.draft.calendars,
+      materialized,
+      timezone: input.draft.timezone,
+      locale: input.draft.locale,
+      creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
+    });
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.pollPublished')
+    );
+  } catch (error) {
+    await appendEventJsonLog(input.context, {
+      action: creationMode === 'unplanned' ? 'event.unplanned_failed' : 'event.publish_failed',
+      scopeId: input.draft.scopeId,
+      eventId,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      metadata: {
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    });
+    await input.activeTransport.sendText(input.responseChatId, input.t(
+      creationMode === 'unplanned'
+        ? 'official.community-events.unplannedPublishFailed'
+        : 'official.community-events.publishFailed',
+      {
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    ));
   }
 }
 
@@ -1348,6 +1745,7 @@ async function createUnplannedEventLifecycle(input: {
     pollOptions: [],
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
+    ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
     timezone: input.draft.timezone,
@@ -1928,4 +2326,8 @@ function eventCancelDraftKey(scopeId: string, flowSessionId: string): string {
 
 function eventUpdateDraftKey(scopeId: string, flowSessionId: string): string {
   return `event-update-draft:${scopeId}:${flowSessionId}`;
+}
+
+function eventLocationSelectionKey(id: string): string {
+  return `event-location-selection:${id}`;
 }

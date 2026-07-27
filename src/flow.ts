@@ -291,8 +291,9 @@ export function selectedOptionLabels(profile: EventProfile): string[] {
 }
 
 export function calendarLocation(profile: EventProfile, answers: Record<string, string>): string | undefined {
-  const key = profile.calendar.locationQuestionKey;
-  return key ? answers[key] : undefined;
+  return profile.location.source === 'fixed'
+    ? profile.location.label
+    : answers[profile.location.questionKey];
 }
 
 export function calendarDescription(profile: EventProfile, answers: Record<string, string>, startsAt: Date, timezone: string, locale = 'en'): string | undefined {

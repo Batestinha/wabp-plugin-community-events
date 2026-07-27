@@ -109,28 +109,28 @@ const eventCalendarResourceObjectSchema = z.object({
 
 const eventCalendarResourceSchema = z.preprocess(normalizeEventCalendarResourceInput, eventCalendarResourceObjectSchema);
 
-export const eventWeatherMetricFlagsSchema = z.object({
-  temperature: z.boolean().default(true),
-  precipitation: z.boolean().default(true),
-  wind: z.boolean().default(true),
-  weatherCode: z.boolean().default(true)
-}).strict().default({});
-
-export const eventWeatherLocationOverrideSchema = z.object({
-  label: z.string().trim().default(''),
-  latitude: z.number().min(-90).max(90).optional(),
-  longitude: z.number().min(-180).max(180).optional(),
-  timezone: z.string().trim().default('')
-}).strict().default({});
+export const eventLocationConfigSchema = z.discriminatedUnion('source', [
+  z.object({
+    source: z.literal('question'),
+    questionKey: z.string().trim().min(1)
+  }).strict(),
+  z.object({
+    source: z.literal('fixed'),
+    label: z.string().trim().min(1),
+    latitude: z.number().min(-90).max(90),
+    longitude: z.number().min(-180).max(180),
+    timezone: z.string().trim().min(1)
+  }).strict()
+]).default({
+  source: 'question',
+  questionKey: 'place'
+});
 
 export const eventWeatherConfigSchema = z.object({
   enabled: z.boolean().default(false),
   sendOnPollClose: z.boolean().default(true),
   sendDaily: z.boolean().default(false),
   sendAtLocalTime: localTimeSchema.default('07:00'),
-  locationSource: z.enum(['weather-scope', 'profile-override']).default('weather-scope'),
-  location: eventWeatherLocationOverrideSchema,
-  metrics: eventWeatherMetricFlagsSchema,
   template: authoredTextSchema.default(DEFAULT_EVENT_WEATHER_TEMPLATE)
 }).strict().default({});
 
@@ -143,6 +143,7 @@ const eventProfileObjectSchema = z.object({
   optionalPromptSuffix: z.string().max(500).default(''),
   startsAtDateQuestionKey: z.string().trim().min(1).default('startDate'),
   startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
+  location: eventLocationConfigSchema,
   questions: z.array(eventQuestionSchema).min(1),
   poll: z.object({
     titleTemplate: authoredTextSchema,
@@ -162,7 +163,6 @@ const eventProfileObjectSchema = z.object({
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
-    locationQuestionKey: z.string().trim().min(1).optional(),
     descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
       sendOnPollPublished: z.boolean().default(false),
@@ -241,11 +241,24 @@ const eventProfileObjectSchema = z.object({
       path: ['startsAtTimeQuestionKey']
     });
   }
-  if (profile.calendar.locationQuestionKey && !questionKeys.has(profile.calendar.locationQuestionKey)) {
+  if (profile.location.source === 'question' && !questionKeys.has(profile.location.questionKey)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `calendar.locationQuestionKey must reference a question key`,
-      path: ['calendar', 'locationQuestionKey']
+      message: `location.questionKey must reference a question key`,
+      path: ['location', 'questionKey']
+    });
+  }
+  const locationQuestionKey = profile.location.source === 'question'
+    ? profile.location.questionKey
+    : undefined;
+  const locationQuestion = locationQuestionKey
+    ? profile.questions.find((question) => question.key === locationQuestionKey)
+    : undefined;
+  if (locationQuestion && locationQuestion.type !== 'text' && locationQuestion.type !== 'choice') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `location.questionKey must reference a text or choice question`,
+      path: ['location', 'questionKey']
     });
   }
   if (profile.weather.enabled && !profile.weather.sendOnPollClose && !profile.weather.sendDaily) {
@@ -254,36 +267,6 @@ const eventProfileObjectSchema = z.object({
       message: `weather requires at least one send trigger`,
       path: ['weather']
     });
-  }
-  if (profile.weather.enabled && profile.weather.locationSource === 'profile-override') {
-    if (!profile.weather.location.label.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `weather.location.label is required when using a profile weather location`,
-        path: ['weather', 'location', 'label']
-      });
-    }
-    if (profile.weather.location.latitude === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `weather.location.latitude is required when using a profile weather location`,
-        path: ['weather', 'location', 'latitude']
-      });
-    }
-    if (profile.weather.location.longitude === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `weather.location.longitude is required when using a profile weather location`,
-        path: ['weather', 'location', 'longitude']
-      });
-    }
-    if (!profile.weather.location.timezone.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `weather.location.timezone is required when using a profile weather location`,
-        path: ['weather', 'location', 'timezone']
-      });
-    }
   }
   const templateTokens = new Set([
     ...questionKeys,
@@ -323,6 +306,10 @@ export const defaultClimbingEventProfile: EventProfile = {
   optionalPromptSuffix: 'Reply with any symbol, such as -, to skip.',
   startsAtDateQuestionKey: 'startDate',
   startsAtTimeQuestionKey: 'startTime',
+  location: {
+    source: 'question',
+    questionKey: 'place'
+  },
   questions: [
     { key: 'place', prompt: 'Where', type: 'text', required: true, choices: [] },
     { key: 'startDate', prompt: 'Date', type: 'date', required: true, choices: [] },
@@ -357,7 +344,6 @@ export const defaultClimbingEventProfile: EventProfile = {
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,
     durationMinutes: 240,
-    locationQuestionKey: 'place',
     hint: {
       sendOnPollPublished: false,
       sendOnUnplannedCreated: false,
@@ -369,17 +355,6 @@ export const defaultClimbingEventProfile: EventProfile = {
     sendOnPollClose: true,
     sendDaily: false,
     sendAtLocalTime: '07:00',
-    locationSource: 'weather-scope',
-    location: {
-      label: '',
-      timezone: ''
-    },
-    metrics: {
-      temperature: true,
-      precipitation: true,
-      wind: true,
-      weatherCode: true
-    },
     template: DEFAULT_EVENT_WEATHER_TEMPLATE
   }
 };
@@ -434,8 +409,8 @@ export type EventQuestionChoice = z.infer<typeof eventQuestionChoiceSchema>;
 export type EventPollOption = z.infer<typeof eventPollOptionSchema>;
 export type EventResponseClass = z.infer<typeof eventResponseClassSchema>;
 export type EventCalendarResource = z.infer<typeof eventCalendarResourceSchema>;
+export type EventLocationConfig = z.infer<typeof eventLocationConfigSchema>;
 export type EventWeatherConfig = z.infer<typeof eventWeatherConfigSchema>;
-export type EventWeatherMetricFlags = z.infer<typeof eventWeatherMetricFlagsSchema>;
 export type EventProfile = z.infer<typeof eventProfileSchema>;
 export type EventsConfig = z.infer<typeof eventsConfigSchema>;
 

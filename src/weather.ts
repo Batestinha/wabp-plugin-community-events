@@ -8,6 +8,7 @@ import {
   WEATHER_FORECAST_METHOD,
   WEATHER_SERVICE_ID
 } from '../weather/serviceApi';
+import { renderMarineForecast } from '../weather/commands';
 import { eventDateAndTimeToUtc } from './datetime';
 import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
@@ -56,7 +57,7 @@ export function eventWeatherForecastJobRequests(input: {
   now?: Date | undefined;
 }): EventWeatherForecastJobRequest[] {
   const { event, profile } = input;
-  if (!profile?.weather.enabled || !event.subgroupChatId) {
+  if (!profile?.weather.enabled || !event.subgroupChatId || !event.eventLocation) {
     return [];
   }
   const now = input.now ?? new Date();
@@ -205,13 +206,29 @@ export async function handleEventWeatherForecastJob(
     return [audit('events.weather_forecast.skipped', { eventId, deliveryKind: schedule.deliveryKind, reason: skipReason })];
   }
 
+  if (!event.eventLocation) {
+    await markWeatherSkipped(
+      context,
+      db,
+      event,
+      profile,
+      schedule.deliveryKind,
+      'event_location_unresolved',
+      schedule.scheduledAt
+    );
+    return [audit('events.weather_forecast.skipped', {
+      eventId,
+      deliveryKind: schedule.deliveryKind,
+      reason: 'event_location_unresolved'
+    })];
+  }
   if (!context.services) {
     await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, 'plugin_services_unavailable');
     return [audit('events.weather_forecast.failed', { eventId, deliveryKind: schedule.deliveryKind, reason: 'plugin_services_unavailable' })];
   }
 
   try {
-    const report = await context.services.call<WeatherForecastOutput>(weatherForecastServiceInput(event, profile, now));
+    const report = await context.services.call<WeatherForecastOutput>(weatherForecastServiceInput(event, now));
     const forecastDay = selectForecastDay(report, event);
     if (!forecastDay) {
       await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, 'event_day_forecast_unavailable');
@@ -221,15 +238,20 @@ export async function handleEventWeatherForecastJob(
       ];
     }
     const t = await context.i18n.translatorForIdentity(event.subgroupChatId ?? event.scopeId, event.scopeId);
+    const resolvedLocale = await context.i18n.resolveIdentityLocale(
+      event.subgroupChatId ?? event.scopeId,
+      event.scopeId
+    );
     const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
-    const text = renderEventWeatherForecast({
+    const messages = renderEventWeatherForecast({
       event,
       profile: localizedProfile,
       report,
       forecastDay,
-      t
+      t,
+      locale: resolvedLocale.locale
     });
-    if (!text.trim()) {
+    if (!messages.meteorologicalText.trim() && !messages.marineText?.trim()) {
       await markWeatherSkipped(context, db, event, profile, schedule.deliveryKind, 'empty_rendered_text', schedule.scheduledAt);
       return [audit('events.weather_forecast.skipped', { eventId, deliveryKind: schedule.deliveryKind, reason: 'empty_rendered_text' })];
     }
@@ -271,12 +293,28 @@ export async function handleEventWeatherForecastJob(
         location: report.location
       }
     });
-    return [{
-      type: 'message.sendText',
-      chatId: event.subgroupChatId!,
-      text
-    }, audit('events.weather_forecast.queued', { eventId: event.id, deliveryKind: schedule.deliveryKind, scheduledAt: schedule.scheduledAt.toISOString() }),
-    ...nextDailyWeatherForecastActions(event, profile, schedule, now)];
+    return [
+      ...(messages.meteorologicalText.trim()
+        ? [{
+            type: 'message.sendText' as const,
+            chatId: event.subgroupChatId!,
+            text: messages.meteorologicalText
+          }]
+        : []),
+      ...(messages.marineText?.trim()
+        ? [{
+            type: 'message.sendText' as const,
+            chatId: event.subgroupChatId!,
+            text: messages.marineText
+          }]
+        : []),
+      audit('events.weather_forecast.queued', {
+        eventId: event.id,
+        deliveryKind: schedule.deliveryKind,
+        scheduledAt: schedule.scheduledAt.toISOString()
+      }),
+      ...nextDailyWeatherForecastActions(event, profile, schedule, now)
+    ];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, reason);
@@ -293,9 +331,13 @@ export function renderEventWeatherForecast(input: {
   report: WeatherForecastOutput;
   forecastDay: WeatherForecastDay;
   t: TranslateFn;
-}): string {
+  locale: string;
+}): {
+  meteorologicalText: string;
+  marineText?: string | undefined;
+} {
   const summary = weatherSummary(input.forecastDay, input.t);
-  return renderEventTemplate({
+  const meteorologicalText = renderEventTemplate({
     template: input.profile.weather.template,
     profile: input.profile,
     answers: input.event.answers,
@@ -319,9 +361,24 @@ export function renderEventWeatherForecast(input: {
       weatherCode: input.forecastDay.weatherCode !== undefined ? String(input.forecastDay.weatherCode) : undefined
     }
   }).trim();
+  const marineText = renderMarineForecast({
+    ...input.report,
+    location: {
+      ...input.report.location,
+      label: input.event.eventLocation?.displayLabel ?? input.report.location.label
+    },
+    days: [input.forecastDay]
+  }, input.t, input.locale);
+  return {
+    meteorologicalText,
+    ...(marineText ? { marineText } : {})
+  };
 }
 
-function weatherForecastServiceInput(event: StoredEventRecord, profile: EventProfile, now: Date): PluginServiceCallInput {
+function weatherForecastServiceInput(event: StoredEventRecord, now: Date): PluginServiceCallInput {
+  if (!event.eventLocation) {
+    throw new Error('event location is unresolved');
+  }
   return {
     serviceId: WEATHER_SERVICE_ID,
     method: WEATHER_FORECAST_METHOD,
@@ -331,27 +388,12 @@ function weatherForecastServiceInput(event: StoredEventRecord, profile: EventPro
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
     input: {
       days: forecastDaysForEvent(event, now),
-      metrics: {
-        temperature: profile.weather.metrics.temperature,
-        apparentTemperature: false,
-        wind: profile.weather.metrics.wind,
-        precipitation: profile.weather.metrics.precipitation,
-        weatherCode: profile.weather.metrics.weatherCode,
-        tide: false,
-        wave: false,
-        oceanCurrent: false,
-        seaSurfaceTemperature: false
-      },
-      ...(profile.weather.locationSource === 'profile-override'
-        ? {
-            location: {
-              label: profile.weather.location.label,
-              latitude: profile.weather.location.latitude,
-              longitude: profile.weather.location.longitude,
-              timezone: profile.weather.location.timezone
-            }
-          }
-        : {})
+      location: {
+        label: event.eventLocation.displayLabel,
+        latitude: event.eventLocation.latitude,
+        longitude: event.eventLocation.longitude,
+        timezone: event.eventLocation.timezone
+      }
     }
   };
 }

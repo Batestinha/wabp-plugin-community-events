@@ -24,6 +24,18 @@ export interface StoredEventResponseClass {
   includeInAttendanceCount: boolean;
 }
 
+export interface StoredEventLocation {
+  source: 'question' | 'fixed';
+  displayLabel: string;
+  resolvedLabel: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+  query?: string | undefined;
+  provider?: string | undefined;
+  providerRef?: string | undefined;
+}
+
 export interface StoredEventRecord {
   id: string;
   scopeId: string;
@@ -43,6 +55,7 @@ export interface StoredEventRecord {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc?: string | undefined;
   timezone: string;
@@ -141,6 +154,7 @@ interface EventRow extends PluginDatabaseRow {
   poll_options_json: string;
   response_classes_json: string;
   answers_json: string;
+  event_location_json: string | null;
   starts_at: string;
   starts_at_utc: string | null;
   timezone: string;
@@ -227,12 +241,12 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
       id, scope_id, group_id, group_wid, profile_id, profile_label, origin,
       event_status, group_lifecycle_status, calendar_status, actor_wid, actor_label,
       announcement_group_wid, poll_wa_msg_id, poll_question, poll_options_json, response_classes_json,
-      answers_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
+      answers_json, event_location_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -251,6 +265,7 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
     JSON.stringify(event.pollOptions),
     JSON.stringify(event.responseClasses),
     JSON.stringify(event.answers),
+    event.eventLocation ? JSON.stringify(event.eventLocation) : null,
     event.startsAt,
     event.startsAtUtc || event.startsAt,
     event.timezone,
@@ -284,6 +299,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
   timezone: string;
@@ -305,6 +321,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             poll_options_json = ?,
             response_classes_json = ?,
             answers_json = ?,
+            event_location_json = ?,
             starts_at = ?,
             starts_at_utc = ?,
             timezone = ?,
@@ -325,6 +342,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
     JSON.stringify(input.pollOptions),
     JSON.stringify(input.responseClasses),
     JSON.stringify(input.answers),
+    input.eventLocation ? JSON.stringify(input.eventLocation) : null,
     input.startsAt,
     input.startsAtUtc,
     input.timezone,
@@ -799,6 +817,7 @@ export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEven
 }
 
 function eventFromRow(row: EventRow): StoredEventRecord {
+  const eventLocation = parseStoredEventLocation(row.event_location_json);
   return {
     id: row.id,
     scopeId: row.scope_id,
@@ -818,6 +837,7 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     pollOptions: parseJson<StoredEventPollOption[]>(row.poll_options_json, []),
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
     answers: parseJson<Record<string, string>>(row.answers_json, {}),
+    ...(eventLocation ? { eventLocation } : {}),
     startsAt: row.starts_at,
     startsAtUtc: row.starts_at_utc || row.starts_at,
     timezone: row.timezone,
@@ -842,6 +862,49 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(row.cancelled_by_label ? { cancelledByLabel: row.cancelled_by_label } : {}),
     ...(row.cancel_reason ? { cancelReason: row.cancel_reason } : {}),
     ...(row.error ? { error: row.error } : {})
+  };
+}
+
+function parseStoredEventLocation(value: string | null): StoredEventLocation | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = parseJson<unknown>(value, undefined);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const location = parsed as Record<string, unknown>;
+  if (
+    (location.source !== 'question' && location.source !== 'fixed') ||
+    typeof location.displayLabel !== 'string' ||
+    !location.displayLabel.trim() ||
+    typeof location.resolvedLabel !== 'string' ||
+    !location.resolvedLabel.trim() ||
+    typeof location.latitude !== 'number' ||
+    !Number.isFinite(location.latitude) ||
+    location.latitude < -90 ||
+    location.latitude > 90 ||
+    typeof location.longitude !== 'number' ||
+    !Number.isFinite(location.longitude) ||
+    location.longitude < -180 ||
+    location.longitude > 180 ||
+    typeof location.timezone !== 'string' ||
+    !location.timezone.trim()
+  ) {
+    return undefined;
+  }
+  return {
+    source: location.source,
+    displayLabel: location.displayLabel,
+    resolvedLabel: location.resolvedLabel,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    timezone: location.timezone,
+    ...(typeof location.query === 'string' && location.query.trim() ? { query: location.query } : {}),
+    ...(typeof location.provider === 'string' && location.provider.trim() ? { provider: location.provider } : {}),
+    ...(typeof location.providerRef === 'string' && location.providerRef.trim()
+      ? { providerRef: location.providerRef }
+      : {})
   };
 }
 

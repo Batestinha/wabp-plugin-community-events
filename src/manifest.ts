@@ -27,7 +27,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.1.0',
+  version: '0.2.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -86,10 +86,11 @@ export const eventsManifest: PluginManifest = {
   dependencies: [
     { pluginId: 'official.doas', versionRange: '>=0.1.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
+    { pluginId: 'official.geocoder', versionRange: '>=0.1.0' },
     { pluginId: 'official.weather', versionRange: '>=0.1.0', optional: true }
   ],
   databases: eventsDatabases,
-  dataVersion: '1',
+  dataVersion: '2',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [
@@ -103,10 +104,11 @@ export const eventsManifest: PluginManifest = {
     prerequisites: [
       'official.doas must be enabled for the target scope.',
       'official.community-subgroups must be installed so event subgroups use the shared creation policy.',
+      'official.geocoder must be enabled for event profiles whose location comes from a question.',
       'The bot must be an admin of the announcement and community groups.',
       'The caller needs the configured profile-specific events.create.* permission to create events.',
       'The event creator or an events.manage actor can cancel active events.',
-      'Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope unless the event profile supplies an explicit weather location.'
+      'Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent.'
     ],
     workflows: [
       {

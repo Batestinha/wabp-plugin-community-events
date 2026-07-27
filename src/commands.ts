@@ -4,7 +4,7 @@ import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowType
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
-import type { PrivateDeliveryFallback, TransportAdapter } from '../../../platform/transport/transportTypes';
+import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
@@ -123,7 +123,10 @@ interface EventUpdateDraft {
   createdAt: string;
 }
 
-type EventTextTransport = TransportAdapter;
+interface EventTextTransport {
+  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+  setGroupSubject(chatId: string, subject: string): Promise<void>;
+}
 
 interface PendingCreateEventLocationSelection {
   kind: 'create';
@@ -654,7 +657,7 @@ async function beginEventUpdateLocationSelection(input: {
         presentation: 'text',
         expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
         t: input.t
-      }, input.activeTransport);
+      });
     } catch (error) {
       await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
       throw error;
@@ -1479,7 +1482,7 @@ async function beginEventLocationSelection(input: {
         presentation: 'text',
         expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
         t: input.t
-      }, input.activeTransport);
+      });
     } catch (error) {
       await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
       throw error;

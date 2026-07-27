@@ -971,8 +971,13 @@ function dismantleIncompleteReason(result: PluginGroupDismantleResult): string {
     : 'subgroup was not left, deleted, or marked left after dismantle';
 }
 
-function dismantleCompleted(result: { left: boolean; chatDeleted: boolean; managementMarkedLeft?: boolean | undefined }): boolean {
-  return result.left || result.chatDeleted || result.managementMarkedLeft === true;
+function dismantleCompleted(result: {
+  alreadyAbsent?: boolean | undefined;
+  left: boolean;
+  chatDeleted: boolean;
+  managementMarkedLeft?: boolean | undefined;
+}): boolean {
+  return result.alreadyAbsent === true || result.left || result.chatDeleted || result.managementMarkedLeft === true;
 }
 
 async function appendJsonLog(

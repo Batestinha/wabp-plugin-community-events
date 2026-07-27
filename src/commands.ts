@@ -996,7 +996,7 @@ function registerEventCancelFlowCompletionHandler(
     if (result.status === 'not_cancellable') {
       await activeTransport.sendText(responseChatId, t('official.community-events.cancel.notCancellable', {
         title: eventDisplayTitle(event),
-        status: eventLifecycleLabel(event)
+        status: eventLifecycleLabel(event, t)
       }));
       return true;
     }
@@ -1188,7 +1188,7 @@ function eventCancelConfirmationSummary(input: {
   return input.t('official.community-events.cancel.summary', {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, input.locale),
-    status: eventLifecycleLabel(event),
+    status: eventLifecycleLabel(event, input.t),
     eventId: event.id
   });
 }
@@ -1197,13 +1197,16 @@ function eventChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], loca
   return t('official.community-events.cancel.choiceLabel', {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, locale),
-    status: eventLifecycleLabel(event),
+    status: eventLifecycleLabel(event, t),
     eventId: event.id
   });
 }
 
-function eventLifecycleLabel(event: StoredEventRecord): string {
-  return `${event.eventStatus}/${event.groupLifecycleStatus}`;
+function eventLifecycleLabel(event: StoredEventRecord, t: CommandContext['t']): string {
+  return t('official.community-events.lifecycle.label', {
+    eventStatus: t(`official.community-events.lifecycle.event.${event.eventStatus}`),
+    groupLifecycleStatus: t(`official.community-events.lifecycle.group.${event.groupLifecycleStatus}`)
+  });
 }
 
 function eventStartsAtLabel(event: StoredEventRecord, locale = 'en'): string {

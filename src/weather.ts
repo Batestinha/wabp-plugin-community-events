@@ -8,7 +8,7 @@ import {
   WEATHER_FORECAST_METHOD,
   WEATHER_SERVICE_ID
 } from '../weather/serviceApi';
-import { renderMarineForecast } from '../weather/commands';
+import { renderMarineForecast } from '../weather/marineForecast';
 import { eventDateAndTimeToUtc } from './datetime';
 import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';

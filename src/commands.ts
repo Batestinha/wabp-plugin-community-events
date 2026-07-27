@@ -128,13 +128,17 @@ interface EventTextTransport {
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
+type PendingEventFlowAnswers = Omit<EventFlowAnswers, 'startsAt'> & {
+  startsAt: string;
+};
+
 interface PendingCreateEventLocationSelection {
   kind: 'create';
   id: string;
   responseChatId: string;
   draft: EventDraft;
   profile: EventProfile;
-  answers: EventFlowAnswers;
+  answers: PendingEventFlowAnswers;
   announcementGroupWid: string;
   provider: string;
   candidates: GeocoderPlace[];
@@ -145,7 +149,7 @@ interface PendingUpdateEventLocationSelection {
   id: string;
   responseChatId: string;
   draft: EventUpdateDraft;
-  answers: EventFlowAnswers;
+  answers: PendingEventFlowAnswers;
   eventId: string;
   provider: string;
   candidates: GeocoderPlace[];
@@ -629,7 +633,7 @@ async function beginEventUpdateLocationSelection(input: {
       id: randomUUID(),
       responseChatId: input.responseChatId,
       draft: input.draft,
-      answers: input.answers,
+      answers: pendingEventFlowAnswers(input.answers),
       eventId: input.event.id,
       provider: output.provider,
       candidates: output.results
@@ -1331,6 +1335,14 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
     }
     await runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
     const t = await context.i18n.translatorForIdentity(pending.draft.actorWid, pending.draft.scopeId);
+    const answers = eventFlowAnswersFromPending(pending.answers);
+    if (!answers) {
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t('official.community-events.invalid')
+      );
+      return true;
+    }
     const actorAliases = pending.draft.actorAliases ?? [pending.draft.actorWid];
     if (!actorAliases.includes(lock.voterWid)) {
       await activeTransport.sendText(
@@ -1352,7 +1364,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       return true;
     }
     const profile = pending.kind === 'create' ? pending.profile : pending.draft.profile;
-    const query = eventLocationQuery(profile, pending.answers.answers);
+    const query = eventLocationQuery(profile, answers.answers);
     if (!query) {
       await activeTransport.sendText(
         pending.responseChatId,
@@ -1374,7 +1386,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
         responseChatId: pending.responseChatId,
         draft: pending.draft,
         profile: pending.profile,
-        answers: pending.answers,
+        answers,
         announcementGroupWid: pending.announcementGroupWid,
         eventLocation,
         t
@@ -1387,7 +1399,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
         responseChatId: pending.responseChatId,
         draft: pending.draft,
         eventId: pending.eventId,
-        answers: pending.answers,
+        answers,
         eventLocation,
         t
       });
@@ -1457,7 +1469,7 @@ async function beginEventLocationSelection(input: {
       responseChatId: input.responseChatId,
       draft: input.draft,
       profile: input.profile,
-      answers: input.answers,
+      answers: pendingEventFlowAnswers(input.answers),
       announcementGroupWid: input.announcementGroupWid,
       provider: output.provider,
       candidates: output.results
@@ -2336,4 +2348,22 @@ function eventUpdateDraftKey(scopeId: string, flowSessionId: string): string {
 
 function eventLocationSelectionKey(id: string): string {
   return `event-location-selection:${id}`;
+}
+
+function pendingEventFlowAnswers(answers: EventFlowAnswers): PendingEventFlowAnswers {
+  return {
+    ...answers,
+    startsAt: answers.startsAt.toISOString()
+  };
+}
+
+function eventFlowAnswersFromPending(answers: PendingEventFlowAnswers): EventFlowAnswers | undefined {
+  const startsAt = new Date(answers.startsAt);
+  if (!Number.isFinite(startsAt.getTime())) {
+    return undefined;
+  }
+  return {
+    ...answers,
+    startsAt
+  };
 }

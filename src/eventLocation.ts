@@ -31,13 +31,14 @@ export function eventLocationQuery(
 
 export function geocodedEventLocation(input: {
   query: string;
+  displayLabel?: string | undefined;
   timezone: string;
   provider: string;
   place: GeocoderPlace;
 }): StoredEventLocation {
   return {
     source: 'question',
-    displayLabel: input.query,
+    displayLabel: input.displayLabel?.trim() || input.query,
     resolvedLabel: input.place.label,
     latitude: input.place.point.latitude,
     longitude: input.place.point.longitude,

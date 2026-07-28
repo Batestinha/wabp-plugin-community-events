@@ -140,6 +140,8 @@ interface PendingCreateEventLocationSelection {
   profile: EventProfile;
   answers: PendingEventFlowAnswers;
   announcementGroupWid: string;
+  place?: string | undefined;
+  query?: string | undefined;
   provider: string;
   candidates: GeocoderPlace[];
 }
@@ -151,6 +153,8 @@ interface PendingUpdateEventLocationSelection {
   draft: EventUpdateDraft;
   answers: PendingEventFlowAnswers;
   eventId: string;
+  place?: string | undefined;
+  query?: string | undefined;
   provider: string;
   candidates: GeocoderPlace[];
 }
@@ -162,6 +166,9 @@ type PendingEventLocationSelection =
 const EVENT_CANCEL_SELECT_STEP_ID = 'event';
 const EVENT_CANCEL_CONFIRM_STEP_ID = 'confirm';
 const EVENT_LOCATION_SELECTION_PURPOSE = 'official.community-events.location.select';
+const EVENT_LOCATION_CONFIRM_OPTION_ID = 'confirm';
+const EVENT_LOCATION_RETRY_OPTION_ID = 'retry';
+const EVENT_LOCATION_FREE_TEXT_OPTION_ID = 'location-query';
 const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
 
 export function registerEventsCommands(context: PluginCommandContext): void {
@@ -581,8 +588,8 @@ async function beginEventUpdateLocationSelection(input: {
     await completeEventUpdate({ ...input, eventId: input.event.id, eventLocation: fixedLocation });
     return;
   }
-  const query = eventLocationQuery(input.draft.profile, input.answers.answers);
-  if (!query) {
+  const place = eventLocationQuery(input.draft.profile, input.answers.answers);
+  if (!place) {
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.location.missing')
@@ -591,7 +598,7 @@ async function beginEventUpdateLocationSelection(input: {
   }
   if (
     input.event.eventLocation?.source === 'question' &&
-    input.event.eventLocation.query === query
+    (input.event.eventLocation.displayLabel === place || input.event.eventLocation.query === place)
   ) {
     await completeEventUpdate({
       ...input,
@@ -616,7 +623,7 @@ async function beginEventUpdateLocationSelection(input: {
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       input: {
-        query,
+        query: place,
         language: input.draft.locale,
         limit: 5
       }
@@ -624,7 +631,7 @@ async function beginEventUpdateLocationSelection(input: {
     if (!output.results.length) {
       await input.activeTransport.sendText(
         input.responseChatId,
-        input.t('official.community-events.location.noResults', { query })
+        input.t('official.community-events.location.noResults', { query: place })
       );
       return;
     }
@@ -635,36 +642,12 @@ async function beginEventUpdateLocationSelection(input: {
       draft: input.draft,
       answers: pendingEventFlowAnswers(input.answers),
       eventId: input.event.id,
+      place,
+      query: place,
       provider: output.provider,
       candidates: output.results
     };
-    await input.runtime.ephemeralStore.set(
-      eventLocationSelectionKey(pending.id),
-      pending,
-      EVENT_LOCATION_SELECTION_TTL_SECONDS
-    );
-    try {
-      await input.context.flowEngine.promptChoice({
-        purpose: EVENT_LOCATION_SELECTION_PURPOSE,
-        subjectType: 'CommunityEventLocation',
-        subjectId: pending.id,
-        question: input.t('official.community-events.location.select', { query }),
-        options: pending.candidates.map((candidate, index) => ({
-          id: String(index),
-          label: candidate.label
-        })),
-        recipientWids: [input.responseChatId],
-        eligibleVoterWids: input.draft.actorAliases,
-        selectionRule: PollSelectionRule.SINGLE,
-        minSelections: 1,
-        maxSelections: 1,
-        expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
-        t: input.t
-      });
-    } catch (error) {
-      await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
-      throw error;
-    }
+    await promptEventLocationConfirmation({ ...input, pending });
   } catch {
     await input.activeTransport.sendText(
       input.responseChatId,
@@ -1349,10 +1332,43 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       return true;
     }
     const selected = lock.selectedOptions[0];
-    const candidateIndex = selected ? Number(selected.id) : Number.NaN;
-    const candidate = Number.isSafeInteger(candidateIndex)
-      ? pending.candidates[candidateIndex]
-      : undefined;
+    if (selected?.id === EVENT_LOCATION_FREE_TEXT_OPTION_ID) {
+      const query = selected.label.trim();
+      if (!query) {
+        await activeTransport.sendText(
+          pending.responseChatId,
+          t('official.community-events.location.invalid')
+        );
+        return true;
+      }
+      await requeryEventLocationSelection({
+        context,
+        runtime,
+        activeTransport,
+        pending,
+        query,
+        t
+      });
+      return true;
+    }
+    if (selected?.id === EVENT_LOCATION_RETRY_OPTION_ID) {
+      await promptEventLocationConfirmation({
+        context,
+        runtime,
+        activeTransport,
+        pending: {
+          ...pending,
+          id: randomUUID()
+        },
+        t
+      });
+      return true;
+    }
+    const candidate = selected?.id === EVENT_LOCATION_CONFIRM_OPTION_ID
+      ? pending.candidates[0]
+      : Number.isSafeInteger(Number(selected?.id))
+        ? pending.candidates[Number(selected?.id)]
+        : undefined;
     if (!candidate) {
       await activeTransport.sendText(
         pending.responseChatId,
@@ -1369,8 +1385,10 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       );
       return true;
     }
+    const displayLabel = pending.place ?? query;
     const eventLocation = geocodedEventLocation({
-      query,
+      query: pending.query ?? query,
+      displayLabel,
       timezone: pending.draft.timezone,
       provider: pending.provider,
       place: candidate
@@ -1405,6 +1423,121 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
   });
 }
 
+async function promptEventLocationConfirmation(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  pending: PendingEventLocationSelection;
+  t: CommandContext['t'];
+}): Promise<void> {
+  const suggested = input.pending.candidates[0];
+  if (!suggested) {
+    await input.activeTransport.sendText(
+      input.pending.responseChatId,
+      input.t('official.community-events.location.noResults', { query: input.pending.query ?? input.pending.place ?? '' })
+    );
+    return;
+  }
+  const place = input.pending.place ?? input.pending.query ?? suggested.label;
+  await input.runtime.ephemeralStore.set(
+    eventLocationSelectionKey(input.pending.id),
+    input.pending,
+    EVENT_LOCATION_SELECTION_TTL_SECONDS
+  );
+  try {
+    await input.context.flowEngine.promptChoice({
+      purpose: EVENT_LOCATION_SELECTION_PURPOSE,
+      subjectType: 'CommunityEventLocation',
+      subjectId: input.pending.id,
+      question: input.t('official.community-events.location.confirm', {
+        place,
+        suggestedLocation: suggested.label
+      }),
+      options: [
+        {
+          id: EVENT_LOCATION_CONFIRM_OPTION_ID,
+          label: input.t('official.community-events.location.confirm.yes')
+        },
+        {
+          id: EVENT_LOCATION_RETRY_OPTION_ID,
+          label: input.t('official.community-events.location.confirm.retry')
+        }
+      ],
+      freeTextOption: {
+        id: EVENT_LOCATION_FREE_TEXT_OPTION_ID,
+        label: input.t('official.community-events.location.confirm.freeText')
+      },
+      recipientWids: [input.pending.responseChatId],
+      eligibleVoterWids: input.pending.draft.actorAliases ?? [input.pending.draft.actorWid],
+      selectionRule: PollSelectionRule.SINGLE,
+      minSelections: 1,
+      maxSelections: 1,
+      expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
+      t: input.t
+    });
+  } catch (error) {
+    await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(input.pending.id));
+    throw error;
+  }
+}
+
+async function requeryEventLocationSelection(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  pending: PendingEventLocationSelection;
+  query: string;
+  t: CommandContext['t'];
+}): Promise<void> {
+  if (!input.context.services) {
+    await input.activeTransport.sendText(
+      input.pending.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  try {
+    const output = await input.context.services.call<GeocodeOutput>({
+      serviceId: GEOCODER_SERVICE_ID,
+      method: GEOCODER_GEOCODE_METHOD,
+      scopeId: input.pending.draft.scopeId,
+      actorWid: input.pending.draft.actorWid,
+      ...(input.pending.draft.groupId ? { groupId: input.pending.draft.groupId } : {}),
+      ...(input.pending.draft.groupWid ? { groupWid: input.pending.draft.groupWid } : {}),
+      input: {
+        query: input.query,
+        language: input.pending.draft.locale,
+        limit: 5
+      }
+    });
+    if (!output.results.length) {
+      await input.activeTransport.sendText(
+        input.pending.responseChatId,
+        input.t('official.community-events.location.noResults', { query: input.query })
+      );
+      return;
+    }
+    await promptEventLocationConfirmation({
+      context: input.context,
+      runtime: input.runtime,
+      activeTransport: input.activeTransport,
+      pending: {
+        ...input.pending,
+        id: randomUUID(),
+        query: input.query,
+        provider: output.provider,
+        candidates: output.results
+      },
+      t: input.t
+    });
+  } catch {
+    await input.activeTransport.sendText(
+      input.pending.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+  }
+}
+
 async function beginEventLocationSelection(input: {
   context: PluginCommandContext;
   runtime: OfficialPluginCommandRuntime;
@@ -1424,8 +1557,8 @@ async function beginEventLocationSelection(input: {
     });
     return;
   }
-  const query = eventLocationQuery(input.profile, input.answers.answers);
-  if (!query) {
+  const place = eventLocationQuery(input.profile, input.answers.answers);
+  if (!place) {
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.location.missing')
@@ -1448,7 +1581,7 @@ async function beginEventLocationSelection(input: {
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       input: {
-        query,
+        query: place,
         language: input.draft.locale,
         limit: 5
       }
@@ -1456,7 +1589,7 @@ async function beginEventLocationSelection(input: {
     if (!output.results.length) {
       await input.activeTransport.sendText(
         input.responseChatId,
-        input.t('official.community-events.location.noResults', { query })
+        input.t('official.community-events.location.noResults', { query: place })
       );
       return;
     }
@@ -1468,36 +1601,12 @@ async function beginEventLocationSelection(input: {
       profile: input.profile,
       answers: pendingEventFlowAnswers(input.answers),
       announcementGroupWid: input.announcementGroupWid,
+      place,
+      query: place,
       provider: output.provider,
       candidates: output.results
     };
-    await input.runtime.ephemeralStore.set(
-      eventLocationSelectionKey(pending.id),
-      pending,
-      EVENT_LOCATION_SELECTION_TTL_SECONDS
-    );
-    try {
-      await input.context.flowEngine.promptChoice({
-        purpose: EVENT_LOCATION_SELECTION_PURPOSE,
-        subjectType: 'CommunityEventLocation',
-        subjectId: pending.id,
-        question: input.t('official.community-events.location.select', { query }),
-        options: pending.candidates.map((candidate, index) => ({
-          id: String(index),
-          label: candidate.label
-        })),
-        recipientWids: [input.responseChatId],
-        eligibleVoterWids: input.draft.actorAliases ?? [input.draft.actorWid],
-        selectionRule: PollSelectionRule.SINGLE,
-        minSelections: 1,
-        maxSelections: 1,
-        expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
-        t: input.t
-      });
-    } catch (error) {
-      await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
-      throw error;
-    }
+    await promptEventLocationConfirmation({ ...input, pending });
   } catch {
     await input.activeTransport.sendText(
       input.responseChatId,

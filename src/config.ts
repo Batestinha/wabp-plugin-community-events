@@ -9,7 +9,6 @@ export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
-export const EVENT_UNPLANNED_TEMPLATE_TOKENS = EVENT_GROUP_HINT_TEMPLATE_TOKENS;
 export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
 export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'eventId',
@@ -28,6 +27,9 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'weatherCode'
 ] as const;
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
+export const DEFAULT_EVENT_GROUP_HINT_TEMPLATE = eventsMessages[
+  'official.community-events.profile.climbing.eventGroupHint.template'
+]!;
 export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = 'Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName} by tapping this link: {calendarSubscriptionUrl}';
 export const DEFAULT_EVENT_WEATHER_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.weather.template'
@@ -157,8 +159,8 @@ const eventProfileObjectSchema = z.object({
     titleTemplate: authoredTextSchema,
     cleanupOffsetHoursAfterStart: z.number().int().min(0).max(24 * 365).default(48)
   }).strict(),
-  unplanned: z.object({
-    announcementTemplate: authoredTextSchema.default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}'),
+  eventGroupHint: z.object({
+    template: authoredTextSchema.default(DEFAULT_EVENT_GROUP_HINT_TEMPLATE),
     sendForUnplannedEvents: z.boolean().default(true),
     sendForPlannedEvents: z.boolean().default(false),
     sendForAdoptedEvents: z.boolean().default(false)
@@ -290,7 +292,7 @@ const eventProfileObjectSchema = z.object({
   ]);
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
-  validateEventTemplate(profile.unplanned.announcementTemplate, groupHintTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
+  validateEventTemplate(profile.eventGroupHint.template, groupHintTemplateTokens, ['eventGroupHint', 'template'], ctx);
   if (profile.calendar.descriptionTemplate) {
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
@@ -340,8 +342,8 @@ export const defaultClimbingEventProfile: EventProfile = {
     titleTemplate: '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
     cleanupOffsetHoursAfterStart: 48
   },
-  unplanned: {
-    announcementTemplate: '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
+  eventGroupHint: {
+    template: DEFAULT_EVENT_GROUP_HINT_TEMPLATE,
     sendForUnplannedEvents: true,
     sendForPlannedEvents: false,
     sendForAdoptedEvents: false
@@ -487,12 +489,12 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
         () => t('official.community-events.profile.climbing.group.titleTemplate')
       )
     },
-    unplanned: {
-      ...profile.unplanned,
-      announcementTemplate: localizeIfDefault(
-        profile.unplanned.announcementTemplate,
-        defaultClimbingEventProfile.unplanned.announcementTemplate,
-        () => t('official.community-events.profile.climbing.unplanned.announcementTemplate')
+    eventGroupHint: {
+      ...profile.eventGroupHint,
+      template: localizeIfDefault(
+        profile.eventGroupHint.template,
+        defaultClimbingEventProfile.eventGroupHint.template,
+        () => t('official.community-events.profile.climbing.eventGroupHint.template')
       )
     },
     calendar: {
@@ -609,11 +611,17 @@ function normalizeEventProfileInput(profile: unknown): unknown {
     return profile;
   }
   const permissionSuffix = legacyPermissionSuffix(profile.permission, profile.permissionSuffix, profile.id);
-  const { permission: _legacyPermission, startsAtQuestionKey: legacyStartsAtQuestionKey, ...profileWithoutLegacyFields } = profile;
+  const {
+    permission: _legacyPermission,
+    startsAtQuestionKey: legacyStartsAtQuestionKey,
+    unplanned: previousEventGroupHint,
+    ...profileWithoutLegacyFields
+  } = profile;
   const normalizedStartQuestions = normalizeEventProfileStartQuestions(profile, legacyStartsAtQuestionKey);
   const normalizedProfile = {
     ...profileWithoutLegacyFields,
     ...normalizedStartQuestions.keys,
+    eventGroupHint: normalizeEventGroupHintInput(profile.eventGroupHint, previousEventGroupHint),
     ...(isRecord(profileWithoutLegacyFields.calendar) ? {
       calendar: normalizeEventProfileCalendarInput(profileWithoutLegacyFields.calendar)
     } : {})
@@ -654,6 +662,31 @@ function normalizeEventProfileInput(profile: unknown): unknown {
       responseClasses,
       options
     }
+  };
+}
+
+function normalizeEventGroupHintInput(currentInput: unknown, previousInput: unknown): unknown {
+  const current = isRecord(currentInput) ? currentInput : {};
+  const previous = isRecord(previousInput) ? previousInput : {};
+  const currentTemplate = typeof current.template === 'string'
+    ? current.template
+    : undefined;
+  const previousTemplate = typeof previous.announcementTemplate === 'string'
+    ? previous.announcementTemplate
+    : undefined;
+  const {
+    announcementTemplate: _currentAnnouncementTemplate,
+    ...currentWithoutOldTemplate
+  } = current;
+  const {
+    announcementTemplate: _previousAnnouncementTemplate,
+    ...previousWithoutOldTemplate
+  } = previous;
+  const normalizedTemplate = currentTemplate ?? previousTemplate;
+  return {
+    ...previousWithoutOldTemplate,
+    ...currentWithoutOldTemplate,
+    ...(normalizedTemplate !== undefined ? { template: normalizedTemplate } : {})
   };
 }
 

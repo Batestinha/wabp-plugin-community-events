@@ -1976,11 +1976,11 @@ async function createUnplannedEventLifecycle(input: {
   }
 
   const groupJoinUrl = eventGroupHintEnabled(input.profile, 'unplanned')
-    ? await eventGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId)
+    ? await eventGroupJoinUrl(input.context, input.profile.eventGroupHint.template, created.chatId)
     : '';
   if (eventGroupHintEnabled(input.profile, 'unplanned')) {
     const announcementText = renderEventGroupAnnouncement({
-      template: input.profile.unplanned.announcementTemplate,
+      template: input.profile.eventGroupHint.template,
       profile: input.profile,
       event,
       groupDisplayName: created.title || input.materialized.groupTitle,

@@ -619,7 +619,7 @@ async function plannedEventAnnouncementActions(
     await appendPlannedAnnouncementSkipped(context, record, 'announcement_group_missing', { subgroupChatId });
     return [];
   }
-  const template = profile.unplanned.announcementTemplate.trim();
+  const template = profile.eventGroupHint.template.trim();
   if (!template) {
     await appendPlannedAnnouncementSkipped(context, record, 'empty_template', { subgroupChatId });
     return [];

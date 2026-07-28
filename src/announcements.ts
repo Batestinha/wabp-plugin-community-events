@@ -14,11 +14,11 @@ export function eventGroupHintEnabled(profile: EventProfile | undefined, trigger
   }
   switch (trigger) {
     case 'unplanned':
-      return profile.unplanned.sendForUnplannedEvents;
+      return profile.eventGroupHint.sendForUnplannedEvents;
     case 'planned':
-      return profile.unplanned.sendForPlannedEvents;
+      return profile.eventGroupHint.sendForPlannedEvents;
     case 'adopted':
-      return profile.unplanned.sendForAdoptedEvents;
+      return profile.eventGroupHint.sendForAdoptedEvents;
   }
 }
 

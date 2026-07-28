@@ -316,7 +316,7 @@ async function sendAdoptedEventGroupHint(input: {
     });
     return;
   }
-  const template = input.profile.unplanned.announcementTemplate.trim();
+  const template = input.profile.eventGroupHint.template.trim();
   if (!template) {
     await appendAdoptedAnnouncementSkipped(input.context, input.event, 'empty_template', {
       subgroupChatId: input.event.subgroupChatId,

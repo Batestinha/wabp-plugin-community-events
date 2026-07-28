@@ -344,13 +344,14 @@ export function renderEventWeatherForecast(input: {
   meteorologicalText: string;
   marineText?: string | undefined;
 } {
-  const summary = weatherSummary(input.forecastDay, input.t);
+  const summary = weatherSummary(input.forecastDay, input.t, input.locale);
   const meteorologicalText = renderEventTemplate({
     template: input.profile.weather.template,
     profile: input.profile,
     answers: input.event.answers,
     startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
     timezone: input.event.timezone,
+    locale: input.locale,
     creatorDisplayName: input.event.actorLabel || input.event.actorWid,
     extraTokens: {
       eventId: input.event.id,
@@ -359,13 +360,13 @@ export function renderEventWeatherForecast(input: {
       weatherDate: input.forecastDay.date,
       weatherLocation: input.report.location.label,
       weatherSummary: summary,
-      temperatureMax: formatMetric(input.forecastDay.temperatureMax),
-      temperatureMin: formatMetric(input.forecastDay.temperatureMin),
-      precipitation: formatMetric(input.forecastDay.precipitationSum),
-      precipitationProbability: formatMetric(input.forecastDay.precipitationProbabilityMax),
-      windSpeed: formatMetric(input.forecastDay.windSpeedMax),
-      windGust: formatMetric(input.forecastDay.windGustsMax),
-      windDirection: formatMetric(input.forecastDay.windDirectionDominant),
+      temperatureMax: formatMetric(input.forecastDay.temperatureMax, input.locale),
+      temperatureMin: formatMetric(input.forecastDay.temperatureMin, input.locale),
+      precipitation: formatMetric(input.forecastDay.precipitationSum, input.locale),
+      precipitationProbability: formatMetric(input.forecastDay.precipitationProbabilityMax, input.locale),
+      windSpeed: formatMetric(input.forecastDay.windSpeedMax, input.locale),
+      windGust: formatMetric(input.forecastDay.windGustsMax, input.locale),
+      windDirection: formatMetric(input.forecastDay.windDirectionDominant, input.locale),
       weatherCode: input.forecastDay.weatherCode !== undefined ? String(input.forecastDay.weatherCode) : undefined
     }
   }).trim();
@@ -415,29 +416,30 @@ function selectForecastDay(report: WeatherForecastOutput, event: StoredEventReco
   return report.days.find((day) => day.date === eventDate);
 }
 
-function weatherSummary(day: WeatherForecastDay, t: TranslateFn): string {
+function weatherSummary(day: WeatherForecastDay, t: TranslateFn, locale: string): string {
   const sections = [
     weatherMetricSection(t, 'official.community-events.weather.section.temperature', [
-      labeledMetric(t, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
-      labeledMetric(t, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin)
+      labeledMetric(t, locale, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
+      labeledMetric(t, locale, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin)
     ]),
     weatherMetricSection(t, 'official.community-events.weather.section.relativeHumidity', [
-      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMax', day.relativeHumidityMax),
-      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMin', day.relativeHumidityMin),
-      labeledMetric(t, 'official.community-events.weather.metric.relativeHumidityMean', day.relativeHumidityMean)
+      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMax', day.relativeHumidityMax),
+      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMin', day.relativeHumidityMin),
+      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMean', day.relativeHumidityMean)
     ]),
     weatherMetricSection(t, 'official.community-events.weather.section.precipitation', [
-      formatMetric(day.precipitationSum),
+      formatMetric(day.precipitationSum, locale),
       labeledMetric(
         t,
+        locale,
         'official.community-events.weather.metric.precipitationProbability',
         day.precipitationProbabilityMax
       )
     ]),
     weatherMetricSection(t, 'official.community-events.weather.section.wind', [
-      labeledMetric(t, 'official.community-events.weather.metric.windSpeed', day.windSpeedMax),
-      labeledMetric(t, 'official.community-events.weather.metric.windGust', day.windGustsMax),
-      labeledMetric(t, 'official.community-events.weather.metric.windDirection', day.windDirectionDominant)
+      labeledMetric(t, locale, 'official.community-events.weather.metric.windSpeed', day.windSpeedMax),
+      labeledMetric(t, locale, 'official.community-events.weather.metric.windGust', day.windGustsMax),
+      labeledMetric(t, locale, 'official.community-events.weather.metric.windDirection', day.windDirectionDominant)
     ])
   ].filter((value): value is string => Boolean(value));
   return sections.join('\n') || t('official.community-events.weather.none');
@@ -448,16 +450,21 @@ function weatherMetricSection(t: TranslateFn, key: string, metrics: Array<string
   return values.length > 0 ? `*${t(key)}*: ${values.join(', ')}` : undefined;
 }
 
-function labeledMetric(t: TranslateFn, key: string, metric?: WeatherMetricValue | undefined): string | undefined {
-  const formatted = formatMetric(metric);
+function labeledMetric(
+  t: TranslateFn,
+  locale: string,
+  key: string,
+  metric?: WeatherMetricValue | undefined
+): string | undefined {
+  const formatted = formatMetric(metric, locale);
   return formatted ? `${t(key)}: ${formatted}` : undefined;
 }
 
-function formatMetric(metric?: WeatherMetricValue | undefined): string | undefined {
+function formatMetric(metric?: WeatherMetricValue | undefined, locale?: string | undefined): string | undefined {
   if (!metric) {
     return undefined;
   }
-  const value = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(metric.value);
+  const value = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(metric.value);
   return metric.unit ? `${value} ${metric.unit}` : value;
 }
 

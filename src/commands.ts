@@ -658,7 +658,6 @@ async function beginEventUpdateLocationSelection(input: {
         selectionRule: PollSelectionRule.SINGLE,
         minSelections: 1,
         maxSelections: 1,
-        presentation: 'text',
         expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
         t: input.t
       });
@@ -1030,7 +1029,6 @@ function createEventCancelFlowDefinition(input: {
       })),
       minSelections: 1,
       maxSelections: 1,
-      presentation: 'text',
       nextStepId: EVENT_CANCEL_CONFIRM_STEP_ID
     };
   }
@@ -1052,8 +1050,7 @@ function createEventCancelFlowDefinition(input: {
       { label: input.t('official.community-events.flow.no'), value: 'no' }
     ],
     minSelections: 1,
-    maxSelections: 1,
-    presentation: 'text'
+    maxSelections: 1
   };
   return {
     flowType: `official.community-events.cancel.${randomUUID()}`,
@@ -1494,7 +1491,6 @@ async function beginEventLocationSelection(input: {
         selectionRule: PollSelectionRule.SINGLE,
         minSelections: 1,
         maxSelections: 1,
-        presentation: 'text',
         expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
         t: input.t
       });

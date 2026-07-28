@@ -67,7 +67,6 @@ export function createEventFlowDefinition(input: {
       options: input.profiles.map((profile) => ({ label: profile.label, value: profile.id })),
       minSelections: 1,
       maxSelections: 1,
-      presentation: 'text',
       nextStepIdByValue: Object.fromEntries(input.profiles.map((profile) => [
         profile.id,
         firstQuestionStepId(profile)
@@ -93,7 +92,6 @@ export function createEventFlowDefinition(input: {
           options: question.choices.map((choice) => ({ label: choice.label, value: choice.id })),
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
-          presentation: 'text',
           skipOnSymbolInput: !question.required,
           nextStepId
         };
@@ -141,8 +139,7 @@ export function createEventFlowDefinition(input: {
         { label: input.t('official.community-events.flow.no'), value: 'no' }
       ],
       minSelections: 1,
-      maxSelections: 1,
-      presentation: 'text'
+      maxSelections: 1
     };
   }
 

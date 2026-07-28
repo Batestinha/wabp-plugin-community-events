@@ -42,21 +42,22 @@ const eventsPanelControl = defineControl({
   order: 68,
   visibility: 'bot_admin',
   configurable: false,
-  storage: { kind: 'internal', reason: 'Read-only scoped events panel; data is loaded from the events plugin database.' },
+  storage: { kind: 'internal', reason: 'Scoped events panel; data is loaded from the events plugin database and manual termination is handled by a confirmed runtime action.' },
   schema: { type: 'object', properties: {} },
   ui: {
     widget: 'builder',
     builderId: 'official.community-events.events.v1',
     builderEndpoints: {
-      state: '/api/v1/plugins/official.community-events/events/:scopeId'
+      state: '/api/v1/plugins/official.community-events/events/:scopeId',
+      terminate: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/terminate'
     },
-    helpText: 'Published events recorded for this scope.'
+    helpText: 'Published events recorded for this scope, with confirmed manual termination for active event lifecycles.'
   },
   restartRequirement: 'NO_RESTART',
   dangerous: false,
   sensitivity: { sensitive: false, redact: 'none' },
-  auditExemptReason: 'Read-only scoped events panel.',
-  relatedCommandIds: ['/event'],
+  auditExemptReason: 'Panel rendering is read-only; manual termination is audited by the terminate endpoint.',
+  relatedCommandIds: ['/event', '/event cancel'],
   relatedActionIds: []
 });
 

@@ -5,9 +5,10 @@ import {
   requireCompletePollVotes
 } from '../../../platform/transport/pollVoteReadback';
 import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from '../shared';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
-import { calendarResourceForProfile, parseEventsConfig } from './config';
+import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
@@ -26,6 +27,10 @@ import {
 } from './store';
 
 export type EventAdoptionMode = 'poll' | 'group';
+
+export interface EventTextTransport {
+  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+}
 
 export interface EventAdoptionInput {
   scopeId: string;
@@ -63,6 +68,7 @@ export interface EventAdoptedGroupValidation {
 export async function adoptEventLifecycle(input: {
   context: PluginCommandContext;
   runtime?: OfficialPluginCommandRuntime | undefined;
+  activeTransport?: EventTextTransport | undefined;
   adoption: EventAdoptionInput;
 }): Promise<EventAdoptionResult> {
   const runtime = input.runtime ?? requireOfficialCommandRuntime(input.context);
@@ -234,6 +240,15 @@ export async function adoptEventLifecycle(input: {
       groupValidation
     }
   });
+  await sendAdoptedEventGroupHint({
+    context: input.context,
+    activeTransport: input.activeTransport,
+    event,
+    profile,
+    announcementGroupWid,
+    locale: adoption.locale ?? 'en',
+    creatorDisplayName: adoption.actorLabel || adoption.actorWid
+  });
 
   await runtime.enqueuePluginJob({
     jobName: origin === 'adopted_poll' ? EVENTS_JOBS.close : EVENTS_JOBS.cleanup,
@@ -270,6 +285,115 @@ async function validateAdoptedGroup(
     botIsAdmin: capabilities?.botIsAdmin === true || capabilities?.botIsSuperAdmin === true,
     canRemoveMembers: capabilities?.canRemoveMembers === true
   };
+}
+
+async function sendAdoptedEventGroupHint(input: {
+  context: PluginCommandContext;
+  activeTransport?: EventTextTransport | undefined;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  announcementGroupWid?: string | undefined;
+  locale: string;
+  creatorDisplayName: string;
+}): Promise<void> {
+  if (!eventGroupHintEnabled(input.profile, 'adopted')) {
+    return;
+  }
+  if (!input.event.subgroupChatId) {
+    await appendAdoptedAnnouncementSkipped(input.context, input.event, 'no_event_group');
+    return;
+  }
+  if (!input.announcementGroupWid) {
+    await appendAdoptedAnnouncementSkipped(input.context, input.event, 'announcement_group_missing', {
+      subgroupChatId: input.event.subgroupChatId
+    });
+    return;
+  }
+  if (!input.activeTransport) {
+    await appendAdoptedAnnouncementSkipped(input.context, input.event, 'transport_unavailable', {
+      subgroupChatId: input.event.subgroupChatId,
+      announcementGroupWid: input.announcementGroupWid
+    });
+    return;
+  }
+  const template = input.profile.unplanned.announcementTemplate.trim();
+  if (!template) {
+    await appendAdoptedAnnouncementSkipped(input.context, input.event, 'empty_template', {
+      subgroupChatId: input.event.subgroupChatId,
+      announcementGroupWid: input.announcementGroupWid
+    });
+    return;
+  }
+  try {
+    const groupJoinUrl = await eventGroupJoinUrl(input.context, template, input.event.subgroupChatId);
+    const text = renderEventGroupAnnouncement({
+      template,
+      profile: input.profile,
+      event: input.event,
+      groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
+      groupJoinUrl,
+      subgroupChatId: input.event.subgroupChatId,
+      locale: input.locale,
+      creatorDisplayName: input.creatorDisplayName
+    });
+    if (!text) {
+      await appendAdoptedAnnouncementSkipped(input.context, input.event, 'empty_rendered_text', {
+        subgroupChatId: input.event.subgroupChatId,
+        announcementGroupWid: input.announcementGroupWid
+      });
+      return;
+    }
+    const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
+    await appendEventJsonLog(input.context, {
+      action: 'event.adopted_announcement_sent',
+      scopeId: input.event.scopeId,
+      eventId: input.event.id,
+      actorWid: input.event.actorWid,
+      profileId: input.event.profileId,
+      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+      subgroupChatId: input.event.subgroupChatId,
+      metadata: {
+        announcementGroupWid: input.announcementGroupWid,
+        messageId: sent.messageId,
+        groupJoinUrl
+      }
+    });
+  } catch (error) {
+    await appendEventJsonLog(input.context, {
+      action: 'event.adopted_announcement_failed',
+      scopeId: input.event.scopeId,
+      eventId: input.event.id,
+      actorWid: input.event.actorWid,
+      profileId: input.event.profileId,
+      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
+      subgroupChatId: input.event.subgroupChatId,
+      metadata: {
+        announcementGroupWid: input.announcementGroupWid,
+        reason: error instanceof Error ? error.message : String(error)
+      }
+    });
+  }
+}
+
+async function appendAdoptedAnnouncementSkipped(
+  context: PluginCommandContext,
+  event: StoredEventRecord,
+  reason: string,
+  metadata: Record<string, unknown> = {}
+): Promise<void> {
+  await appendEventJsonLog(context, {
+    action: 'event.adopted_announcement_skipped',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: event.actorWid,
+    profileId: event.profileId,
+    ...(event.pollWaMsgId ? { pollWaMsgId: event.pollWaMsgId } : {}),
+    ...(event.subgroupChatId ? { subgroupChatId: event.subgroupChatId } : {}),
+    metadata: {
+      reason,
+      ...metadata
+    }
+  });
 }
 
 function adoptionOrigin(mode: EventAdoptionMode): EventOrigin {

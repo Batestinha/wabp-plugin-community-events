@@ -2,8 +2,24 @@ import type { EventProfile } from './config';
 import { renderEventTemplate } from './flow';
 import type { StoredEventRecord } from './store';
 
+export type EventGroupHintTrigger = 'unplanned' | 'planned' | 'adopted';
+
 export interface EventGroupInviteContext {
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
+}
+
+export function eventGroupHintEnabled(profile: EventProfile | undefined, trigger: EventGroupHintTrigger): boolean {
+  if (!profile) {
+    return false;
+  }
+  switch (trigger) {
+    case 'unplanned':
+      return profile.unplanned.sendForUnplannedEvents;
+    case 'planned':
+      return profile.unplanned.sendForPlannedEvents;
+    case 'adopted':
+      return profile.unplanned.sendForAdoptedEvents;
+  }
 }
 
 export async function eventGroupJoinUrl(

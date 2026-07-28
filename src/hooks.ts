@@ -13,7 +13,7 @@ import {
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
-import { eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -608,7 +608,7 @@ async function plannedEventAnnouncementActions(
   }
 ): Promise<PluginAction[]> {
   const { record, profile, subgroupChatId } = input;
-  if (!profile?.unplanned.sendForPlannedEvents) {
+  if (!profile || !eventGroupHintEnabled(profile, 'planned')) {
     return [];
   }
   if (!subgroupChatId) {

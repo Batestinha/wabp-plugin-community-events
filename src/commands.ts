@@ -24,7 +24,7 @@ import {
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
-import { eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
@@ -1975,31 +1975,35 @@ async function createUnplannedEventLifecycle(input: {
     await input.runtime.enqueuePluginJob(weatherRequest);
   }
 
-  const groupJoinUrl = await eventGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId);
-  const announcementText = renderEventGroupAnnouncement({
-    template: input.profile.unplanned.announcementTemplate,
-    profile: input.profile,
-    event,
-    groupDisplayName: created.title || input.materialized.groupTitle,
-    groupJoinUrl,
-    subgroupChatId: created.chatId,
-    locale: input.draft.locale,
-    creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
-  });
-  const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
-  await appendEventJsonLog(input.context, {
-    action: 'event.unplanned_announcement_sent',
-    scopeId: input.draft.scopeId,
-    eventId: event.id,
-    actorWid: input.draft.actorWid,
-    profileId: input.profile.id,
-    subgroupChatId: created.chatId,
-    metadata: {
-      announcementGroupWid: input.announcementGroupWid,
-      messageId: sent.messageId,
-      groupJoinUrl
-    }
-  });
+  const groupJoinUrl = eventGroupHintEnabled(input.profile, 'unplanned')
+    ? await eventGroupJoinUrl(input.context, input.profile.unplanned.announcementTemplate, created.chatId)
+    : '';
+  if (eventGroupHintEnabled(input.profile, 'unplanned')) {
+    const announcementText = renderEventGroupAnnouncement({
+      template: input.profile.unplanned.announcementTemplate,
+      profile: input.profile,
+      event,
+      groupDisplayName: created.title || input.materialized.groupTitle,
+      groupJoinUrl,
+      subgroupChatId: created.chatId,
+      locale: input.draft.locale,
+      creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
+    });
+    const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
+    await appendEventJsonLog(input.context, {
+      action: 'event.unplanned_announcement_sent',
+      scopeId: input.draft.scopeId,
+      eventId: event.id,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      subgroupChatId: created.chatId,
+      metadata: {
+        announcementGroupWid: input.announcementGroupWid,
+        messageId: sent.messageId,
+        groupJoinUrl
+      }
+    });
+  }
   await sendEventCalendarHint({
     context: input.context,
     runtime: input.runtime,

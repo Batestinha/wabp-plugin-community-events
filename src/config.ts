@@ -8,7 +8,8 @@ export const EVENT_CHOICE_QUESTION_TYPE = 'choice';
 export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
-export const EVENT_UNPLANNED_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
+export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
+export const EVENT_UNPLANNED_TEMPLATE_TOKENS = EVENT_GROUP_HINT_TEMPLATE_TOKENS;
 export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
 export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'eventId',
@@ -158,7 +159,9 @@ const eventProfileObjectSchema = z.object({
   }).strict(),
   unplanned: z.object({
     announcementTemplate: authoredTextSchema.default('{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}'),
-    sendForPlannedEvents: z.boolean().default(false)
+    sendForUnplannedEvents: z.boolean().default(true),
+    sendForPlannedEvents: z.boolean().default(false),
+    sendForAdoptedEvents: z.boolean().default(false)
   }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
@@ -273,9 +276,9 @@ const eventProfileObjectSchema = z.object({
     ...EVENT_DATE_TEMPLATE_TOKENS,
     ...EVENT_PROFILE_TEMPLATE_TOKENS
   ]);
-  const unplannedTemplateTokens = new Set([
+  const groupHintTemplateTokens = new Set([
     ...templateTokens,
-    ...EVENT_UNPLANNED_TEMPLATE_TOKENS
+    ...EVENT_GROUP_HINT_TEMPLATE_TOKENS
   ]);
   const calendarHintTemplateTokens = new Set([
     ...templateTokens,
@@ -287,7 +290,7 @@ const eventProfileObjectSchema = z.object({
   ]);
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
-  validateEventTemplate(profile.unplanned.announcementTemplate, unplannedTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
+  validateEventTemplate(profile.unplanned.announcementTemplate, groupHintTemplateTokens, ['unplanned', 'announcementTemplate'], ctx);
   if (profile.calendar.descriptionTemplate) {
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
@@ -339,7 +342,9 @@ export const defaultClimbingEventProfile: EventProfile = {
   },
   unplanned: {
     announcementTemplate: '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
-    sendForPlannedEvents: false
+    sendForUnplannedEvents: true,
+    sendForPlannedEvents: false,
+    sendForAdoptedEvents: false
   },
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,

@@ -167,8 +167,8 @@ const EVENT_CANCEL_SELECT_STEP_ID = 'event';
 const EVENT_CANCEL_CONFIRM_STEP_ID = 'confirm';
 const EVENT_LOCATION_SELECTION_PURPOSE = 'official.community-events.location.select';
 const EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-location-selection';
-const EVENT_LOCATION_CONFIRM_OPTION_ID = 'confirm';
 const EVENT_LOCATION_FREE_TEXT_OPTION_ID = 'location-query';
+const EVENT_LOCATION_MAX_CANDIDATES = 5;
 const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
 
 export function registerEventsCommands(context: PluginCommandContext): void {
@@ -1390,11 +1390,10 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       });
       return true;
     }
-    const candidate = selected?.id === EVENT_LOCATION_CONFIRM_OPTION_ID
-      ? pending.candidates[0]
-      : Number.isSafeInteger(Number(selected?.id))
-        ? pending.candidates[Number(selected?.id)]
-        : undefined;
+    const candidateIndex = Number(selected?.id);
+    const candidate = Number.isSafeInteger(candidateIndex)
+      ? pending.candidates[candidateIndex]
+      : undefined;
     if (!candidate) {
       await activeTransport.sendText(
         pending.responseChatId,
@@ -1456,34 +1455,26 @@ async function promptEventLocationConfirmation(input: {
   pending: PendingEventLocationSelection;
   t: CommandContext['t'];
 }): Promise<void> {
-  const suggested = input.pending.candidates[0];
-  if (!suggested) {
+  const options = eventLocationCandidateOptions(input.pending.candidates);
+  if (!options.length) {
     await input.activeTransport.sendText(
       input.pending.responseChatId,
       input.t('official.community-events.location.noResults', { query: input.pending.query ?? input.pending.place ?? '' })
     );
     return;
   }
-  const place = input.pending.place ?? input.pending.query ?? suggested.label;
+  const place = input.pending.place ?? input.pending.query ?? input.pending.candidates[0]?.label ?? '';
   await rememberActiveEventLocationSelection(input.runtime, input.pending);
   try {
     await input.context.flowEngine.promptChoice({
       purpose: EVENT_LOCATION_SELECTION_PURPOSE,
       subjectType: 'CommunityEventLocation',
       subjectId: input.pending.id,
-      question: input.t('official.community-events.location.confirm', {
-        place,
-        suggestedLocation: suggested.label
-      }),
-      options: [
-        {
-          id: EVENT_LOCATION_CONFIRM_OPTION_ID,
-          label: input.t('official.community-events.location.confirm.yes')
-        }
-      ],
+      question: input.t('official.community-events.location.select', { query: place }),
+      options,
       freeTextOption: {
         id: EVENT_LOCATION_FREE_TEXT_OPTION_ID,
-        label: input.t('official.community-events.location.confirm.freeText')
+        label: input.t('official.community-events.location.freeText')
       },
       recipientWids: [input.pending.responseChatId],
       eligibleVoterWids: input.pending.draft.actorAliases ?? [input.pending.draft.actorWid],
@@ -2571,6 +2562,27 @@ function eventLocationSelectionActorWids(pending: PendingEventLocationSelection)
 
 function isCommandLikeLocationReply(value: string): boolean {
   return value.trim().startsWith('/');
+}
+
+function eventLocationCandidateOptions(candidates: GeocoderPlace[]): Array<{ id: string; label: string }> {
+  const seen = new Set<string>();
+  const options: Array<{ id: string; label: string }> = [];
+  for (const [index, candidate] of candidates.entries()) {
+    const label = candidate.label.trim();
+    const key = label.toLocaleLowerCase();
+    if (!label || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    options.push({
+      id: String(index),
+      label
+    });
+    if (options.length >= EVENT_LOCATION_MAX_CANDIDATES) {
+      break;
+    }
+  }
+  return options;
 }
 
 function pendingEventFlowAnswers(answers: EventFlowAnswers): PendingEventFlowAnswers {

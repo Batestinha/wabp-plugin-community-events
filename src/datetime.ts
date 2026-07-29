@@ -5,6 +5,15 @@ const MAX_FUTURE_YEARS = 2;
 const STRICT_LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/;
 const STRICT_LOCAL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:[zZ]|[+-]\d{2}:?\d{2})$/;
+const PORTUGUESE_WEEKDAY_INDEX: Record<string, number> = {
+  domingo: 0,
+  segunda: 1,
+  terca: 2,
+  quarta: 3,
+  quinta: 4,
+  sexta: 5,
+  sabado: 6
+};
 
 export interface EventDateParts {
   year: number;
@@ -179,6 +188,11 @@ export function parseEventDateTimeInput(input: string, options: EventDateTimePar
   const portugueseRelative = parsePortugueseRelativeDateTime(raw, options, now);
   if (portugueseRelative.status !== 'invalid' || portugueseRelative.reason !== 'unrecognized') {
     return validateDateTimeResult(portugueseRelative, options, now);
+  }
+
+  const portugueseWeekday = parsePortugueseUpcomingWeekdayDateTime(raw, options, now);
+  if (portugueseWeekday.status !== 'invalid' || portugueseWeekday.reason !== 'unrecognized') {
+    return validateDateTimeResult(portugueseWeekday, options, now);
   }
 
   const parser = chronoParserForLocale(options.locale);
@@ -403,6 +417,60 @@ function parsePortugueseRelativeDateTime(
     : { status: 'invalid', reason: 'unrecognized' };
 }
 
+function parsePortugueseUpcomingWeekdayDateTime(
+  raw: string,
+  options: EventDateTimeParseOptions,
+  now: Date
+): EventDateTimeParseResult {
+  if (!localeLanguage(options.locale).startsWith('pt')) {
+    return { status: 'invalid', reason: 'unrecognized' };
+  }
+
+  const normalized = normalizePortugueseMatchText(raw);
+  const weekday = '(domingo|segunda(?:[-\\s]+feira)?|terca(?:[-\\s]+feira)?|quarta(?:[-\\s]+feira)?|quinta(?:[-\\s]+feira)?|sexta(?:[-\\s]+feira)?|sabado)';
+  const match = normalized.match(new RegExp(
+    `^(?:(?:no|na)\\s+)?proxim[oa]\\s+${weekday}(?:\\s+(?:(?:as|a|ao)\\s*(\\d{1,2})(?:(?::|h)(\\d{2}))?|(\\d{1,2})(?::|h)(\\d{2})?))?$`,
+    'i'
+  ));
+  if (!match) {
+    return { status: 'invalid', reason: 'unrecognized' };
+  }
+
+  const weekdayRoot = match[1]?.split(/[-\s]+/)[0] ?? '';
+  const targetWeekday = PORTUGUESE_WEEKDAY_INDEX[weekdayRoot];
+  if (targetWeekday === undefined) {
+    return { status: 'invalid', reason: 'unrecognized' };
+  }
+
+  const nowLocal = localDateTimeParts(now, options.timezone);
+  if (!nowLocal) {
+    return { status: 'invalid', reason: 'unrecognized' };
+  }
+
+  const currentWeekday = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day, 12, 0, 0, 0)).getUTCDay();
+  const daysUntil = (targetWeekday - currentWeekday + 7) % 7 || 7;
+  const targetDate = datePartsPlusDays(nowLocal, daysUntil);
+  const hourText = match[2] ?? match[4];
+  const minuteText = match[3] ?? match[5] ?? '00';
+  if (hourText === undefined) {
+    return missingTimeResult(raw, targetDate, options.timezone, options.locale);
+  }
+
+  const time = parseNumericTime(hourText, minuteText);
+  if (!time) {
+    return { status: 'invalid', reason: 'unrecognized' };
+  }
+  const date = zonedDateTimeToUtc({
+    ...targetDate,
+    hour: time.hour,
+    minute: time.minute,
+    timezone: options.timezone
+  });
+  return date
+    ? okResult(raw, date, true, options.timezone, options.locale)
+    : { status: 'invalid', reason: 'unrecognized' };
+}
+
 function chronoResultToEventResult(
   result: ParsedResult,
   raw: string,
@@ -591,6 +659,15 @@ function normalizeNaturalInputForLocale(input: string, locale: string): string {
     .replace(/\bterca\b/gi, 'terça')
     .replace(/\bsabado\b/gi, 'sábado')
     .replace(/\bas\b(?=\s*\d{1,2}(?::|h)?\d{0,2})/gi, 'às');
+}
+
+function normalizePortugueseMatchText(input: string): string {
+  return normalizeNaturalInputForLocale(input, 'pt')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 function localeLanguage(locale: string): string {

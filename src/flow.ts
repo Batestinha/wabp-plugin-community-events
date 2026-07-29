@@ -43,7 +43,7 @@ export function createEventFlowDefinition(input: {
   askPrefilledQuestions?: boolean | undefined;
   flowTypePrefix?: string | undefined;
   confirmMessageKey?: string | undefined;
-  completeMessageKey?: string | undefined;
+  completeMessageKey?: string | false | undefined;
   now?: (() => Date) | undefined;
 }): FlowDefinition {
   const timezone = input.timezone ?? 'UTC';
@@ -153,7 +153,9 @@ export function createEventFlowDefinition(input: {
       : EVENT_PROFILE_STEP_ID,
     context: 'either',
     timeoutMinutes: 30,
-    completionReply: input.t(input.completeMessageKey ?? 'official.community-events.flow.complete'),
+    completionReply: input.completeMessageKey === false
+      ? false
+      : input.t(input.completeMessageKey ?? 'official.community-events.flow.complete'),
     steps
   };
 }

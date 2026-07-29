@@ -74,6 +74,16 @@ export const eventsManifest: PluginManifest = {
         effects: ['discard-event-cancellation-draft']
       },
       {
+        id: 'event-location-selection',
+        description: 'Pending event location confirmation after event setup and before publication.',
+        mode: 'plugin-handler',
+        scope: 'actor-chat',
+        commands: ['/event'],
+        cancellableStates: ['active'],
+        terminalStates: ['completed', 'cancelled', 'expired'],
+        effects: ['discard-pending-location-selection']
+      },
+      {
         id: 'published-event-lifecycle',
         description: 'Published event lifecycles must be cancelled with the explicit event cancellation workflow.',
         mode: 'not-cancellable',

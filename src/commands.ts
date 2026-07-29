@@ -3,7 +3,7 @@ import { PollSelectionRule } from '@prisma/client';
 import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
-import type { PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
+import type { PluginCancellationRegistration, PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
@@ -166,6 +166,7 @@ type PendingEventLocationSelection =
 const EVENT_CANCEL_SELECT_STEP_ID = 'event';
 const EVENT_CANCEL_CONFIRM_STEP_ID = 'confirm';
 const EVENT_LOCATION_SELECTION_PURPOSE = 'official.community-events.location.select';
+const EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-location-selection';
 const EVENT_LOCATION_CONFIRM_OPTION_ID = 'confirm';
 const EVENT_LOCATION_FREE_TEXT_OPTION_ID = 'location-query';
 const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
@@ -212,8 +213,34 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => startEventFlow(context, ctx));
 }
 
+export function registerEventsCancellations(context: PluginCommandContext): PluginCancellationRegistration[] {
+  const runtime = requireOfficialCommandRuntime(context);
+  return [{
+    workflowId: EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID,
+    cancel: async (input) => {
+      const result = await cancelActiveEventLocationSelectionsForActor(context, runtime, {
+        actorWids: input.actorWids,
+        chatId: input.message.chatId
+      });
+      if (result.cancelled === 0) {
+        return undefined;
+      }
+      const t = await context.i18n.translatorForIdentity(input.actor.wid, result.scopeId);
+      return {
+        workflowId: EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID,
+        cancelled: true,
+        text: t('official.community-events.cancelled')
+      };
+    }
+  }];
+}
+
 async function startEventFlow(context: PluginCommandContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
+  await cancelActiveEventLocationSelectionsForActor(context, runtime, {
+    actorWids: eventActorWids(ctx),
+    chatId: ctx.message.chatId
+  });
   const scopeId = requireScopeId(ctx);
   const config = parseEventsConfig(await runtime.configFor(scopeId, ctx.message.senderWid));
   if (!config.enabled) {
@@ -242,7 +269,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     prefill,
     timezone: config.timezone,
     locale: ctx.locale,
-    initialData
+    initialData,
+    completeMessageKey: false
   });
   registerEventFlowCompletionHandlers(context, definition.flowType, eventProfiles, ctx.t);
   const actorAliases = eventActorWids(ctx);
@@ -312,6 +340,10 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
 
 async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
+  await cancelActiveEventLocationSelectionsForActor(context, runtime, {
+    actorWids: eventActorWids(ctx),
+    chatId: ctx.message.chatId
+  });
   const scopeId = requireScopeId(ctx);
   const db = eventsDatabase(runtime.databases);
   const actorAliases = eventActorWids(ctx);
@@ -440,7 +472,7 @@ async function startEventUpdateFlow(
     askPrefilledQuestions: true,
     flowTypePrefix: 'official.community-events.update',
     confirmMessageKey: 'official.community-events.update.confirm',
-    completeMessageKey: 'official.community-events.update.complete'
+    completeMessageKey: false
   });
   registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, ctx.t);
 
@@ -1312,10 +1344,10 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
     if (!pending) {
       return false;
     }
-    await runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id));
     const t = await context.i18n.translatorForIdentity(pending.draft.actorWid, pending.draft.scopeId);
     const answers = eventFlowAnswersFromPending(pending.answers);
     if (!answers) {
+      await clearActiveEventLocationSelection(runtime, pending);
       await activeTransport.sendText(
         pending.responseChatId,
         t('official.community-events.invalid')
@@ -1330,6 +1362,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       );
       return true;
     }
+    await clearActiveEventLocationSelection(runtime, pending);
     const selected = lock.selectedOptions[0];
     if (selected?.id === EVENT_LOCATION_FREE_TEXT_OPTION_ID) {
       const query = selected.label.trim();
@@ -1337,6 +1370,13 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
         await activeTransport.sendText(
           pending.responseChatId,
           t('official.community-events.location.invalid')
+        );
+        return true;
+      }
+      if (isCommandLikeLocationReply(query)) {
+        await activeTransport.sendText(
+          pending.responseChatId,
+          t('official.community-events.cancelled')
         );
         return true;
       }
@@ -1425,11 +1465,7 @@ async function promptEventLocationConfirmation(input: {
     return;
   }
   const place = input.pending.place ?? input.pending.query ?? suggested.label;
-  await input.runtime.ephemeralStore.set(
-    eventLocationSelectionKey(input.pending.id),
-    input.pending,
-    EVENT_LOCATION_SELECTION_TTL_SECONDS
-  );
+  await rememberActiveEventLocationSelection(input.runtime, input.pending);
   try {
     await input.context.flowEngine.promptChoice({
       purpose: EVENT_LOCATION_SELECTION_PURPOSE,
@@ -1458,7 +1494,7 @@ async function promptEventLocationConfirmation(input: {
       t: input.t
     });
   } catch (error) {
-    await input.runtime.ephemeralStore.delete(eventLocationSelectionKey(input.pending.id));
+    await clearActiveEventLocationSelection(input.runtime, input.pending);
     throw error;
   }
 }
@@ -2439,6 +2475,102 @@ function eventUpdateDraftKey(scopeId: string, flowSessionId: string): string {
 
 function eventLocationSelectionKey(id: string): string {
   return `event-location-selection:${id}`;
+}
+
+function eventLocationSelectionActiveKey(wid: string): string {
+  return `event-location-selection-active:${wid}`;
+}
+
+async function rememberActiveEventLocationSelection(
+  runtime: OfficialPluginCommandRuntime,
+  pending: PendingEventLocationSelection
+): Promise<void> {
+  await Promise.all([
+    runtime.ephemeralStore.set(
+      eventLocationSelectionKey(pending.id),
+      pending,
+      EVENT_LOCATION_SELECTION_TTL_SECONDS
+    ),
+    ...eventLocationSelectionActorWids(pending).map((wid) =>
+      runtime.ephemeralStore.set(
+        eventLocationSelectionActiveKey(wid),
+        pending.id,
+        EVENT_LOCATION_SELECTION_TTL_SECONDS
+      )
+    )
+  ]);
+}
+
+async function clearActiveEventLocationSelection(
+  runtime: OfficialPluginCommandRuntime,
+  pending: PendingEventLocationSelection
+): Promise<void> {
+  await Promise.all([
+    runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id)),
+    ...eventLocationSelectionActorWids(pending).map((wid) =>
+      runtime.ephemeralStore.delete(eventLocationSelectionActiveKey(wid))
+    )
+  ]);
+}
+
+async function findActiveEventLocationSelection(
+  runtime: OfficialPluginCommandRuntime,
+  actorWids: Array<string | undefined>
+): Promise<PendingEventLocationSelection | undefined> {
+  for (const wid of uniqueEventWids(actorWids)) {
+    const activeKey = eventLocationSelectionActiveKey(wid);
+    const pendingId = await runtime.ephemeralStore.get<string>(activeKey);
+    if (!pendingId) {
+      continue;
+    }
+    const pending = await runtime.ephemeralStore.get<PendingEventLocationSelection>(eventLocationSelectionKey(pendingId));
+    if (pending) {
+      return pending;
+    }
+    await runtime.ephemeralStore.delete(activeKey);
+  }
+  return undefined;
+}
+
+async function cancelActiveEventLocationSelectionsForActor(
+  context: PluginCommandContext,
+  runtime: OfficialPluginCommandRuntime,
+  input: {
+    actorWids: string[];
+    chatId?: string | undefined;
+  }
+): Promise<{ cancelled: number; scopeId?: string | undefined }> {
+  const pending = await findActiveEventLocationSelection(runtime, [
+    ...input.actorWids,
+    input.chatId
+  ]);
+  if (!pending) {
+    return { cancelled: 0 };
+  }
+  await clearActiveEventLocationSelection(runtime, pending);
+  const cancelPromptBySubject = (context.flowEngine as {
+    cancelPromptBySubject?: typeof context.flowEngine.cancelPromptBySubject;
+  }).cancelPromptBySubject;
+  await cancelPromptBySubject?.call(context.flowEngine, {
+    purpose: EVENT_LOCATION_SELECTION_PURPOSE,
+    subjectId: pending.id
+  });
+  return {
+    cancelled: 1,
+    scopeId: pending.draft.scopeId
+  };
+}
+
+function eventLocationSelectionActorWids(pending: PendingEventLocationSelection): string[] {
+  return uniqueEventWids([
+    pending.responseChatId,
+    pending.draft.actorWid,
+    ...(pending.draft.actorAliases ?? [])
+  ]);
+}
+
+function isCommandLikeLocationReply(value: string): boolean {
+  return value.trim().startsWith('/');
 }
 
 function pendingEventFlowAnswers(answers: EventFlowAnswers): PendingEventFlowAnswers {

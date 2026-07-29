@@ -5,7 +5,12 @@ import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
   listCalendarEvents,
+  listEventAnnouncementMessages,
+  markEventAnnouncementMessageDeleted,
+  markEventAnnouncementMessageDeleteFailed,
   markEventCancelled,
+  type EventAnnouncementMessageKind,
+  type EventCalendarStatus,
   type StoredEventRecord
 } from './store';
 import type { OfficialPluginCommandRuntime } from '../shared';
@@ -15,8 +20,35 @@ export interface EventCancellationActor {
   label: string;
 }
 
+export type EventCancellationCalendarDisposition = Extract<EventCalendarStatus, 'cancelled' | 'hidden'>;
+
+export interface EventAnnouncementMessageDeletionResult {
+  requested: boolean;
+  attempted: number;
+  deleted: Array<{
+    id: string;
+    kind: EventAnnouncementMessageKind;
+    chatId: string;
+    messageId: string;
+  }>;
+  failed: Array<{
+    id: string;
+    kind: EventAnnouncementMessageKind;
+    chatId: string;
+    messageId: string;
+    reason: string;
+  }>;
+  skippedReason?: string | undefined;
+}
+
 export type EventCancellationResult =
-  | { status: 'cancelled'; cancelledAt: string; dismantleResult?: PluginGroupDismantleResult | undefined }
+  | {
+      status: 'cancelled';
+      cancelledAt: string;
+      calendarDisposition: EventCancellationCalendarDisposition;
+      dismantleResult?: PluginGroupDismantleResult | undefined;
+      announcementMessageDeletion?: EventAnnouncementMessageDeletionResult | undefined;
+    }
   | { status: 'not_cancellable'; reason: string }
   | { status: 'cleanup_failed'; reason: string; dismantleResult?: PluginGroupDismantleResult | undefined };
 
@@ -26,9 +58,13 @@ export async function cancelEventLifecycle(input: {
   db: Parameters<typeof markEventCancelled>[0];
   event: StoredEventRecord;
   actor: EventCancellationActor;
+  calendarDisposition?: EventCancellationCalendarDisposition | undefined;
+  deleteAnnouncementMessages?: boolean | undefined;
+  deleteMessage?: ((messageId: string) => Promise<void>) | undefined;
   reason?: string | undefined;
 }): Promise<EventCancellationResult> {
   const { context, runtime, db, event, actor } = input;
+  const calendarDisposition = input.calendarDisposition ?? 'cancelled';
   if (event.eventStatus !== 'active' ||
       (event.groupLifecycleStatus !== 'poll_open' && event.groupLifecycleStatus !== 'poll_closed' && event.groupLifecycleStatus !== 'cleanup_failed')) {
     return { status: 'not_cancellable', reason: `event lifecycle is ${event.eventStatus}/${event.groupLifecycleStatus}` };
@@ -59,12 +95,20 @@ export async function cancelEventLifecycle(input: {
     }
   }
 
+  const announcementMessageDeletion = input.deleteAnnouncementMessages
+    ? await deleteEventAnnouncementMessages({
+      db,
+      event,
+      deleteMessage: input.deleteMessage
+    })
+    : undefined;
   const cancelledAt = new Date().toISOString();
   markEventCancelled(db, {
     eventId: event.id,
     cancelledAt,
     cancelledByWid: actor.wid,
     cancelledByLabel: actor.label,
+    calendarStatus: calendarDisposition,
     ...(input.reason ? { reason: input.reason } : {})
   });
   await setCleanupFailureStatus(runtime, event.scopeId, null);
@@ -74,10 +118,12 @@ export async function cancelEventLifecycle(input: {
     metadata: {
       previousEventStatus: event.eventStatus,
       previousGroupLifecycleStatus: event.groupLifecycleStatus,
+      calendarDisposition,
       actorWid: actor.wid,
       actorLabel: actor.label,
       reason: input.reason,
-      dismantleResult
+      dismantleResult,
+      announcementMessageDeletion
     }
   });
   await appendEventJsonLog(context, {
@@ -91,17 +137,69 @@ export async function cancelEventLifecycle(input: {
     metadata: {
       previousEventStatus: event.eventStatus,
       previousGroupLifecycleStatus: event.groupLifecycleStatus,
+      calendarDisposition,
       actorLabel: actor.label,
       reason: input.reason,
-      dismantleResult
+      dismantleResult,
+      announcementMessageDeletion
     }
   });
   await refreshCalendar(runtime, db, event);
   return {
     status: 'cancelled',
     cancelledAt,
+    calendarDisposition,
+    ...(announcementMessageDeletion ? { announcementMessageDeletion } : {}),
     ...(dismantleResult ? { dismantleResult } : {})
   };
+}
+
+async function deleteEventAnnouncementMessages(input: {
+  db: Parameters<typeof markEventCancelled>[0];
+  event: StoredEventRecord;
+  deleteMessage?: ((messageId: string) => Promise<void>) | undefined;
+}): Promise<EventAnnouncementMessageDeletionResult> {
+  if (!input.deleteMessage) {
+    return {
+      requested: true,
+      attempted: 0,
+      deleted: [],
+      failed: [],
+      skippedReason: 'message_delete_unavailable'
+    };
+  }
+  const messages = listEventAnnouncementMessages(input.db, input.event.id)
+    .filter((message) => message.scopeId === input.event.scopeId);
+  const result: EventAnnouncementMessageDeletionResult = {
+    requested: true,
+    attempted: messages.length,
+    deleted: [],
+    failed: []
+  };
+  for (const message of messages) {
+    try {
+      await input.deleteMessage(message.messageId);
+      const deletedAt = new Date().toISOString();
+      markEventAnnouncementMessageDeleted(input.db, message.id, deletedAt);
+      result.deleted.push({
+        id: message.id,
+        kind: message.kind,
+        chatId: message.chatId,
+        messageId: message.messageId
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      markEventAnnouncementMessageDeleteFailed(input.db, message.id, reason);
+      result.failed.push({
+        id: message.id,
+        kind: message.kind,
+        chatId: message.chatId,
+        messageId: message.messageId,
+        reason
+      });
+    }
+  }
+  return result;
 }
 
 async function recordCancellationFailure(

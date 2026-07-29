@@ -51,6 +51,7 @@ import {
   listCancellableEvents,
   listCalendarEvents,
   newEventId,
+  recordEventAnnouncementMessage,
   saveCreatedGroupParticipants,
   updateEventStructuredData,
   type StoredEventLocation,
@@ -1755,6 +1756,14 @@ async function publishConfirmedEvent(input: {
       updatedAt: nowIso
     };
     insertEvent(db, event);
+    recordEventAnnouncementMessage(db, {
+      eventId: event.id,
+      scopeId: event.scopeId,
+      kind: 'poll',
+      chatId: input.announcementGroupWid,
+      messageId: sent.messageId,
+      createdAt: nowIso
+    });
     try {
       const calendarConfig = draftEventsConfig(input.draft);
       const calendar = calendarResourceForProfile(calendarConfig, input.profile);
@@ -2022,6 +2031,13 @@ async function createUnplannedEventLifecycle(input: {
       creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
     });
     const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
+    recordEventAnnouncementMessage(input.db, {
+      eventId: event.id,
+      scopeId: event.scopeId,
+      kind: 'event_group_hint',
+      chatId: input.announcementGroupWid,
+      messageId: sent.messageId
+    });
     await appendEventJsonLog(input.context, {
       action: 'event.unplanned_announcement_sent',
       scopeId: input.draft.scopeId,
@@ -2145,7 +2161,15 @@ async function sendEventCalendarHint(input: {
       await recordCalendarHintSkipped(input, 'empty_rendered_text', calendarId);
       return;
     }
+    const db = eventsDatabase(input.runtime.databases);
     const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
+    recordEventAnnouncementMessage(db, {
+      eventId: input.event.id,
+      scopeId: input.scopeId,
+      kind: 'calendar_hint',
+      chatId: input.announcementGroupWid,
+      messageId: sent.messageId
+    });
     await appendEventJsonLog(input.context, {
       action: 'event.calendar_hint_sent',
       scopeId: input.scopeId,

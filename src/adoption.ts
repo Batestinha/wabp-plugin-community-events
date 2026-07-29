@@ -21,6 +21,7 @@ import {
   insertEvent,
   listCalendarEvents,
   newEventId,
+  recordEventAnnouncementMessage,
   upsertVote,
   type EventOrigin,
   type StoredEventRecord
@@ -197,6 +198,16 @@ export async function adoptEventLifecycle(input: {
   const calendar = calendarResourceForProfile(config, profile);
   db.transaction(() => {
     insertEvent(db, event);
+    if (event.pollWaMsgId && event.announcementGroupWid) {
+      recordEventAnnouncementMessage(db, {
+        eventId: event.id,
+        scopeId: event.scopeId,
+        kind: 'poll',
+        chatId: event.announcementGroupWid,
+        messageId: event.pollWaMsgId,
+        createdAt: event.createdAt
+      });
+    }
     for (const vote of snapshotVotes) {
       upsertVote(db, event.id, vote);
     }
@@ -242,6 +253,7 @@ export async function adoptEventLifecycle(input: {
   });
   await sendAdoptedEventGroupHint({
     context: input.context,
+    db,
     activeTransport: input.activeTransport,
     event,
     profile,
@@ -289,6 +301,7 @@ async function validateAdoptedGroup(
 
 async function sendAdoptedEventGroupHint(input: {
   context: PluginCommandContext;
+  db: ReturnType<typeof eventsDatabase>;
   activeTransport?: EventTextTransport | undefined;
   event: StoredEventRecord;
   profile: EventProfile;
@@ -344,6 +357,13 @@ async function sendAdoptedEventGroupHint(input: {
       return;
     }
     const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
+    recordEventAnnouncementMessage(input.db, {
+      eventId: input.event.id,
+      scopeId: input.event.scopeId,
+      kind: 'event_group_hint',
+      chatId: input.announcementGroupWid,
+      messageId: sent.messageId
+    });
     await appendEventJsonLog(input.context, {
       action: 'event.adopted_announcement_sent',
       scopeId: input.event.scopeId,

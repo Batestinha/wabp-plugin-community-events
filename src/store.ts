@@ -10,6 +10,7 @@ export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_f
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
 export type EventWeatherDeliveryStatus = 'queued' | 'skipped' | 'failed';
+export type EventAnnouncementMessageKind = 'poll' | 'calendar_hint' | 'event_group_hint';
 
 export interface StoredEventPollOption {
   id: string;
@@ -135,6 +136,18 @@ export interface StoredEventWeatherDelivery {
   updatedAt: string;
 }
 
+export interface StoredEventAnnouncementMessage {
+  id: string;
+  eventId: string;
+  scopeId: string;
+  kind: EventAnnouncementMessageKind;
+  chatId: string;
+  messageId: string;
+  createdAt: string;
+  deletedAt?: string | undefined;
+  deleteError?: string | undefined;
+}
+
 interface EventRow extends PluginDatabaseRow {
   id: string;
   scope_id: string;
@@ -222,6 +235,18 @@ interface EventWeatherDeliveryRow extends PluginDatabaseRow {
   failed_at: string | null;
   error: string | null;
   updated_at: string;
+}
+
+interface EventAnnouncementMessageRow extends PluginDatabaseRow {
+  id: string;
+  event_id: string;
+  scope_id: string;
+  kind: EventAnnouncementMessageKind;
+  chat_id: string;
+  message_id: string;
+  created_at: string;
+  deleted_at: string | null;
+  delete_error: string | null;
 }
 
 export function eventsDatabase(registry: PluginDatabaseRegistry | undefined): PluginDatabase {
@@ -524,12 +549,13 @@ export function markEventCancelled(db: PluginDatabase, input: {
   cancelledAt: string;
   cancelledByWid: string;
   cancelledByLabel: string;
+  calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
   reason?: string | undefined;
 }): void {
   db.run(
     `UPDATE event_records
         SET event_status = 'cancelled',
-            calendar_status = 'cancelled',
+            calendar_status = ?,
             cancelled_at = ?,
             cancelled_by_wid = ?,
             cancelled_by_label = ?,
@@ -537,12 +563,103 @@ export function markEventCancelled(db: PluginDatabase, input: {
             error = NULL,
             updated_at = ?
       WHERE id = ?`,
+    input.calendarStatus ?? 'cancelled',
     input.cancelledAt,
     input.cancelledByWid,
     input.cancelledByLabel,
     input.reason ?? null,
     input.cancelledAt,
     input.eventId
+  );
+}
+
+export function recordEventAnnouncementMessage(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  kind: EventAnnouncementMessageKind;
+  chatId: string;
+  messageId?: string | undefined;
+  createdAt?: string | undefined;
+}): StoredEventAnnouncementMessage | undefined {
+  const messageId = input.messageId?.trim();
+  if (!messageId) {
+    return undefined;
+  }
+  const now = input.createdAt ?? new Date().toISOString();
+  const id = `evtmsg-${randomUUID()}`;
+  db.run(
+    `INSERT INTO event_announcement_messages (
+        id, event_id, scope_id, kind, chat_id, message_id, created_at, deleted_at, delete_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+      ON CONFLICT(event_id, kind, message_id) DO UPDATE SET
+        scope_id = excluded.scope_id,
+        chat_id = excluded.chat_id,
+        deleted_at = NULL,
+        delete_error = NULL`,
+    id,
+    input.eventId,
+    input.scopeId,
+    input.kind,
+    input.chatId,
+    messageId,
+    now
+  );
+  const row = db.get<EventAnnouncementMessageRow>(
+    `SELECT * FROM event_announcement_messages
+      WHERE event_id = ? AND kind = ? AND message_id = ?
+      LIMIT 1`,
+    input.eventId,
+    input.kind,
+    messageId
+  );
+  return row ? eventAnnouncementMessageFromRow(row) : undefined;
+}
+
+export function listEventAnnouncementMessages(db: PluginDatabase, eventId: string, input: {
+  includeDeleted?: boolean | undefined;
+} = {}): StoredEventAnnouncementMessage[] {
+  const rows = input.includeDeleted
+    ? db.all<EventAnnouncementMessageRow>(
+      `SELECT * FROM event_announcement_messages
+        WHERE event_id = ?
+        ORDER BY created_at ASC, id ASC`,
+      eventId
+    )
+    : db.all<EventAnnouncementMessageRow>(
+      `SELECT * FROM event_announcement_messages
+        WHERE event_id = ? AND deleted_at IS NULL
+        ORDER BY created_at ASC, id ASC`,
+      eventId
+    );
+  return rows.map(eventAnnouncementMessageFromRow);
+}
+
+export function markEventAnnouncementMessageDeleted(
+  db: PluginDatabase,
+  id: string,
+  deletedAt: string
+): void {
+  db.run(
+    `UPDATE event_announcement_messages
+        SET deleted_at = ?,
+            delete_error = NULL
+      WHERE id = ?`,
+    deletedAt,
+    id
+  );
+}
+
+export function markEventAnnouncementMessageDeleteFailed(
+  db: PluginDatabase,
+  id: string,
+  reason: string
+): void {
+  db.run(
+    `UPDATE event_announcement_messages
+        SET delete_error = ?
+      WHERE id = ?`,
+    reason,
+    id
   );
 }
 
@@ -871,6 +988,20 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(row.cancelled_by_label ? { cancelledByLabel: row.cancelled_by_label } : {}),
     ...(row.cancel_reason ? { cancelReason: row.cancel_reason } : {}),
     ...(row.error ? { error: row.error } : {})
+  };
+}
+
+function eventAnnouncementMessageFromRow(row: EventAnnouncementMessageRow): StoredEventAnnouncementMessage {
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    scopeId: row.scope_id,
+    kind: row.kind,
+    chatId: row.chat_id,
+    messageId: row.message_id,
+    createdAt: row.created_at,
+    ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
+    ...(row.delete_error ? { deleteError: row.delete_error } : {})
   };
 }
 

@@ -14,7 +14,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.permissionDenied': 'You do not have permission to create this event type.',
   'official.community-events.location.select': 'Is “{query}” in one of these places?\nReply with another location if none match.',
   'official.community-events.location.freeText': 'Another location',
-  'official.community-events.location.noResults': 'I could not find a place matching “{query}”. Check the place name and start again.',
+  'official.community-events.location.noResults': 'I could not find a place matching “{query}”. Reply with another location, /cancel, or /stop.',
   'official.community-events.location.missing': 'The event place is missing. Start again and provide a place.',
   'official.community-events.location.failed': 'I could not resolve the event place. Try again in a moment.',
   'official.community-events.location.invalid': 'That event place selection is no longer valid. Start again.',

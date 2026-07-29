@@ -1456,21 +1456,17 @@ async function promptEventLocationConfirmation(input: {
   t: CommandContext['t'];
 }): Promise<void> {
   const options = eventLocationCandidateOptions(input.pending.candidates);
-  if (!options.length) {
-    await input.activeTransport.sendText(
-      input.pending.responseChatId,
-      input.t('official.community-events.location.noResults', { query: input.pending.query ?? input.pending.place ?? '' })
-    );
-    return;
-  }
   const place = input.pending.place ?? input.pending.query ?? input.pending.candidates[0]?.label ?? '';
+  const question = options.length > 0
+    ? input.t('official.community-events.location.select', { query: place })
+    : input.t('official.community-events.location.noResults', { query: input.pending.query ?? place });
   await rememberActiveEventLocationSelection(input.runtime, input.pending);
   try {
     await input.context.flowEngine.promptChoice({
       purpose: EVENT_LOCATION_SELECTION_PURPOSE,
       subjectType: 'CommunityEventLocation',
       subjectId: input.pending.id,
-      question: input.t('official.community-events.location.select', { query: place }),
+      question,
       options,
       freeTextOption: {
         id: EVENT_LOCATION_FREE_TEXT_OPTION_ID,
@@ -1520,18 +1516,35 @@ async function requeryEventLocationSelection(input: {
       }
     });
     if (!output.results.length) {
-      await input.activeTransport.sendText(
-        input.pending.responseChatId,
-        input.t('official.community-events.location.noResults', { query: input.query })
-      );
+      const replaceUnresolvedPlace = input.pending.candidates.length === 0;
+      const pending = replaceUnresolvedPlace
+        ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
+        : input.pending;
+      await promptEventLocationConfirmation({
+        context: input.context,
+        runtime: input.runtime,
+        activeTransport: input.activeTransport,
+        pending: {
+          ...pending,
+          id: randomUUID(),
+          query: input.query,
+          provider: output.provider,
+          candidates: []
+        },
+        t: input.t
+      });
       return;
     }
+    const replaceUnresolvedPlace = input.pending.candidates.length === 0;
+    const pending = replaceUnresolvedPlace
+      ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
+      : input.pending;
     await promptEventLocationConfirmation({
       context: input.context,
       runtime: input.runtime,
       activeTransport: input.activeTransport,
       pending: {
-        ...input.pending,
+        ...pending,
         id: randomUUID(),
         query: input.query,
         provider: output.provider,
@@ -1596,10 +1609,20 @@ async function beginEventLocationSelection(input: {
       }
     });
     if (!output.results.length) {
-      await input.activeTransport.sendText(
-        input.responseChatId,
-        input.t('official.community-events.location.noResults', { query: place })
-      );
+      const pending: PendingEventLocationSelection = {
+        kind: 'create',
+        id: randomUUID(),
+        responseChatId: input.responseChatId,
+        draft: input.draft,
+        profile: input.profile,
+        answers: pendingEventFlowAnswers(input.answers),
+        announcementGroupWid: input.announcementGroupWid,
+        place,
+        query: place,
+        provider: output.provider,
+        candidates: []
+      };
+      await promptEventLocationConfirmation({ ...input, pending });
       return;
     }
     const pending: PendingEventLocationSelection = {
@@ -2562,6 +2585,27 @@ function eventLocationSelectionActorWids(pending: PendingEventLocationSelection)
 
 function isCommandLikeLocationReply(value: string): boolean {
   return value.trim().startsWith('/');
+}
+
+function pendingWithReplacedEventLocationAnswer(
+  pending: PendingEventLocationSelection,
+  query: string
+): PendingEventLocationSelection {
+  const profile = pending.kind === 'create' ? pending.profile : pending.draft.profile;
+  if (profile.location.source !== 'question') {
+    return pending;
+  }
+  return {
+    ...pending,
+    place: query,
+    answers: {
+      ...pending.answers,
+      answers: {
+        ...pending.answers.answers,
+        [profile.location.questionKey]: query
+      }
+    }
+  };
 }
 
 function eventLocationCandidateOptions(candidates: GeocoderPlace[]): Array<{ id: string; label: string }> {

@@ -167,7 +167,6 @@ const EVENT_CANCEL_SELECT_STEP_ID = 'event';
 const EVENT_CANCEL_CONFIRM_STEP_ID = 'confirm';
 const EVENT_LOCATION_SELECTION_PURPOSE = 'official.community-events.location.select';
 const EVENT_LOCATION_CONFIRM_OPTION_ID = 'confirm';
-const EVENT_LOCATION_RETRY_OPTION_ID = 'retry';
 const EVENT_LOCATION_FREE_TEXT_OPTION_ID = 'location-query';
 const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
 
@@ -1351,19 +1350,6 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       });
       return true;
     }
-    if (selected?.id === EVENT_LOCATION_RETRY_OPTION_ID) {
-      await promptEventLocationConfirmation({
-        context,
-        runtime,
-        activeTransport,
-        pending: {
-          ...pending,
-          id: randomUUID()
-        },
-        t
-      });
-      return true;
-    }
     const candidate = selected?.id === EVENT_LOCATION_CONFIRM_OPTION_ID
       ? pending.candidates[0]
       : Number.isSafeInteger(Number(selected?.id))
@@ -1457,10 +1443,6 @@ async function promptEventLocationConfirmation(input: {
         {
           id: EVENT_LOCATION_CONFIRM_OPTION_ID,
           label: input.t('official.community-events.location.confirm.yes')
-        },
-        {
-          id: EVENT_LOCATION_RETRY_OPTION_ID,
-          label: input.t('official.community-events.location.confirm.retry')
         }
       ],
       freeTextOption: {

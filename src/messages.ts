@@ -15,7 +15,6 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.location.select': 'Which place matches “{query}”?',
   'official.community-events.location.confirm': 'Is “{place}” in “{suggestedLocation}”?\nReply with another location if not.',
   'official.community-events.location.confirm.yes': 'Yes',
-  'official.community-events.location.confirm.retry': 'No, I will reply with another location',
   'official.community-events.location.confirm.freeText': 'Another location',
   'official.community-events.location.noResults': 'I could not find a place matching “{query}”. Check the place name and start again.',
   'official.community-events.location.missing': 'The event place is missing. Start again and provide a place.',

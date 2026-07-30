@@ -111,7 +111,7 @@ function calendarEventSummary(
   const profile = 'eventProfiles' in config
     ? config.eventProfiles.find((candidate) => candidate.id === event.profileId)
     : undefined;
-  const template = profile?.calendar.titleTemplate?.trim();
+  const template = profile ? calendarTitleTemplateForProfile(profile) : '';
   if (!profile || !template) {
     return event.groupTitle;
   }
@@ -124,6 +124,21 @@ function calendarEventSummary(
     creatorDisplayName: event.actorLabel
   }).trim();
   return rendered || event.groupTitle;
+}
+
+function calendarTitleTemplateForProfile(profile: EventsConfig['eventProfiles'][number]): string {
+  return profile.calendar.titleTemplate?.trim()
+    || inferStylePlaceCalendarTitleTemplate(profile.group.titleTemplate)
+    || inferStylePlaceCalendarTitleTemplate(profile.poll.titleTemplate);
+}
+
+function inferStylePlaceCalendarTitleTemplate(template: string): string {
+  const match = template.trim().match(/^\{style\}([\s\S]*?)\{place\}/);
+  if (!match) {
+    return '';
+  }
+  const joiner = (match[1] ?? '').replace(/['"`]/g, '').replace(/\s+/g, ' ');
+  return joiner.trim() ? `{style}${joiner}{place}` : '';
 }
 
 function formatUtc(date: Date): string {

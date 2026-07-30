@@ -743,6 +743,68 @@ export function markEventFailed(db: PluginDatabase, eventId: string, reason: str
   );
 }
 
+export function markEventProvisioningFailed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (!current) {
+      return false;
+    }
+
+    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
+    writeCreatedGroupParticipants(
+      db,
+      input.eventId,
+      input.participants,
+      input.failedAt
+    );
+    const result = db.run(
+      `UPDATE event_records
+          SET event_status = 'failed',
+              group_lifecycle_status = 'none',
+              calendar_status = 'hidden',
+              subgroup_chat_id = ?,
+              subgroup_title = ?,
+              error = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.subgroupChatId,
+      input.subgroupTitle,
+      input.reason,
+      input.failedAt,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (result.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while checkpointing subgroup provisioning failure.`);
+    }
+    return true;
+  });
+}
+
 export function markEventMissed(db: PluginDatabase, eventId: string, reason: string, missedAt: string): void {
   db.run(
     `UPDATE event_records
@@ -804,7 +866,17 @@ export function saveCreatedGroupParticipants(
   eventId: string,
   participants: Record<string, CreatedGroupParticipantResult>
 ): void {
-  const now = new Date().toISOString();
+  db.transaction(() => {
+    writeCreatedGroupParticipants(db, eventId, participants, new Date().toISOString());
+  });
+}
+
+function writeCreatedGroupParticipants(
+  db: PluginDatabase,
+  eventId: string,
+  participants: Record<string, CreatedGroupParticipantResult>,
+  createdAt: string
+): void {
   const insert = db.prepare(
     `INSERT INTO event_group_participants (
        event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent, created_at
@@ -815,19 +887,17 @@ export function saveCreatedGroupParticipants(
        is_group_creator = excluded.is_group_creator,
        is_invite_v4_sent = excluded.is_invite_v4_sent`
   );
-  db.transaction(() => {
-    for (const [wid, participant] of Object.entries(participants)) {
-      insert.run(
-        eventId,
-        wid,
-        participant.statusCode ?? null,
-        participant.message ?? null,
-        participant.isGroupCreator ? 1 : 0,
-        participant.isInviteV4Sent ? 1 : 0,
-        now
-      );
-    }
-  });
+  for (const [wid, participant] of Object.entries(participants)) {
+    insert.run(
+      eventId,
+      wid,
+      participant.statusCode ?? null,
+      participant.message ?? null,
+      participant.isGroupCreator ? 1 : 0,
+      participant.isInviteV4Sent ? 1 : 0,
+      createdAt
+    );
+  }
 }
 
 export function appendEventLog(db: PluginDatabase, input: {

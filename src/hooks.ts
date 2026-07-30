@@ -5,6 +5,7 @@ import type {
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
+import { isManagedCommunitySubgroupProvisioningError } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
@@ -41,6 +42,7 @@ import {
   markEventCleaned,
   markEventClosed,
   markEventFailed,
+  markEventProvisioningFailed,
   markEventMissed,
   replaceVotes,
   saveCreatedGroupParticipants,
@@ -531,17 +533,67 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         })
       ];
     }
-    markEventFailed(db, record.id, reason, new Date().toISOString());
-    appendEventLog(db, { eventId: record.id, action: 'events.close.failed', metadata: { reason } });
+    const failedAt = new Date().toISOString();
+    let failureMetadata: Record<string, unknown> = { reason };
+    let failedSubgroupChatId: string | undefined;
+    if (isManagedCommunitySubgroupProvisioningError(error)) {
+      const { created, provisioning, stage } = error;
+      failedSubgroupChatId = created.chatId;
+      const progress = {
+        standaloneRegistered: provisioning.standaloneRegistered,
+        attendeesVerified: provisioning.attendeesVerified,
+        communityLinkConfirmed: provisioning.communityLinkConfirmed,
+        linkedChildRegistered: provisioning.linkedChildRegistered
+      };
+      const checkpointPersisted = markEventProvisioningFailed(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        subgroupChatId: created.chatId,
+        subgroupTitle: created.title,
+        participants: created.participants,
+        reason,
+        failedAt
+      });
+      failureMetadata = {
+        reason,
+        subgroupChatId: created.chatId,
+        subgroupTitle: created.title,
+        parentCommunityWid: provisioning.parentCommunityWid,
+        stage,
+        progress,
+        participants: created.participants,
+        checkpointPersisted
+      };
+      if (!checkpointPersisted) {
+        context.logger.error(
+          {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            subgroupChatId: created.chatId,
+            stage,
+            progress
+          },
+          'Event subgroup provisioning failure checkpoint was rejected by the event state guard'
+        );
+      }
+    } else {
+      markEventFailed(db, record.id, reason, failedAt);
+    }
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.close.failed',
+      metadata: failureMetadata
+    });
     await appendJsonLog(context, {
       action: 'event.close_failed',
       scopeId: record.scopeId,
       eventId: record.id,
       profileId: record.profileId,
       pollWaMsgId: record.pollWaMsgId,
-      metadata: { reason }
+      ...(failedSubgroupChatId ? { subgroupChatId: failedSubgroupChatId } : {}),
+      metadata: failureMetadata
     });
-    return [audit('events.close.failed', { eventId: record.id, reason })];
+    return [audit('events.close.failed', { eventId: record.id, ...failureMetadata })];
   }
 }
 

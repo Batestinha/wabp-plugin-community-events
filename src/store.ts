@@ -573,6 +573,22 @@ export function markEventCancelled(db: PluginDatabase, input: {
   );
 }
 
+export function updateEventCalendarStatus(db: PluginDatabase, input: {
+  eventId: string;
+  calendarStatus: EventCalendarStatus;
+  updatedAt: string;
+}): void {
+  db.run(
+    `UPDATE event_records
+        SET calendar_status = ?,
+            updated_at = ?
+      WHERE id = ?`,
+    input.calendarStatus,
+    input.updatedAt,
+    input.eventId
+  );
+}
+
 export function recordEventAnnouncementMessage(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;

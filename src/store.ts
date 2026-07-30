@@ -492,6 +492,17 @@ export function listOpenPollEvents(db: PluginDatabase): StoredEventRecord[] {
   ).map(eventFromRow);
 }
 
+export function listFailedProvisioningEvents(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND poll_wa_msg_id IS NOT NULL
+        AND subgroup_chat_id IS NOT NULL
+      ORDER BY updated_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
 export function updateEventCloseAt(db: PluginDatabase, input: {
   eventId: string;
   closeAt: string;
@@ -507,6 +518,37 @@ export function updateEventCloseAt(db: PluginDatabase, input: {
     input.updatedAt,
     input.eventId
   );
+}
+
+export function markEventProvisioningResumed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  resumedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'active',
+            group_lifecycle_status = 'poll_open',
+            calendar_status = 'included',
+            subgroup_chat_id = ?,
+            subgroup_title = ?,
+            error = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+    input.subgroupChatId,
+    input.subgroupTitle,
+    input.resumedAt,
+    input.eventId,
+    input.scopeId,
+    input.subgroupChatId
+  );
+  return result.changes === 1;
 }
 
 export function markEventClosed(db: PluginDatabase, input: {

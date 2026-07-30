@@ -5,7 +5,6 @@ import type {
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
-import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
@@ -14,6 +13,10 @@ import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import {
+  missingEventSubgroupAttendeeWids,
+  voterWidsForResponseBehavior
+} from './attendance';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -30,6 +33,7 @@ import {
   getEventByEquivalentPoll,
   getActiveEventBySubgroup,
   listOpenPollEvents,
+  listFailedProvisioningEvents,
   listPendingCleanupEvents,
   listCalendarEvents,
   listWeatherForecastCandidateEvents,
@@ -44,11 +48,16 @@ import {
   upsertVote,
   type StoredEventRecord
 } from './store';
+import {
+  eventProvisioningResumeDedupeKey,
+  resumeEventProvisioning
+} from './provisioningRecovery';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
+  linkCommunityGroup?(childGroupChatId: string, parentCommunityChatId: string): Promise<void>;
 }
 
 interface EventsHooksOptions {
@@ -74,13 +83,58 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   };
 }
 
-export async function recoverEventJobs(context: PluginRuntimeContext): Promise<number> {
-  const closeJobs = await recoverEventCloseJobs(context);
+export async function recoverEventJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const closeJobs = await recoverEventCloseJobs(context, options);
   const cleanupJobs = await recoverEventCleanupJobs(context);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
-  const enqueued = closeJobs + cleanupJobs + weatherForecastJobs;
+  const provisioningJobs = await recoverEventProvisioningJobs(context, options);
+  const enqueued = closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs;
   if (enqueued > 0) {
-    context.logger.info({ enqueued, closeJobs, cleanupJobs, weatherForecastJobs }, 'Recovered official.community-events jobs');
+    context.logger.info(
+      { enqueued, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs },
+      'Recovered official.community-events jobs'
+    );
+  }
+  return enqueued;
+}
+
+export async function recoverEventProvisioningJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const records = listFailedProvisioningEvents(db);
+  let enqueued = 0;
+  for (const record of records) {
+    try {
+      const result = await resumeEventProvisioning({
+        context,
+        scopeId: record.scopeId,
+        eventId: record.id,
+        subgroupChatId: record.subgroupChatId!,
+        ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
+        ...(options.linkCommunityGroup ? { linkCommunityGroup: options.linkCommunityGroup } : {}),
+        actorWid: 'plugin-startup@system',
+        actorLabel: 'Plugin startup recovery',
+        ...(options.now ? { now: options.now } : {})
+      });
+      if (result.status === 'queued') {
+        enqueued += 1;
+      } else if (result.status === 'rejected') {
+        context.logger.warn(
+          { eventId: record.id, scopeId: record.scopeId, reason: result.reason },
+          'Unable to resume failed official.community-events subgroup provisioning'
+        );
+      }
+    } catch (error) {
+      context.logger.warn(
+        { error, eventId: record.id, scopeId: record.scopeId },
+        'Failed to recover official.community-events subgroup provisioning'
+      );
+    }
   }
   return enqueued;
 }
@@ -95,8 +149,9 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
     const closeAt = effectiveCloseAt(record, config);
     persistEffectiveCloseAt(db, record, closeAt);
     const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : 'invalid';
-    const due = Number.isFinite(closeAt.getTime()) && closeAt.getTime() <= now.getTime();
-    if (due && eventScheduledDateHasPassed(record, now)) {
+    const due = Boolean(record.subgroupChatId) ||
+      (Number.isFinite(closeAt.getTime()) && closeAt.getTime() <= now.getTime());
+    if (due && !record.subgroupChatId && eventScheduledDateHasPassed(record, now)) {
       await markStartupEventMissed(context, db, record, config, closeAt, now);
       continue;
     }
@@ -108,7 +163,9 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       ...(record.groupWid ? { groupWid: record.groupWid } : {}),
       ...(!due && Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
       payload: { eventId: record.id },
-      dedupeKey: `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
+      dedupeKey: record.subgroupChatId
+        ? eventProvisioningResumeDedupeKey(record.id, record.subgroupChatId)
+        : `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
     });
     enqueued += 1;
   }
@@ -267,7 +324,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     const closeAt = effectiveCloseAt(record, config);
     persistEffectiveCloseAt(db, record, closeAt);
     const now = new Date();
-    if (Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now.getTime()) {
+    if (!record.subgroupChatId && Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now.getTime()) {
       return [
         audit('events.close.deferred', {
           eventId: record.id,
@@ -315,10 +372,27 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     }
     const votes = liveVotes;
     const attendeeWids = voterWidsForResponseBehavior(record, votes, 'includeInEventGroup');
-    let subgroupChatId: string | undefined;
-    let subgroupTitle: string | undefined;
+    let subgroupChatId = record.subgroupChatId;
+    let subgroupTitle = record.subgroupTitle ?? (subgroupChatId ? record.groupTitle : undefined);
 
-    if (attendeeWids.length > 0) {
+    if (attendeeWids.length > 0 && subgroupChatId) {
+      const missingAttendeeWids = await missingEventSubgroupAttendeeWids(context, subgroupChatId, attendeeWids);
+      if (missingAttendeeWids.length > 0) {
+        throw new Error(`Subgroup ${subgroupChatId} is missing attendee(s): ${missingAttendeeWids.join(', ')}`);
+      }
+      await appendJsonLog(context, {
+        action: 'subgroup.reused',
+        scopeId: record.scopeId,
+        eventId: record.id,
+        profileId: record.profileId,
+        pollWaMsgId: record.pollWaMsgId,
+        subgroupChatId,
+        metadata: {
+          title: subgroupTitle,
+          attendeeWids
+        }
+      });
+    } else if (attendeeWids.length > 0) {
       const result = await createEventCommunitySubgroup({
         context,
         scopeId: record.scopeId,
@@ -869,30 +943,6 @@ async function setCleanupFailureStatus(
   }
 }
 
-function voterWidsForResponseBehavior(
-  record: StoredEventRecord,
-  votes: PollVoteUpdate[],
-  behavior: 'includeInEventGroup' | 'includeInAttendanceCount'
-): string[] {
-  const responseClassesById = new Map(record.responseClasses.map((responseClass) => [
-    responseClass.id,
-    responseClass
-  ]));
-  const optionsById = new Map(record.pollOptions.map((option) => [option.id, option]));
-  const voters = new Set<string>();
-  for (const vote of votes) {
-    const selected = selectedEventOptionIds(record, vote);
-    if (selected.some((optionId) => {
-      const option = optionsById.get(optionId);
-      const responseClass = option ? responseClassesById.get(option.responseClassId) : undefined;
-      return responseClass?.[behavior] === true;
-    })) {
-      voters.add(vote.voterWid);
-    }
-  }
-  return [...voters].sort();
-}
-
 function effectiveCloseAt(record: StoredEventRecord, config: ReturnType<typeof parseEventsConfig>): Date {
   const startsAt = new Date(record.startsAtUtc || record.startsAt);
   const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
@@ -1027,37 +1077,6 @@ function localDateKey(date: Date, timezone: string): string | undefined {
 function validDateOrNow(value: string): Date {
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date : new Date();
-}
-
-function selectedEventOptionIds(record: StoredEventRecord, vote: PollVoteUpdate): string[] {
-  const selected = new Set<string>();
-  for (const name of vote.selectedOptionNames) {
-    const option = record.pollOptions.find((candidate) => candidate.label === name);
-    if (option) {
-      selected.add(option.id);
-    }
-  }
-  for (const number of vote.selectedOptionNumbers) {
-    const option = record.pollOptions[number - 1];
-    if (option) {
-      selected.add(option.id);
-    }
-  }
-  for (const id of vote.selectedOptionIds) {
-    const direct = record.pollOptions.find((candidate) => candidate.id === id);
-    if (direct) {
-      selected.add(direct.id);
-      continue;
-    }
-    const localId = Number(id);
-    if (Number.isSafeInteger(localId) && localId >= 0) {
-      const option = record.pollOptions[localId];
-      if (option) {
-        selected.add(option.id);
-      }
-    }
-  }
-  return [...selected];
 }
 
 function jobPayloadEventId(payload: unknown): string | undefined {

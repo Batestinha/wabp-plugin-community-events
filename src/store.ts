@@ -115,7 +115,6 @@ export interface StoredCalendarPublicationStatus {
   feedId?: string | undefined;
   label?: string | undefined;
   subscriptionUrl?: string | undefined;
-  downloadUrl?: string | undefined;
   calendarUrl?: string | undefined;
   targetUpdatedAt?: string | undefined;
   lastSuccessAt?: string | undefined;
@@ -216,7 +215,6 @@ interface CalendarPublicationStatusRow extends PluginDatabaseRow {
   feed_id: string | null;
   label: string | null;
   subscription_url: string | null;
-  download_url: string | null;
   calendar_url: string | null;
   target_updated_at: string | null;
   last_success_at: string | null;
@@ -866,9 +864,9 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
     `INSERT INTO event_calendar_publication_status (
        scope_id, calendar_id, generated_at, generated_event_count,
        publication_enabled, attempted, ok, endpoint_url, feed_id, label,
-       subscription_url, download_url, calendar_url, target_updated_at, last_success_at,
+       subscription_url, calendar_url, target_updated_at, last_success_at,
        last_error_at, last_error, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(scope_id, calendar_id) DO UPDATE SET
        generated_at = excluded.generated_at,
        generated_event_count = excluded.generated_event_count,
@@ -879,7 +877,6 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
        feed_id = excluded.feed_id,
        label = excluded.label,
        subscription_url = COALESCE(excluded.subscription_url, event_calendar_publication_status.subscription_url),
-       download_url = COALESCE(excluded.download_url, event_calendar_publication_status.download_url),
        calendar_url = COALESCE(excluded.calendar_url, event_calendar_publication_status.calendar_url),
        target_updated_at = COALESCE(excluded.target_updated_at, event_calendar_publication_status.target_updated_at),
        last_success_at = CASE
@@ -908,7 +905,6 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
     publication?.feedId || null,
     publication?.label || null,
     publication?.subscriptionUrl || null,
-    publication?.downloadUrl || null,
     publication?.calendarUrl || null,
     publication?.updatedAt || null,
     lastSuccessAt,
@@ -1089,7 +1085,6 @@ function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): St
     ...(row.feed_id ? { feedId: row.feed_id } : {}),
     ...(row.label ? { label: row.label } : {}),
     ...(row.subscription_url ? { subscriptionUrl: row.subscription_url } : {}),
-    ...(row.download_url ? { downloadUrl: row.download_url } : {}),
     ...(row.calendar_url ? { calendarUrl: row.calendar_url } : {}),
     ...(row.target_updated_at ? { targetUpdatedAt: row.target_updated_at } : {}),
     ...(row.last_success_at ? { lastSuccessAt: row.last_success_at } : {}),

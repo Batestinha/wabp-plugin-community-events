@@ -88,6 +88,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.profile.climbing.poll.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy} By: {creatorDisplayName}',
   'official.community-events.profile.climbing.group.titleTemplate': '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
   'official.community-events.profile.climbing.eventGroupHint.template': '{creatorDisplayName} created {groupDisplayName}. Tap this link to join: {groupJoinUrl}',
+  'official.community-events.profile.climbing.calendar.titleTemplate': '{style} in {place}',
   'official.community-events.profile.climbing.calendar.hint.template': 'Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName} by tapping this link: {calendarSubscriptionUrl}',
   'official.community-events.profile.climbing.weather.template': 'Weather for {groupDisplayName} on {weatherDate}:\n{weatherSummary}',
   'official.community-events.profile.climbing.responseClass.event_group_member': 'Event group member',

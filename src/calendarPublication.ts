@@ -12,7 +12,6 @@ export interface CalendarPublicationOutcome {
   feedId: string;
   label: string;
   subscriptionUrl?: string | undefined;
-  downloadUrl?: string | undefined;
   calendarUrl?: string | undefined;
   updatedAt?: string | undefined;
   error?: string | undefined;
@@ -66,7 +65,6 @@ export async function publishCalendarBody(input: {
       feedId: target.feedId,
       label: target.label,
       subscriptionUrl: result.subscriptionUrl || undefined,
-      downloadUrl: result.downloadUrl || target.downloadUrl || undefined,
       calendarUrl: result.calendarUrl || target.calendarUrl || undefined,
       updatedAt: result.updatedAt || undefined
     };
@@ -78,7 +76,6 @@ export async function publishCalendarBody(input: {
       endpointUrl: target.endpointUrl,
       feedId: target.feedId,
       label: target.label,
-      downloadUrl: target.downloadUrl || undefined,
       calendarUrl: target.calendarUrl || undefined,
       error: error instanceof Error ? error.message : String(error)
     };
@@ -96,7 +93,6 @@ export function calendarPublicationTarget(
   secretFieldName: string;
   feedId: string;
   label: string;
-  downloadUrl: string;
   calendarUrl: string;
 } {
   return {
@@ -107,7 +103,6 @@ export function calendarPublicationTarget(
     secretFieldName: calendar.publication.secretFieldName.trim() || 'bot_secret',
     feedId: calendar.publication.feedId.trim() || calendar.id,
     label: calendar.publication.label.trim() || calendar.label,
-    downloadUrl: calendar.publication.downloadUrl.trim(),
     calendarUrl: calendar.publication.calendarUrl.trim()
   };
 }
@@ -115,7 +110,7 @@ export function calendarPublicationTarget(
 async function postCalendarPublication(
   target: ReturnType<typeof calendarPublicationTarget>,
   icsBody: string
-): Promise<{ subscriptionUrl: string; downloadUrl: string; calendarUrl: string; updatedAt: string }> {
+): Promise<{ subscriptionUrl: string; calendarUrl: string; updatedAt: string }> {
   const body = new URLSearchParams();
   if (target.secret) {
     body.set(target.secretFieldName, target.secret);
@@ -148,7 +143,6 @@ async function postCalendarPublication(
   }
   return {
     subscriptionUrl: stringField(result, 'subscriptionUrl') || stringField(result, 'subscription_url'),
-    downloadUrl: stringField(result, 'downloadUrl') || stringField(result, 'download_url'),
     calendarUrl: stringField(result, 'calendarUrl') || stringField(result, 'calendar_url'),
     updatedAt: stringField(result, 'updatedAt') || stringField(result, 'updated_on')
   };

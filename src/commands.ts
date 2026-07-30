@@ -2115,7 +2115,7 @@ async function sendEventCalendarHint(input: {
     }
     const publicationStatus = getCalendarPublicationStatus(eventsDatabase(input.runtime.databases), input.scopeId, calendarId);
     const hostedSubscriptionUrl = publicationStatus?.ok
-      ? publicationStatus.subscriptionUrl || publicationStatus.downloadUrl || ''
+      ? publicationStatus.subscriptionUrl || ''
       : '';
     const origin = operatorConsolePublicOriginForRuntime(input.runtime.config);
     const fallbackSubscriptionUrl = botVisibleCalendarSubscriptionUrl({
@@ -2131,7 +2131,7 @@ async function sendEventCalendarHint(input: {
         tokenConfigured: Boolean(calendar.subscriptionToken.trim()),
         runtimeBindingIdConfigured: Boolean(input.runtime.config.RUNTIME_BINDING_ID.trim()),
         operatorConsolePublicOriginConfigured: Boolean(origin),
-        hostedPublicationConfigured: Boolean(publicationStatus?.subscriptionUrl || publicationStatus?.downloadUrl)
+        hostedPublicationConfigured: Boolean(publicationStatus?.subscriptionUrl)
       });
       return;
     }

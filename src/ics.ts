@@ -2,6 +2,7 @@ import { chown, lstat, mkdir, readdir, rename, writeFile } from 'node:fs/promise
 import path from 'node:path';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { EventCalendarResource, EventsConfig } from './config';
+import { renderEventTemplate } from './flow';
 import type { StoredEventRecord } from './store';
 
 const CALENDAR_EXPORT_ROOT = 'calendar-exports';
@@ -32,7 +33,7 @@ export async function writeScopeCalendar(input: {
 
 export function renderScopeCalendar(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): string {
   const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
-  return renderIcs(scopeCalendarEvents(config, calendarId, events), new Date(), calendar?.label || calendarId);
+  return renderIcsWithConfig(scopeCalendarEvents(config, calendarId, events), config, new Date(), calendar?.label || calendarId);
 }
 
 export function scopeCalendarEvents(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): StoredEventRecord[] {
@@ -57,6 +58,15 @@ export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarR
 }
 
 export function renderIcs(events: StoredEventRecord[], now = new Date(), calendarName = 'Events'): string {
+  return renderIcsWithConfig(events, {}, now, calendarName);
+}
+
+function renderIcsWithConfig(
+  events: StoredEventRecord[],
+  config: Pick<EventsConfig, 'eventProfiles'> | Record<string, never>,
+  now = new Date(),
+  calendarName = 'Events'
+): string {
   const lines = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
@@ -65,13 +75,17 @@ export function renderIcs(events: StoredEventRecord[], now = new Date(), calenda
     'METHOD:PUBLISH',
     `X-WR-CALNAME:${escapeText(calendarName)}`,
     `NAME:${escapeText(calendarName)}`,
-    ...events.flatMap((event) => renderEvent(event, now)),
+    ...events.flatMap((event) => renderEvent(event, config, now)),
     'END:VCALENDAR'
   ];
   return `${lines.flatMap(foldIcsLine).join('\r\n')}\r\n`;
 }
 
-function renderEvent(event: StoredEventRecord, now: Date): string[] {
+function renderEvent(
+  event: StoredEventRecord,
+  config: Pick<EventsConfig, 'eventProfiles'> | Record<string, never>,
+  now: Date
+): string[] {
   const startsAt = new Date(event.startsAt);
   const endsAt = new Date(startsAt.getTime() + event.calendarDurationMinutes * 60_000);
   return [
@@ -83,11 +97,33 @@ function renderEvent(event: StoredEventRecord, now: Date): string[] {
     `LAST-MODIFIED:${formatUtc(new Date(event.updatedAt))}`,
     `SEQUENCE:${event.calendarStatus === 'cancelled' ? 1 : 0}`,
     ...(event.calendarStatus === 'cancelled' ? ['STATUS:CANCELLED'] : ['STATUS:CONFIRMED']),
-    `SUMMARY:${escapeText(event.groupTitle)}`,
+    `SUMMARY:${escapeText(calendarEventSummary(event, config))}`,
     ...(event.calendarLocation ? [`LOCATION:${escapeText(event.calendarLocation)}`] : []),
     ...(event.calendarDescription ? [`DESCRIPTION:${escapeText(event.calendarDescription)}`] : []),
     'END:VEVENT'
   ];
+}
+
+function calendarEventSummary(
+  event: StoredEventRecord,
+  config: Pick<EventsConfig, 'eventProfiles'> | Record<string, never>
+): string {
+  const profile = 'eventProfiles' in config
+    ? config.eventProfiles.find((candidate) => candidate.id === event.profileId)
+    : undefined;
+  const template = profile?.calendar.titleTemplate?.trim();
+  if (!profile || !template) {
+    return event.groupTitle;
+  }
+  const rendered = renderEventTemplate({
+    template,
+    profile,
+    answers: event.answers,
+    startsAt: new Date(event.startsAt),
+    timezone: event.timezone,
+    creatorDisplayName: event.actorLabel
+  }).trim();
+  return rendered || event.groupTitle;
 }
 
 function formatUtc(date: Date): string {

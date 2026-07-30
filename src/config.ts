@@ -30,6 +30,9 @@ export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_GROUP_HINT_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.eventGroupHint.template'
 ]!;
+export const DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE = eventsMessages[
+  'official.community-events.profile.climbing.calendar.titleTemplate'
+]!;
 export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = 'Event created by {creatorDisplayName}. Subscribe to {calendarDisplayName} by tapping this link: {calendarSubscriptionUrl}';
 export const DEFAULT_EVENT_WEATHER_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.weather.template'
@@ -105,7 +108,6 @@ const eventCalendarResourceObjectSchema = z.object({
     secretFieldName: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).or(z.literal('')).default('bot_secret'),
     feedId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(''),
     label: z.string().trim().default(''),
-    downloadUrl: z.string().trim().url().or(z.literal('')).default(''),
     calendarUrl: z.string().trim().url().or(z.literal('')).default('')
   }).strict().default({})
 }).strict();
@@ -168,6 +170,7 @@ const eventProfileObjectSchema = z.object({
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
+    titleTemplate: optionalAuthoredTextSchema.optional(),
     descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
       sendOnPollPublished: z.boolean().default(false),
@@ -293,6 +296,9 @@ const eventProfileObjectSchema = z.object({
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
   validateEventTemplate(profile.eventGroupHint.template, groupHintTemplateTokens, ['eventGroupHint', 'template'], ctx);
+  if (profile.calendar.titleTemplate) {
+    validateEventTemplate(profile.calendar.titleTemplate, templateTokens, ['calendar', 'titleTemplate'], ctx);
+  }
   if (profile.calendar.descriptionTemplate) {
     validateEventTemplate(profile.calendar.descriptionTemplate, templateTokens, ['calendar', 'descriptionTemplate'], ctx);
   }
@@ -351,6 +357,7 @@ export const defaultClimbingEventProfile: EventProfile = {
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,
     durationMinutes: 240,
+    titleTemplate: DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE,
     hint: {
       sendOnPollPublished: false,
       sendOnUnplannedCreated: false,
@@ -379,7 +386,6 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
     secretFieldName: 'bot_secret',
     feedId: '',
     label: '',
-    downloadUrl: '',
     calendarUrl: ''
   }
 };
@@ -499,6 +505,11 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
     },
     calendar: {
       ...profile.calendar,
+      titleTemplate: localizeIfDefault(
+        profile.calendar.titleTemplate ?? DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE,
+        DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE,
+        () => t('official.community-events.profile.climbing.calendar.titleTemplate')
+      ),
       hint: {
         ...profile.calendar.hint,
         template: localizeIfDefault(
@@ -596,7 +607,7 @@ function normalizeEventCalendarResourceInput(calendar: unknown): unknown {
         label: legacyPiwigo.label
       }
     : {};
-  const current = isRecord(publication) ? publication : {};
+  const current = isRecord(publication) ? publicationWithoutDownloadUrl(publication) : {};
   return {
     ...calendarWithoutLegacy,
     publication: {
@@ -604,6 +615,11 @@ function normalizeEventCalendarResourceInput(calendar: unknown): unknown {
       ...current
     }
   };
+}
+
+function publicationWithoutDownloadUrl(publication: Record<string, unknown>): Record<string, unknown> {
+  const { downloadUrl: _legacyDownloadUrl, ...current } = publication;
+  return current;
 }
 
 function normalizeEventProfileInput(profile: unknown): unknown {

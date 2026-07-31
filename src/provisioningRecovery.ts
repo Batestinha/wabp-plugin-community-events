@@ -1,26 +1,32 @@
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import { isManagedCommunitySubgroupProvisioningError } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { missingEventSubgroupAttendeeWids, voterWidsForResponseBehavior } from './attendance';
+import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import { voterWidsForResponseBehavior } from './attendance';
 import { parseEventsConfig } from './config';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
+import { resumeEventCommunitySubgroup } from './subgroups';
 import {
   appendEventLog,
+  checkpointEventProvisioningCandidate,
   eventsDatabase,
   getActiveEventBySubgroup,
   getEvent,
+  listCreatedGroupParticipants,
   listVotes,
   markEventProvisioningResumed,
+  saveCreatedGroupParticipants,
   type StoredEventRecord
 } from './store';
 
 export interface ResumeEventProvisioningInput {
   context: PluginRuntimeContext;
-  linkCommunityGroup?(childGroupChatId: string, parentCommunityChatId: string): Promise<void>;
   scopeId: string;
   eventId: string;
   subgroupChatId: string;
   subgroupTitle?: string | undefined;
+  participants?: Record<string, CreatedGroupParticipantResult> | undefined;
   actorWid?: string | undefined;
   actorLabel?: string | undefined;
   now?: Date | undefined;
@@ -46,7 +52,6 @@ export type ResumeEventProvisioningResult =
       status: 'rejected';
       reason: string;
       event: StoredEventRecord;
-      missingAttendeeWids?: string[] | undefined;
     };
 
 export async function resumeEventProvisioning(
@@ -108,7 +113,7 @@ export async function resumeEventProvisioning(
   if (!parentCommunityChatId) {
     return rejected(event, `No parent community is mapped for scope ${scopeId}.`);
   }
-  let liveParentCommunityChatId = await input.context.communityParentGroupWidForGroup(subgroupChatId);
+  const liveParentCommunityChatId = await input.context.communityParentGroupWidForGroup(subgroupChatId);
   if (liveParentCommunityChatId && liveParentCommunityChatId !== parentCommunityChatId) {
     return rejected(
       event,
@@ -124,54 +129,123 @@ export async function resumeEventProvisioning(
   if (attendeeWids.length === 0) {
     return rejected(event, `Event ${event.id} has no persisted event-group attendees to verify.`);
   }
-  const missingAttendeeWids = await missingEventSubgroupAttendeeWids(
-    input.context,
-    subgroupChatId,
-    attendeeWids
-  );
-  if (missingAttendeeWids.length > 0) {
-    return {
-      ...rejected(
-        event,
-        `Subgroup ${subgroupChatId} is missing attendee(s): ${missingAttendeeWids.join(', ')}.`
-      ),
-      missingAttendeeWids
-    };
+  if (!input.context.services) {
+    return rejected(
+      event,
+      'Provisioning recovery requires the official community subgroup service.'
+    );
   }
-
-  if (!liveParentCommunityChatId) {
-    if (!input.linkCommunityGroup) {
-      return rejected(event, 'Plugin runtime does not expose community subgroup linking.');
-    }
-    let linkError: unknown;
-    try {
-      await input.linkCommunityGroup(subgroupChatId, parentCommunityChatId);
-    } catch (error) {
-      linkError = error;
-    }
-    liveParentCommunityChatId = await input.context.communityParentGroupWidForGroup(subgroupChatId);
-    if (liveParentCommunityChatId !== parentCommunityChatId) {
-      if (linkError) {
-        throw linkError;
-      }
+  let subgroupTitle = input.subgroupTitle?.trim() || event.subgroupTitle || event.groupTitle;
+  let participantOutcomes = mergedParticipantOutcomes(
+    listCreatedGroupParticipants(db, event.id),
+    input.participants
+  );
+  const resumedAt = (input.now ?? new Date()).toISOString();
+  if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
+    const checkpointed = checkpointEventProvisioningCandidate(db, {
+      eventId: event.id,
+      scopeId,
+      subgroupChatId,
+      subgroupTitle,
+      participants: participantOutcomes,
+      checkpointedAt: resumedAt
+    });
+    if (!checkpointed) {
+      const changedEvent = getEvent(db, event.id) ?? event;
       return rejected(
-        event,
-        `Subgroup ${subgroupChatId} did not link to parent community ${parentCommunityChatId}.`
+        changedEvent,
+        `Event ${event.id} changed state while its subgroup recovery candidate was being checkpointed.`
       );
     }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.candidate_checkpointed',
+      metadata: {
+        subgroupChatId,
+        subgroupTitle,
+        participantOutcomeCount: Object.keys(participantOutcomes).length,
+        actorWid: input.actorWid,
+        actorLabel: input.actorLabel
+      }
+    });
+  }
+  try {
+    const result = await resumeEventCommunitySubgroup({
+      context: input.context,
+      scopeId,
+      actorWid: input.actorWid?.trim() || event.actorWid,
+      subgroupChatId,
+      subgroupTitle,
+      participantWids: attendeeWids,
+      participants: participantOutcomes,
+      parentCommunityWid: parentCommunityChatId
+    });
+    const resumedSubgroupChatId = result.created.chatId.trim().toLowerCase();
+    if (resumedSubgroupChatId !== subgroupChatId) {
+      throw new Error(
+        `Subgroup resume returned ${resumedSubgroupChatId}; expected ${subgroupChatId}.`
+      );
+    }
+    subgroupTitle = result.created.title.trim() || subgroupTitle;
+    participantOutcomes = {
+      ...participantOutcomes,
+      ...result.created.participants
+    };
+    if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
+      const outputCheckpointed = checkpointEventProvisioningCandidate(db, {
+        eventId: event.id,
+        scopeId,
+        subgroupChatId,
+        subgroupTitle,
+        participants: participantOutcomes,
+        checkpointedAt: resumedAt
+      });
+      if (!outputCheckpointed) {
+        throw new Error(
+          `Event ${event.id} changed state while subgroup resume output was being checkpointed.`
+        );
+      }
+    } else {
+      saveCreatedGroupParticipants(db, event.id, participantOutcomes);
+    }
+  } catch (error) {
+    if (
+      event.eventStatus === 'failed' &&
+      event.groupLifecycleStatus === 'none' &&
+      isManagedCommunitySubgroupProvisioningError(error) &&
+      error.created.chatId.trim().toLowerCase() === subgroupChatId
+    ) {
+      subgroupTitle = error.created.title.trim() || subgroupTitle;
+      participantOutcomes = {
+        ...participantOutcomes,
+        ...error.created.participants
+      };
+      const failureCheckpointed = checkpointEventProvisioningCandidate(db, {
+        eventId: event.id,
+        scopeId,
+        subgroupChatId,
+        subgroupTitle,
+        participants: participantOutcomes,
+        checkpointedAt: new Date().toISOString(),
+        reason: error.message
+      });
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.provisioning.resume_failed',
+        metadata: {
+          reason: error.message,
+          subgroupChatId,
+          subgroupTitle,
+          stage: error.stage,
+          progress: provisioningProgress(error.provisioning),
+          participants: participantOutcomes,
+          checkpointPersisted: failureCheckpointed
+        }
+      });
+    }
+    throw error;
   }
 
-  if (!input.context.registerManagedGroup) {
-    return rejected(event, 'Plugin runtime does not expose managed-group registration.');
-  }
-  const subgroupTitle = input.subgroupTitle?.trim() || event.subgroupTitle || event.groupTitle;
-  await input.context.registerManagedGroup({
-    scopeId,
-    chatId: subgroupChatId,
-    displayName: subgroupTitle
-  });
-
-  const resumedAt = (input.now ?? new Date()).toISOString();
   let resumed = false;
   if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
     resumed = db.transaction(() => {
@@ -191,6 +265,7 @@ export async function resumeEventProvisioning(
             subgroupTitle,
             attendeeCount: attendeeWids.length,
             parentCommunityChatId,
+            provisioningMode: 'service',
             actorWid: input.actorWid,
             actorLabel: input.actorLabel
           }
@@ -234,6 +309,7 @@ export async function resumeEventProvisioning(
       resumed,
       attendeeCount: attendeeWids.length,
       parentCommunityChatId,
+      provisioningMode: 'service',
       actorLabel: input.actorLabel
     }
   });
@@ -250,6 +326,7 @@ export async function resumeEventProvisioning(
     metadataJson: {
       attendeeCount: attendeeWids.length,
       parentCommunityChatId,
+      provisioningMode: 'service',
       actorWid: input.actorWid,
       actorLabel: input.actorLabel
     }
@@ -266,6 +343,39 @@ export async function resumeEventProvisioning(
 
 export function eventProvisioningResumeDedupeKey(eventId: string, subgroupChatId: string): string {
   return `${EVENTS_JOBS.close}:${eventId}:resume:${subgroupChatId}`;
+}
+
+function mergedParticipantOutcomes(
+  stored: ReturnType<typeof listCreatedGroupParticipants>,
+  supplied: Record<string, CreatedGroupParticipantResult> | undefined
+): Record<string, CreatedGroupParticipantResult> {
+  const persisted = Object.fromEntries(stored.map((participant) => [
+    participant.wid,
+    {
+      ...(participant.statusCode !== undefined ? { statusCode: participant.statusCode } : {}),
+      ...(participant.message ? { message: participant.message } : {}),
+      isGroupCreator: participant.isGroupCreator,
+      isInviteV4Sent: participant.isInviteV4Sent
+    }
+  ]));
+  return {
+    ...persisted,
+    ...(supplied ?? {})
+  };
+}
+
+function provisioningProgress(input: {
+  standaloneRegistered: boolean;
+  attendeesVerified: boolean;
+  communityLinkConfirmed: boolean;
+  linkedChildRegistered: boolean;
+}): Record<string, boolean> {
+  return {
+    standaloneRegistered: input.standaloneRegistered,
+    attendeesVerified: input.attendeesVerified,
+    communityLinkConfirmed: input.communityLinkConfirmed,
+    linkedChildRegistered: input.linkedChildRegistered
+  };
 }
 
 function recoverableWithSubgroup(event: StoredEventRecord, subgroupChatId: string): boolean {

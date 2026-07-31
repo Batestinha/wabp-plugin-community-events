@@ -551,6 +551,65 @@ export function markEventProvisioningResumed(db: PluginDatabase, input: {
   return result.changes === 1;
 }
 
+export function checkpointEventProvisioningCandidate(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  checkpointedAt: string;
+  reason?: string | undefined;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (!current) {
+      return false;
+    }
+
+    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
+    writeCreatedGroupParticipants(
+      db,
+      input.eventId,
+      input.participants,
+      input.checkpointedAt
+    );
+    const result = db.run(
+      `UPDATE event_records
+          SET subgroup_chat_id = ?,
+              subgroup_title = ?,
+              error = COALESCE(?, error),
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.subgroupChatId,
+      input.subgroupTitle,
+      input.reason ?? null,
+      input.checkpointedAt,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (result.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while checkpointing its provisioning candidate.`);
+    }
+    return true;
+  });
+}
+
 export function markEventClosed(db: PluginDatabase, input: {
   eventId: string;
   subgroupChatId?: string | undefined;
@@ -859,6 +918,35 @@ export function listVotes(db: PluginDatabase, eventId: string): StoredEventVote[
     'SELECT * FROM event_votes WHERE event_id = ? ORDER BY voter_wid ASC',
     eventId
   ).map(voteFromRow);
+}
+
+export function listCreatedGroupParticipants(
+  db: PluginDatabase,
+  eventId: string
+): StoredCreatedGroupParticipant[] {
+  return db.all<{
+    event_id: string;
+    wid: string;
+    status_code: number | null;
+    message: string | null;
+    is_group_creator: number;
+    is_invite_v4_sent: number;
+    created_at: string;
+  }>(
+    `SELECT event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent, created_at
+       FROM event_group_participants
+      WHERE event_id = ?
+      ORDER BY wid ASC`,
+    eventId
+  ).map((row) => ({
+    eventId: row.event_id,
+    wid: row.wid,
+    ...(row.status_code !== null ? { statusCode: row.status_code } : {}),
+    ...(row.message ? { message: row.message } : {}),
+    isGroupCreator: row.is_group_creator === 1,
+    isInviteV4Sent: row.is_invite_v4_sent === 1,
+    createdAt: row.created_at
+  }));
 }
 
 export function saveCreatedGroupParticipants(

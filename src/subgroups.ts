@@ -1,8 +1,11 @@
 import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
+import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import {
   COMMUNITY_SUBGROUPS_CREATE_METHOD,
+  COMMUNITY_SUBGROUPS_RESUME_METHOD,
   COMMUNITY_SUBGROUPS_SERVICE_ID,
-  type CommunitySubgroupCreateOutput
+  type CommunitySubgroupCreateOutput,
+  type CommunitySubgroupResumeOutput
 } from '../community-subgroups/serviceApi';
 
 export interface EventSubgroupContext {
@@ -37,6 +40,36 @@ export async function createEventCommunitySubgroup(input: {
       title: input.title,
       participantWids: input.participantWids,
       parentCommunityWid
+    }
+  });
+}
+
+export async function resumeEventCommunitySubgroup(input: {
+  context: EventSubgroupContext;
+  scopeId: string;
+  actorWid: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participantWids: string[];
+  participants: Record<string, CreatedGroupParticipantResult>;
+  parentCommunityWid: string;
+}): Promise<CommunitySubgroupResumeOutput> {
+  if (!input.context.services) {
+    throw new Error('Plugin runtime does not expose plugin services.');
+  }
+  await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
+  return input.context.services.call<CommunitySubgroupResumeOutput>({
+    serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
+    method: COMMUNITY_SUBGROUPS_RESUME_METHOD,
+    scopeId: input.scopeId,
+    actorWid: input.actorWid,
+    groupWid: input.parentCommunityWid,
+    input: {
+      chatId: input.subgroupChatId,
+      title: input.subgroupTitle,
+      participantWids: input.participantWids,
+      participants: input.participants,
+      parentCommunityWid: input.parentCommunityWid
     }
   });
 }

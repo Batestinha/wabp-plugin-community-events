@@ -10,12 +10,13 @@ import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
 } from '../../../platform/transport/pollVoteReadback';
+import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import {
-  missingEventSubgroupAttendeeWids,
+  eventSubgroupAttendeeCoverage,
   voterWidsForResponseBehavior
 } from './attendance';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
@@ -33,6 +34,7 @@ import {
   getEvent,
   getEventByEquivalentPoll,
   getActiveEventBySubgroup,
+  listCreatedGroupParticipants,
   listOpenPollEvents,
   listFailedProvisioningEvents,
   listPendingCleanupEvents,
@@ -59,7 +61,6 @@ type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' 
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
-  linkCommunityGroup?(childGroupChatId: string, parentCommunityChatId: string): Promise<void>;
 }
 
 interface EventsHooksOptions {
@@ -118,7 +119,6 @@ export async function recoverEventProvisioningJobs(
         eventId: record.id,
         subgroupChatId: record.subgroupChatId!,
         ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
-        ...(options.linkCommunityGroup ? { linkCommunityGroup: options.linkCommunityGroup } : {}),
         actorWid: 'plugin-startup@system',
         actorLabel: 'Plugin startup recovery',
         ...(options.now ? { now: options.now } : {})
@@ -378,9 +378,16 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     let subgroupTitle = record.subgroupTitle ?? (subgroupChatId ? record.groupTitle : undefined);
 
     if (attendeeWids.length > 0 && subgroupChatId) {
-      const missingAttendeeWids = await missingEventSubgroupAttendeeWids(context, subgroupChatId, attendeeWids);
-      if (missingAttendeeWids.length > 0) {
-        throw new Error(`Subgroup ${subgroupChatId} is missing attendee(s): ${missingAttendeeWids.join(', ')}`);
+      const coverage = await eventSubgroupAttendeeCoverage(
+        context,
+        subgroupChatId,
+        attendeeWids,
+        storedParticipantOutcomes(db, record.id)
+      );
+      if (coverage.missingAttendeeWids.length > 0) {
+        throw new Error(
+          `Subgroup ${subgroupChatId} is missing attendee(s): ${coverage.missingAttendeeWids.join(', ')}`
+        );
       }
       await appendJsonLog(context, {
         action: 'subgroup.reused',
@@ -391,7 +398,9 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         subgroupChatId,
         metadata: {
           title: subgroupTitle,
-          attendeeWids
+          attendeeWids,
+          presentAttendeeWids: coverage.presentAttendeeWids,
+          pendingInviteWids: coverage.pendingInviteWids
         }
       });
     } else if (attendeeWids.length > 0) {
@@ -1171,6 +1180,21 @@ function dismantleCompleted(result: {
   managementMarkedLeft?: boolean | undefined;
 }): boolean {
   return result.alreadyAbsent === true || result.left || result.chatDeleted || result.managementMarkedLeft === true;
+}
+
+function storedParticipantOutcomes(
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string
+): Record<string, CreatedGroupParticipantResult> {
+  return Object.fromEntries(listCreatedGroupParticipants(db, eventId).map((participant) => [
+    participant.wid,
+    {
+      ...(participant.statusCode !== undefined ? { statusCode: participant.statusCode } : {}),
+      ...(participant.message ? { message: participant.message } : {}),
+      isGroupCreator: participant.isGroupCreator,
+      isInviteV4Sent: participant.isInviteV4Sent
+    }
+  ]));
 }
 
 async function appendJsonLog(

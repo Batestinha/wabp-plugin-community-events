@@ -1,4 +1,5 @@
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import type { StoredEventRecord } from './store';
 
 export interface EventVoteSelection {
@@ -35,8 +36,31 @@ export function voterWidsForResponseBehavior(
 export async function missingEventSubgroupAttendeeWids(
   context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolvePrivateRecipient'>,
   subgroupChatId: string,
-  attendeeWids: readonly string[]
+  attendeeWids: readonly string[],
+  participantOutcomes: Readonly<Record<string, CreatedGroupParticipantResult>> = {}
 ): Promise<string[]> {
+  return (
+    await eventSubgroupAttendeeCoverage(
+      context,
+      subgroupChatId,
+      attendeeWids,
+      participantOutcomes
+    )
+  ).missingAttendeeWids;
+}
+
+export interface EventSubgroupAttendeeCoverage {
+  presentAttendeeWids: string[];
+  pendingInviteWids: string[];
+  missingAttendeeWids: string[];
+}
+
+export async function eventSubgroupAttendeeCoverage(
+  context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolvePrivateRecipient'>,
+  subgroupChatId: string,
+  attendeeWids: readonly string[],
+  participantOutcomes: Readonly<Record<string, CreatedGroupParticipantResult>> = {}
+): Promise<EventSubgroupAttendeeCoverage> {
   if (!context.getGroupParticipants) {
     throw new Error('Plugin runtime does not expose group participant reads.');
   }
@@ -45,16 +69,29 @@ export async function missingEventSubgroupAttendeeWids(
       .map((participant) => participant.wid.trim())
       .filter(Boolean)
   );
-  const missing: string[] = [];
+  const presentAttendeeWids: string[] = [];
+  const pendingInviteWids: string[] = [];
+  const missingAttendeeWids: string[] = [];
   for (const attendeeWid of attendeeWids) {
     const aliases = context.resolvePrivateRecipient
       ? (await context.resolvePrivateRecipient(attendeeWid)).aliases
       : [attendeeWid];
-    if (![attendeeWid, ...aliases].some((alias) => participantWids.has(alias))) {
-      missing.push(attendeeWid);
+    const candidateWids = [...new Set(
+      [attendeeWid, ...aliases].map((wid) => wid.trim()).filter(Boolean)
+    )];
+    if (candidateWids.some((alias) => participantWids.has(alias))) {
+      presentAttendeeWids.push(attendeeWid);
+    } else if (candidateWids.some((alias) => participantOutcomes[alias]?.isInviteV4Sent === true)) {
+      pendingInviteWids.push(attendeeWid);
+    } else {
+      missingAttendeeWids.push(attendeeWid);
     }
   }
-  return [...new Set(missing)].sort();
+  return {
+    presentAttendeeWids: [...new Set(presentAttendeeWids)].sort(),
+    pendingInviteWids: [...new Set(pendingInviteWids)].sort(),
+    missingAttendeeWids: [...new Set(missingAttendeeWids)].sort()
+  };
 }
 
 function selectedEventOptionIds(record: StoredEventRecord, vote: EventVoteSelection): string[] {

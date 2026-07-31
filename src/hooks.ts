@@ -53,12 +53,9 @@ import {
   type StoredEventRecord
 } from './store';
 import {
-  eventProvisioningResumeDedupeKey
+  eventProvisioningResumeDedupeKey,
+  resumeEventProvisioning
 } from './provisioningRecovery';
-import {
-  handleEventProvisioningRetryJob,
-  recoverEventProvisioningRetry
-} from './provisioningRetry';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
@@ -116,13 +113,28 @@ export async function recoverEventProvisioningJobs(
   let enqueued = 0;
   for (const record of records) {
     try {
-      if (await recoverEventProvisioningRetry(context, record, options.now ?? new Date())) {
+      const result = await resumeEventProvisioning({
+        context,
+        scopeId: record.scopeId,
+        eventId: record.id,
+        subgroupChatId: record.subgroupChatId!,
+        ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
+        actorWid: 'plugin-startup@system',
+        actorLabel: 'Plugin startup recovery',
+        ...(options.now ? { now: options.now } : {})
+      });
+      if (result.status === 'queued') {
         enqueued += 1;
+      } else if (result.status === 'rejected') {
+        context.logger.warn(
+          { eventId: record.id, scopeId: record.scopeId, reason: result.reason },
+          'Unable to resume failed official.community-events subgroup provisioning'
+        );
       }
     } catch (error) {
       context.logger.warn(
         { error, eventId: record.id, scopeId: record.scopeId },
-        'Failed to schedule official.community-events subgroup provisioning recovery'
+        'Failed to recover official.community-events subgroup provisioning'
       );
     }
   }
@@ -238,9 +250,6 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
-  }
-  if (event.jobName === EVENTS_JOBS.provisioningRetry) {
-    return handleEventProvisioningRetryJob(context, event);
   }
   if (event.jobName === EVENTS_JOBS.weatherForecast) {
     const db = eventsDatabase(context.databases);

@@ -24,6 +24,7 @@ import {
   recordEventAnnouncementMessage,
   upsertVote,
   type EventOrigin,
+  type StoredEventLocation,
   type StoredEventRecord
 } from './store';
 
@@ -42,6 +43,7 @@ export interface EventAdoptionInput {
   pollWaMsgId?: string | undefined;
   subgroupChatId?: string | undefined;
   subgroupTitle?: string | undefined;
+  eventLocation?: StoredEventLocation | undefined;
   actorWid: string;
   actorLabel: string;
 }
@@ -127,7 +129,8 @@ export async function adoptEventLifecycle(input: {
     answers,
     timezone: config.timezone,
     locale: adoption.locale ?? 'en',
-    creatorDisplayName: adoption.actorLabel || adoption.actorWid
+    creatorDisplayName: adoption.actorLabel || adoption.actorWid,
+    ...(adoption.eventLocation ? { eventLocation: adoption.eventLocation } : {})
   });
   const eventId = newEventId();
   const now = new Date();
@@ -148,6 +151,7 @@ export async function adoptEventLifecycle(input: {
     pollOptions: adoption.pollWaMsgId ? materialized.pollOptions : [],
     responseClasses: materialized.responseClasses,
     answers: materialized.answers,
+    ...(materialized.eventLocation ? { eventLocation: materialized.eventLocation } : {}),
     startsAt: materialized.startsAt.toISOString(),
     startsAtUtc: materialized.startsAt.toISOString(),
     timezone: config.timezone,

@@ -24,19 +24,38 @@ export async function writeScopeCalendar(input: {
   await mkdir(path.dirname(filePath), { recursive: true });
   await chownCalendarExportTree(calendarExportRoot(input.appConfig));
   const tempPath = `${filePath}.tmp`;
-  await writeFile(tempPath, renderScopeCalendar(input.config, input.calendarId, input.events), 'utf8');
+  await writeFile(
+    tempPath,
+    renderScopeCalendar(input.config, input.scopeId, input.calendarId, input.events),
+    'utf8'
+  );
   await chownCalendarExportPath(tempPath);
   await rename(tempPath, filePath);
   await chownCalendarExportPath(filePath);
   return filePath;
 }
 
-export function renderScopeCalendar(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): string {
+export function renderScopeCalendar(
+  config: EventsConfig,
+  scopeId: string,
+  calendarId: string,
+  events: StoredEventRecord[]
+): string {
   const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
-  return renderIcsWithConfig(scopeCalendarEvents(config, calendarId, events), config, new Date(), calendar?.label || calendarId);
+  return renderIcsWithConfig(
+    scopeCalendarEvents(config, scopeId, calendarId, events),
+    config,
+    new Date(),
+    calendar?.label || calendarId
+  );
 }
 
-export function scopeCalendarEvents(config: EventsConfig, calendarId: string, events: StoredEventRecord[]): StoredEventRecord[] {
+export function scopeCalendarEvents(
+  config: EventsConfig,
+  scopeId: string,
+  calendarId: string,
+  events: StoredEventRecord[]
+): StoredEventRecord[] {
   const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
   if (!calendar) {
     return [];
@@ -44,7 +63,7 @@ export function scopeCalendarEvents(config: EventsConfig, calendarId: string, ev
   const profileIds = new Set(config.eventProfiles
     .filter((profile) => profile.calendar.calendarId === calendar.id)
     .map((profile) => profile.id));
-  return events.filter((event) => profileIds.has(event.profileId));
+  return events.filter((event) => event.scopeId === scopeId && profileIds.has(event.profileId));
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {

@@ -30,7 +30,7 @@ export async function publishScopeCalendar(input: {
   return publishCalendarBody({
     scopeId: input.scopeId,
     calendar,
-    icsBody: renderScopeCalendar(input.config, input.calendarId, input.events)
+    icsBody: renderScopeCalendar(input.config, input.scopeId, input.calendarId, input.events)
   });
 }
 
@@ -119,6 +119,9 @@ async function postCalendarPublication(
   body.set('calendar_id', target.feedId);
   body.set('label', target.label);
   body.set('ics_body', icsBody);
+  // Publishing a scoped feed must never replace the receiver's independently
+  // selected default feed. Feed activation is an explicit receiver-side choice.
+  body.set('activate', '0');
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), DEFAULT_PUBLICATION_TIMEOUT_MS);
@@ -140,6 +143,13 @@ async function postCalendarPublication(
   }
   if (isRecord(payload) && payload.ok === false) {
     throw new Error(publicationErrorMessage(payload) || 'Calendar publisher rejected the update.');
+  }
+  const publishedScopeId = stringField(result, 'scopeId') || stringField(result, 'scope_id');
+  const publishedCalendarId = stringField(result, 'calendarId') || stringField(result, 'calendar_id');
+  if (publishedScopeId !== target.scopeId || publishedCalendarId !== target.feedId) {
+    throw new Error(
+      `Calendar publisher did not confirm scoped target ${target.scopeId}/${target.feedId}.`
+    );
   }
   return {
     subscriptionUrl: stringField(result, 'subscriptionUrl') || stringField(result, 'subscription_url'),

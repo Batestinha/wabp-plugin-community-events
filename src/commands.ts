@@ -4,11 +4,16 @@ import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowType
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCancellationRegistration, PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
+import {
+  isManagedCommunitySubgroupProvisioningError,
+  type ManagedCommunitySubgroupProvisioningError
+} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
+import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
-import { eventsCalendarSubscriptionUrl } from './calendarSubscription';
+import { sendEventCalendarHint } from './calendarHint';
 import { formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import {
@@ -24,11 +29,11 @@ import {
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
-import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement, templateUsesToken } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
-import { createEventCommunitySubgroup } from './subgroups';
+import { createEventCommunitySubgroup, resumeEventCommunitySubgroup } from './subgroups';
 import { eventWeatherForecastJobRequest } from './weather';
 import {
   GEOCODER_GEOCODE_METHOD,
@@ -43,8 +48,9 @@ import {
 } from '../doas/serviceApi';
 import {
   appendEventLog,
+  checkpointUnplannedEventProvisioningFailure,
+  completeUnplannedEventProvisioning,
   eventsDatabase,
-  getCalendarPublicationStatus,
   getEvent,
   getEventBySubgroupChatId,
   insertEvent,
@@ -52,7 +58,6 @@ import {
   listCalendarEvents,
   newEventId,
   recordEventAnnouncementMessage,
-  saveCreatedGroupParticipants,
   updateEventStructuredData,
   type StoredEventLocation,
   type StoredEventRecord,
@@ -1839,7 +1844,6 @@ async function publishConfirmedEvent(input: {
       event,
       profile: input.profile,
       calendars: input.draft.calendars,
-      materialized,
       timezone: input.draft.timezone,
       locale: input.draft.locale,
       creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
@@ -1883,16 +1887,8 @@ async function createUnplannedEventLifecycle(input: {
   now: Date;
 }): Promise<void> {
   const creatorParticipantWid = eventCreatorParticipantWid(input.draft);
-  const result = await createEventCommunitySubgroup({
-    context: input.context,
-    scopeId: input.draft.scopeId,
-    actorWid: input.draft.actorWid,
-    title: input.materialized.groupTitle,
-    participantWids: [creatorParticipantWid]
-  });
-  const created = result.created;
   const nowIso = input.now.toISOString();
-  const event: StoredEventRecord = {
+  const intent: StoredEventRecord = {
     id: input.eventId,
     scopeId: input.draft.scopeId,
     ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
@@ -1900,9 +1896,9 @@ async function createUnplannedEventLifecycle(input: {
     profileId: input.profile.id,
     profileLabel: input.profile.label,
     origin: 'unplanned',
-    eventStatus: 'active',
-    groupLifecycleStatus: 'poll_closed',
-    calendarStatus: 'included',
+    eventStatus: 'failed',
+    groupLifecycleStatus: 'none',
+    calendarStatus: 'hidden',
     actorWid: input.draft.actorWid,
     actorLabel: input.draft.actorLabel,
     announcementGroupWid: input.announcementGroupWid,
@@ -1923,15 +1919,45 @@ async function createUnplannedEventLifecycle(input: {
     calendarDurationMinutes: input.materialized.calendarDurationMinutes,
     ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
     ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
-    subgroupChatId: created.chatId,
-    subgroupTitle: created.title,
     createdAt: nowIso,
-    updatedAt: nowIso,
-    closedAt: nowIso
+    updatedAt: nowIso
   };
 
-  insertEvent(input.db, event);
-  saveCreatedGroupParticipants(input.db, event.id, created.participants);
+  insertEvent(input.db, intent);
+  appendEventLog(input.db, {
+    eventId: intent.id,
+    action: 'events.unplanned.provisioning_intent_created',
+    metadata: {
+      groupTitle: intent.groupTitle,
+      attendeeWids: [creatorParticipantWid]
+    }
+  });
+  const result = await provisionUnplannedEventSubgroup({
+    context: input.context,
+    db: input.db,
+    event: intent,
+    creatorParticipantWid
+  });
+  const created = result.created;
+  const completedAt = new Date().toISOString();
+  const completed = completeUnplannedEventProvisioning(input.db, {
+    eventId: intent.id,
+    scopeId: intent.scopeId,
+    subgroupChatId: created.chatId,
+    subgroupTitle: created.title,
+    participants: created.participants,
+    completedAt
+  });
+  if (!completed) {
+    throw new Error(
+      `Unplanned event ${intent.id} cannot complete with subgroup ${created.chatId}; ` +
+      'its persisted provisioning intent is missing or belongs to another subgroup.'
+    );
+  }
+  const event = getEvent(input.db, intent.id);
+  if (!event) {
+    throw new Error(`Unplanned event ${intent.id} disappeared after provisioning completion.`);
+  }
   await appendEventJsonLog(input.context, {
     action: 'subgroup.created',
     scopeId: event.scopeId,
@@ -2030,27 +2056,30 @@ async function createUnplannedEventLifecycle(input: {
       locale: input.draft.locale,
       creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
     });
-    const sent = await input.activeTransport.sendText(input.announcementGroupWid, announcementText);
-    recordEventAnnouncementMessage(input.db, {
+    const delivery = await sendClaimedEventAnnouncement({
+      db: input.db,
       eventId: event.id,
       scopeId: event.scopeId,
       kind: 'event_group_hint',
       chatId: input.announcementGroupWid,
-      messageId: sent.messageId
+      text: announcementText,
+      sender: input.activeTransport
     });
-    await appendEventJsonLog(input.context, {
-      action: 'event.unplanned_announcement_sent',
-      scopeId: input.draft.scopeId,
-      eventId: event.id,
-      actorWid: input.draft.actorWid,
-      profileId: input.profile.id,
-      subgroupChatId: created.chatId,
-      metadata: {
-        announcementGroupWid: input.announcementGroupWid,
-        messageId: sent.messageId,
-        groupJoinUrl
-      }
-    });
+    if (delivery.status === 'sent') {
+      await appendEventJsonLog(input.context, {
+        action: 'event.unplanned_announcement_sent',
+        scopeId: input.draft.scopeId,
+        eventId: event.id,
+        actorWid: input.draft.actorWid,
+        profileId: input.profile.id,
+        subgroupChatId: created.chatId,
+        metadata: {
+          announcementGroupWid: input.announcementGroupWid,
+          messageId: delivery.messageId,
+          groupJoinUrl
+        }
+      });
+    }
   }
   await sendEventCalendarHint({
     context: input.context,
@@ -2062,7 +2091,6 @@ async function createUnplannedEventLifecycle(input: {
     event,
     profile: input.profile,
     calendars: input.draft.calendars,
-    materialized: input.materialized,
     timezone: input.draft.timezone,
     locale: input.draft.locale,
     creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
@@ -2071,201 +2099,79 @@ async function createUnplannedEventLifecycle(input: {
   });
 }
 
-type CalendarHintTrigger = 'poll_published' | 'unplanned_created';
-
-async function sendEventCalendarHint(input: {
+async function provisionUnplannedEventSubgroup(input: {
   context: PluginCommandContext;
-  runtime: OfficialPluginCommandRuntime;
-  activeTransport: EventTextTransport;
-  trigger: CalendarHintTrigger;
-  scopeId: string;
-  announcementGroupWid: string;
+  db: ReturnType<typeof eventsDatabase>;
   event: StoredEventRecord;
-  profile: EventProfile;
-  calendars: EventCalendarResource[];
-  materialized: MaterializedEventLifecycle;
-  timezone: string;
-  locale: string;
-  creatorDisplayName: string;
-  groupJoinUrl?: string | undefined;
-  subgroupChatId?: string | undefined;
-}): Promise<void> {
-  const hint = input.profile.calendar.hint;
-  const enabled = input.trigger === 'poll_published'
-    ? hint.sendOnPollPublished
-    : hint.sendOnUnplannedCreated;
-  if (!enabled) {
-    return;
-  }
-  const template = hint.template.trim() ? hint.template : '';
-  const calendarId = input.profile.calendar.calendarId.trim();
+  creatorParticipantWid: string;
+}): Promise<Awaited<ReturnType<typeof createEventCommunitySubgroup>>> {
   try {
-    const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;
-    if (!template) {
-      await recordCalendarHintSkipped(input, 'empty_template', calendarId);
-      return;
-    }
-    if (!calendarId || !calendar) {
-      await recordCalendarHintSkipped(input, 'calendar_not_configured', calendarId);
-      return;
-    }
-    if (!calendar.enabled) {
-      await recordCalendarHintSkipped(input, 'calendar_disabled', calendarId);
-      return;
-    }
-    const publicationStatus = getCalendarPublicationStatus(eventsDatabase(input.runtime.databases), input.scopeId, calendarId);
-    const hostedSubscriptionUrl = publicationStatus?.ok
-      ? publicationStatus.subscriptionUrl || ''
-      : '';
-    const origin = operatorConsolePublicOriginForRuntime(input.runtime.config);
-    const fallbackSubscriptionUrl = botVisibleCalendarSubscriptionUrl({
-      operatorConsolePublicOrigin: origin,
-      runtimeBindingId: input.runtime.config.RUNTIME_BINDING_ID,
-      scopeId: input.scopeId,
-      calendarId,
-      token: calendar.subscriptionToken
-    });
-    const subscriptionUrl = hostedSubscriptionUrl || fallbackSubscriptionUrl;
-    if (!subscriptionUrl) {
-      await recordCalendarHintSkipped(input, 'subscription_url_unavailable', calendarId, {
-        tokenConfigured: Boolean(calendar.subscriptionToken.trim()),
-        runtimeBindingIdConfigured: Boolean(input.runtime.config.RUNTIME_BINDING_ID.trim()),
-        operatorConsolePublicOriginConfigured: Boolean(origin),
-        hostedPublicationConfigured: Boolean(publicationStatus?.subscriptionUrl)
-      });
-      return;
-    }
-    const groupJoinUrl = input.groupJoinUrl ||
-      (input.subgroupChatId && templateUsesToken(template, 'groupJoinUrl')
-        ? await eventGroupJoinUrl(input.context, template, input.subgroupChatId)
-        : '');
-    const text = renderEventTemplate({
-      template,
-      profile: input.profile,
-      answers: input.materialized.answers,
-      startsAt: input.materialized.startsAt,
-      timezone: input.timezone,
-      locale: input.locale,
-      creatorDisplayName: input.creatorDisplayName,
-      extraTokens: {
-        eventId: input.event.id,
-        groupDisplayName: input.event.groupTitle || input.materialized.groupTitle,
-        groupJoinUrl,
-        subgroupChatId: input.subgroupChatId ?? input.event.subgroupChatId,
-        calendarId: calendar.id,
-        calendarDisplayName: calendar.label || calendar.id,
-        calendarSubscriptionUrl: subscriptionUrl
-      }
-    }).trim();
-    if (!text) {
-      await recordCalendarHintSkipped(input, 'empty_rendered_text', calendarId);
-      return;
-    }
-    const db = eventsDatabase(input.runtime.databases);
-    const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
-    recordEventAnnouncementMessage(db, {
-      eventId: input.event.id,
-      scopeId: input.scopeId,
-      kind: 'calendar_hint',
-      chatId: input.announcementGroupWid,
-      messageId: sent.messageId
-    });
-    await appendEventJsonLog(input.context, {
-      action: 'event.calendar_hint_sent',
-      scopeId: input.scopeId,
-      eventId: input.event.id,
+    return await createEventCommunitySubgroup({
+      context: input.context,
+      scopeId: input.event.scopeId,
       actorWid: input.event.actorWid,
-      profileId: input.profile.id,
-      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
-      ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
-      metadata: {
-        trigger: input.trigger,
-        announcementGroupWid: input.announcementGroupWid,
-        calendarId,
-        messageId: sent.messageId
-      }
+      title: input.event.groupTitle,
+      participantWids: [input.creatorParticipantWid]
     });
   } catch (error) {
-    await appendEventJsonLog(input.context, {
-      action: 'event.calendar_hint_failed',
-      scopeId: input.scopeId,
-      eventId: input.event.id,
-      actorWid: input.event.actorWid,
-      profileId: input.profile.id,
-      ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
-      ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
-      metadata: {
-        trigger: input.trigger,
-        announcementGroupWid: input.announcementGroupWid,
-        calendarId,
-        reason: error instanceof Error ? error.message : String(error)
+    if (!isManagedCommunitySubgroupProvisioningError(error)) {
+      throw error;
+    }
+    checkpointManagedUnplannedProvisioningFailure(input.db, input.event, error);
+    try {
+      const resumed = await resumeEventCommunitySubgroup({
+        context: input.context,
+        scopeId: input.event.scopeId,
+        actorWid: input.event.actorWid,
+        subgroupChatId: error.created.chatId,
+        subgroupTitle: error.created.title,
+        participantWids: [input.creatorParticipantWid],
+        participants: error.created.participants,
+        parentCommunityWid: error.provisioning.parentCommunityWid
+      });
+      if (resumed.created.chatId !== error.created.chatId) {
+        throw new Error(
+          `Unplanned subgroup resume returned ${resumed.created.chatId}; ` +
+          `expected the checkpointed subgroup ${error.created.chatId}.`
+        );
       }
-    });
+      return resumed;
+    } catch (resumeError) {
+      if (isManagedCommunitySubgroupProvisioningError(resumeError)) {
+        checkpointManagedUnplannedProvisioningFailure(input.db, input.event, resumeError);
+      }
+      throw resumeError;
+    }
   }
 }
 
-async function recordCalendarHintSkipped(
-  input: {
-    context: PluginCommandContext;
-    trigger: CalendarHintTrigger;
-    scopeId: string;
-    announcementGroupWid: string;
-    event: StoredEventRecord;
-    profile: EventProfile;
-  },
-  reason: string,
-  calendarId: string,
-  metadata: Record<string, unknown> = {}
-): Promise<void> {
-  await appendEventJsonLog(input.context, {
-    action: 'event.calendar_hint_skipped',
-    scopeId: input.scopeId,
-    eventId: input.event.id,
-    actorWid: input.event.actorWid,
-    profileId: input.profile.id,
-    ...(input.event.pollWaMsgId ? { pollWaMsgId: input.event.pollWaMsgId } : {}),
-    ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
-    metadata: {
-      trigger: input.trigger,
-      announcementGroupWid: input.announcementGroupWid,
-      calendarId,
-      reason,
-      ...metadata
-    }
+function checkpointManagedUnplannedProvisioningFailure(
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  error: ManagedCommunitySubgroupProvisioningError
+): void {
+  const checkpointed = checkpointUnplannedEventProvisioningFailure(db, {
+    eventId: event.id,
+    scopeId: event.scopeId,
+    subgroupChatId: error.created.chatId,
+    subgroupTitle: error.created.title,
+    participants: error.created.participants,
+    parentCommunityWid: error.provisioning.parentCommunityWid,
+    stage: error.stage,
+    progress: {
+      standaloneRegistered: error.provisioning.standaloneRegistered,
+      attendeesVerified: error.provisioning.attendeesVerified,
+      communityLinkConfirmed: error.provisioning.communityLinkConfirmed,
+      linkedChildRegistered: error.provisioning.linkedChildRegistered
+    },
+    reason: error.message,
+    failedAt: new Date().toISOString()
   });
-}
-
-function operatorConsolePublicOriginForRuntime(config: OfficialPluginCommandRuntime['config']): string {
-  const configured = (config as unknown as Record<string, unknown>).OPERATOR_CONSOLE_PUBLIC_ORIGIN;
-  return (typeof configured === 'string' ? configured : process.env.OPERATOR_CONSOLE_PUBLIC_ORIGIN ?? '').trim();
-}
-
-function botVisibleCalendarSubscriptionUrl(input: Parameters<typeof eventsCalendarSubscriptionUrl>[0]): string {
-  const url = eventsCalendarSubscriptionUrl(input);
-  if (!url) {
-    return '';
-  }
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') {
-      return '';
-    }
-    const hostname = parsed.hostname.toLowerCase();
-    if (
-      hostname === 'localhost' ||
-      hostname.endsWith('.localhost') ||
-      hostname.endsWith('.local') ||
-      hostname === '0.0.0.0' ||
-      hostname.startsWith('127.') ||
-      hostname.startsWith('10.') ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
-      hostname.startsWith('192.168.')
-    ) {
-      return '';
-    }
-    return url;
-  } catch {
-    return '';
+  if (!checkpointed) {
+    throw new Error(
+      `Unplanned event ${event.id} rejected provisioning output for subgroup ${error.created.chatId}; ` +
+      'the event is already bound to another subgroup or left its recoverable state.'
+    );
   }
 }
 

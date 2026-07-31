@@ -30,7 +30,12 @@ export async function writePublishAndRecordScopeCalendar(input: {
     scopeId: input.scopeId,
     calendarId: input.calendarId,
     generatedAt: new Date().toISOString(),
-    generatedEventCount: scopeCalendarEvents(input.config, input.calendarId, input.events).length,
+    generatedEventCount: scopeCalendarEvents(
+      input.config,
+      input.scopeId,
+      input.calendarId,
+      input.events
+    ).length,
     ...(publication ? { publication } : {})
   });
   return publication;

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ManagedCommunitySubgroupProvisioningStage } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { CreatedGroupParticipantResult, PollVoteUpdate } from '../../../platform/transport/transportTypes';
 import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
@@ -11,6 +12,9 @@ export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
 export type EventWeatherDeliveryStatus = 'queued' | 'skipped' | 'failed';
 export type EventAnnouncementMessageKind = 'poll' | 'calendar_hint' | 'event_group_hint';
+export type EventAnnouncementDeliveryKind = Exclude<EventAnnouncementMessageKind, 'poll'>;
+export type EventAnnouncementDeliveryClaimStatus = 'sending' | 'sent' | 'uncertain';
+export type EventAnnouncementDeliveryClaimResult = 'claimed' | 'already_sent' | 'already_claimed';
 
 export interface StoredEventPollOption {
   id: string;
@@ -147,6 +151,18 @@ export interface StoredEventAnnouncementMessage {
   deleteError?: string | undefined;
 }
 
+export interface StoredEventAnnouncementDeliveryClaim {
+  eventId: string;
+  kind: EventAnnouncementDeliveryKind;
+  scopeId: string;
+  chatId: string;
+  status: EventAnnouncementDeliveryClaimStatus;
+  messageId?: string | undefined;
+  error?: string | undefined;
+  claimedAt: string;
+  updatedAt: string;
+}
+
 interface EventRow extends PluginDatabaseRow {
   id: string;
   scope_id: string;
@@ -245,6 +261,18 @@ interface EventAnnouncementMessageRow extends PluginDatabaseRow {
   created_at: string;
   deleted_at: string | null;
   delete_error: string | null;
+}
+
+interface EventAnnouncementDeliveryClaimRow extends PluginDatabaseRow {
+  event_id: string;
+  kind: EventAnnouncementDeliveryKind;
+  scope_id: string;
+  chat_id: string;
+  status: EventAnnouncementDeliveryClaimStatus;
+  message_id: string | null;
+  error: string | null;
+  claimed_at: string;
+  updated_at: string;
 }
 
 export function eventsDatabase(registry: PluginDatabaseRegistry | undefined): PluginDatabase {
@@ -383,6 +411,29 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
     input.updatedAt,
     input.eventId
   );
+}
+
+export function updateEventSubgroupTitle(db: PluginDatabase, input: {
+  eventId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET subgroup_title = ?, updated_at = ?
+      WHERE id = ?
+        AND subgroup_chat_id = ?
+        AND origin = 'adopted_group'
+        AND event_status = 'active'
+        AND group_lifecycle_status = 'poll_closed'
+        AND subgroup_title IS NULL`,
+    input.subgroupTitle,
+    input.updatedAt,
+    input.eventId,
+    input.subgroupChatId
+  );
+  return result.changes === 1;
 }
 
 export function getEvent(db: PluginDatabase, eventId: string): StoredEventRecord | undefined {
@@ -610,6 +661,157 @@ export function checkpointEventProvisioningCandidate(db: PluginDatabase, input: 
   });
 }
 
+export interface UnplannedEventProvisioningProgress {
+  standaloneRegistered: boolean;
+  attendeesVerified: boolean;
+  communityLinkConfirmed: boolean;
+  linkedChildRegistered: boolean;
+}
+
+export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  parentCommunityWid: string;
+  stage: ManagedCommunitySubgroupProvisioningStage;
+  progress: UnplannedEventProvisioningProgress;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin = 'unplanned'
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND calendar_status = 'hidden'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (!current) {
+      return false;
+    }
+
+    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.failedAt);
+    const result = db.run(
+      `UPDATE event_records
+          SET subgroup_chat_id = ?,
+              subgroup_title = ?,
+              error = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin = 'unplanned'
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND calendar_status = 'hidden'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.subgroupChatId,
+      input.subgroupTitle,
+      input.reason,
+      input.failedAt,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (result.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while checkpointing unplanned subgroup provisioning.`);
+    }
+    appendEventLog(db, {
+      eventId: input.eventId,
+      action: 'events.unplanned.provisioning_failed',
+      metadata: {
+        reason: input.reason,
+        subgroupChatId: input.subgroupChatId,
+        subgroupTitle: input.subgroupTitle,
+        parentCommunityWid: input.parentCommunityWid,
+        stage: input.stage,
+        progress: input.progress,
+        participants: input.participants
+      }
+    });
+    return true;
+  });
+}
+
+export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  completedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin = 'unplanned'
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND calendar_status = 'hidden'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (!current) {
+      return false;
+    }
+
+    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.completedAt);
+    const result = db.run(
+      `UPDATE event_records
+          SET event_status = 'active',
+              group_lifecycle_status = 'poll_closed',
+              calendar_status = 'included',
+              subgroup_chat_id = ?,
+              subgroup_title = ?,
+              closed_at = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin = 'unplanned'
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'none'
+          AND calendar_status = 'hidden'
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+      input.subgroupChatId,
+      input.subgroupTitle,
+      input.completedAt,
+      input.completedAt,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId
+    );
+    if (result.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while completing unplanned subgroup provisioning.`);
+    }
+    appendEventLog(db, {
+      eventId: input.eventId,
+      action: 'events.unplanned.provisioning_completed',
+      metadata: {
+        subgroupChatId: input.subgroupChatId,
+        subgroupTitle: input.subgroupTitle,
+        participants: input.participants
+      }
+    });
+    return true;
+  });
+}
+
 export function markEventClosed(db: PluginDatabase, input: {
   eventId: string;
   subgroupChatId?: string | undefined;
@@ -693,12 +895,12 @@ export function recordEventAnnouncementMessage(db: PluginDatabase, input: {
   scopeId: string;
   kind: EventAnnouncementMessageKind;
   chatId: string;
-  messageId?: string | undefined;
+  messageId: string;
   createdAt?: string | undefined;
-}): StoredEventAnnouncementMessage | undefined {
-  const messageId = input.messageId?.trim();
+}): StoredEventAnnouncementMessage {
+  const messageId = input.messageId.trim();
   if (!messageId) {
-    return undefined;
+    throw new Error(`Cannot persist ${input.kind} announcement without a WhatsApp message id.`);
   }
   const now = input.createdAt ?? new Date().toISOString();
   const id = `evtmsg-${randomUUID()}`;
@@ -727,7 +929,146 @@ export function recordEventAnnouncementMessage(db: PluginDatabase, input: {
     input.kind,
     messageId
   );
-  return row ? eventAnnouncementMessageFromRow(row) : undefined;
+  if (!row) {
+    throw new Error(`Could not read persisted ${input.kind} WhatsApp message ${messageId}.`);
+  }
+  return eventAnnouncementMessageFromRow(row);
+}
+
+export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  kind: EventAnnouncementDeliveryKind;
+  chatId: string;
+  claimedAt?: string | undefined;
+}): EventAnnouncementDeliveryClaimResult {
+  return db.transaction(() => {
+    const existingMessage = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_announcement_messages
+        WHERE event_id = ?
+          AND kind = ?
+        LIMIT 1`,
+      input.eventId,
+      input.kind
+    );
+    if (existingMessage) {
+      return 'already_sent';
+    }
+
+    const now = input.claimedAt ?? new Date().toISOString();
+    const inserted = db.run(
+      `INSERT INTO event_announcement_delivery_claims (
+         event_id, kind, scope_id, chat_id, status, message_id, error, claimed_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'sending', NULL, NULL, ?, ?)
+       ON CONFLICT(event_id, kind) DO NOTHING`,
+      input.eventId,
+      input.kind,
+      input.scopeId,
+      input.chatId,
+      now,
+      now
+    );
+    if (inserted.changes === 1) {
+      return 'claimed';
+    }
+    const existingClaim = getEventAnnouncementDeliveryClaim(db, input.eventId, input.kind);
+    return existingClaim?.status === 'sent' ? 'already_sent' : 'already_claimed';
+  });
+}
+
+export function completeEventAnnouncementDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  kind: EventAnnouncementDeliveryKind;
+  chatId: string;
+  messageId: string;
+  completedAt?: string | undefined;
+}): StoredEventAnnouncementMessage {
+  const messageId = input.messageId.trim();
+  if (!messageId) {
+    throw new Error(`Cannot complete ${input.kind} delivery without a WhatsApp message id.`);
+  }
+  return db.transaction(() => {
+    const current = getEventAnnouncementDeliveryClaim(db, input.eventId, input.kind);
+    if (!current || current.status !== 'sending') {
+      throw new Error(
+        `Cannot complete ${input.kind} delivery for event ${input.eventId} from ${current?.status ?? 'missing'} state.`
+      );
+    }
+    const completedAt = input.completedAt ?? new Date().toISOString();
+    const message = recordEventAnnouncementMessage(db, {
+      eventId: input.eventId,
+      scopeId: input.scopeId,
+      kind: input.kind,
+      chatId: input.chatId,
+      messageId,
+      createdAt: completedAt
+    });
+    const updated = db.run(
+      `UPDATE event_announcement_delivery_claims
+          SET status = 'sent',
+              scope_id = ?,
+              chat_id = ?,
+              message_id = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE event_id = ?
+          AND kind = ?
+          AND status = 'sending'`,
+      input.scopeId,
+      input.chatId,
+      messageId,
+      completedAt,
+      input.eventId,
+      input.kind
+    );
+    if (updated.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while completing ${input.kind} delivery.`);
+    }
+    return message;
+  });
+}
+
+export function markEventAnnouncementDeliveryUncertain(db: PluginDatabase, input: {
+  eventId: string;
+  kind: EventAnnouncementDeliveryKind;
+  reason: string;
+  updatedAt?: string | undefined;
+}): void {
+  const updated = db.run(
+    `UPDATE event_announcement_delivery_claims
+        SET status = 'uncertain',
+            error = ?,
+            updated_at = ?
+      WHERE event_id = ?
+        AND kind = ?
+        AND status = 'sending'`,
+    input.reason,
+    input.updatedAt ?? new Date().toISOString(),
+    input.eventId,
+    input.kind
+  );
+  if (updated.changes !== 1) {
+    throw new Error(
+      `Cannot mark ${input.kind} delivery for event ${input.eventId} uncertain from its current state.`
+    );
+  }
+}
+
+export function getEventAnnouncementDeliveryClaim(
+  db: PluginDatabase,
+  eventId: string,
+  kind: EventAnnouncementDeliveryKind
+): StoredEventAnnouncementDeliveryClaim | undefined {
+  const row = db.get<EventAnnouncementDeliveryClaimRow>(
+    `SELECT *
+       FROM event_announcement_delivery_claims
+      WHERE event_id = ? AND kind = ?`,
+    eventId,
+    kind
+  );
+  return row ? eventAnnouncementDeliveryClaimFromRow(row) : undefined;
 }
 
 export function listEventAnnouncementMessages(db: PluginDatabase, eventId: string, input: {
@@ -1214,6 +1555,22 @@ function eventAnnouncementMessageFromRow(row: EventAnnouncementMessageRow): Stor
     createdAt: row.created_at,
     ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
     ...(row.delete_error ? { deleteError: row.delete_error } : {})
+  };
+}
+
+function eventAnnouncementDeliveryClaimFromRow(
+  row: EventAnnouncementDeliveryClaimRow
+): StoredEventAnnouncementDeliveryClaim {
+  return {
+    eventId: row.event_id,
+    kind: row.kind,
+    scopeId: row.scope_id,
+    chatId: row.chat_id,
+    status: row.status,
+    ...(row.message_id ? { messageId: row.message_id } : {}),
+    ...(row.error ? { error: row.error } : {}),
+    claimedAt: row.claimed_at,
+    updatedAt: row.updated_at
   };
 }
 

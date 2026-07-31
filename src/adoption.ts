@@ -5,23 +5,35 @@ import {
   requireCompletePollVotes
 } from '../../../platform/transport/pollVoteReadback';
 import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from '../shared';
+import {
+  persistedEventAnnouncementDisposition,
+  sendClaimedEventAnnouncement
+} from './announcementDelivery';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import { sendEventCalendarHint } from './calendarHint';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
 import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
-import { eventWeatherForecastJobRequest } from './weather';
+import {
+  EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND,
+  eventWeatherForecastJobRequest
+} from './weather';
 import {
   appendEventLog,
   eventsDatabase,
   getActiveEventByPoll,
   getActiveEventBySubgroup,
+  getCalendarPublicationStatus,
+  getEvent,
+  getEventWeatherDelivery,
   insertEvent,
   listCalendarEvents,
   newEventId,
   recordEventAnnouncementMessage,
+  updateEventSubgroupTitle,
   upsertVote,
   type EventOrigin,
   type StoredEventLocation,
@@ -35,6 +47,7 @@ export interface EventTextTransport {
 }
 
 export interface EventAdoptionInput {
+  eventId?: string | undefined;
   scopeId: string;
   mode: EventAdoptionMode;
   profileId: string;
@@ -42,7 +55,6 @@ export interface EventAdoptionInput {
   locale?: string | undefined;
   pollWaMsgId?: string | undefined;
   subgroupChatId?: string | undefined;
-  subgroupTitle?: string | undefined;
   eventLocation?: StoredEventLocation | undefined;
   actorWid: string;
   actorLabel: string;
@@ -53,6 +65,8 @@ export type EventAdoptionResult =
       status: 'adopted';
       event: StoredEventRecord;
       snapshotVoteCount: number;
+      reconciled?: boolean | undefined;
+      effects?: EventAdoptionReconcileEffects | undefined;
       groupValidation?: EventAdoptedGroupValidation | undefined;
     }
   | {
@@ -63,9 +77,24 @@ export type EventAdoptionResult =
 
 export interface EventAdoptedGroupValidation {
   chatId: string;
+  displayName?: string | undefined;
+  expectedParentChatId?: string | undefined;
+  linkedParentChatId?: string | undefined;
+  childIsEventSubgroup: boolean;
+  parentIsCommunity: boolean;
+  parentContainsChild: boolean;
   botIsMember: boolean;
   botIsAdmin: boolean;
   canRemoveMembers: boolean;
+}
+
+export interface EventAdoptionReconcileEffects {
+  subgroupTitle: 'backfilled' | 'preserved';
+  calendarPublication: 'published' | 'unavailable';
+  eventGroupHint: AdoptedEventGroupHintResult;
+  calendarHint: Awaited<ReturnType<typeof sendEventCalendarHint>>;
+  weather: 'queued' | 'already_queued' | 'skipped' | 'not_scheduled';
+  cleanup: 'ensured';
 }
 
 export async function adoptEventLifecycle(input: {
@@ -85,11 +114,23 @@ export async function adoptEventLifecycle(input: {
   if (origin === 'adopted_group' && !adoption.subgroupChatId) {
     return { status: 'failed', reason: 'Event group id is required.' };
   }
+  if (adoption.eventId && origin !== 'adopted_group') {
+    return { status: 'failed', reason: 'Only adopted event groups can be reconciled.' };
+  }
   if (adoption.pollWaMsgId && getActiveEventByPoll(db, adoption.pollWaMsgId)) {
     return { status: 'failed', reason: 'This poll is already attached to an active event.' };
   }
-  if (adoption.subgroupChatId && getActiveEventBySubgroup(db, adoption.subgroupChatId)) {
+  const existingSubgroupEvent = adoption.subgroupChatId
+    ? getActiveEventBySubgroup(db, adoption.subgroupChatId)
+    : undefined;
+  if (!adoption.eventId && existingSubgroupEvent) {
     return { status: 'failed', reason: 'This event group is already attached to an active event.' };
+  }
+  if (adoption.eventId && !existingSubgroupEvent) {
+    return { status: 'failed', reason: `Active adopted event ${adoption.eventId} was not found for this event group.` };
+  }
+  if (adoption.eventId && existingSubgroupEvent?.id !== adoption.eventId) {
+    return { status: 'failed', reason: 'The requested event id does not match the active event attached to this group.' };
   }
 
   const config = parseEventsConfig(await runtime.configFor(adoption.scopeId, adoption.actorWid));
@@ -97,10 +138,61 @@ export async function adoptEventLifecycle(input: {
   if (!profile) {
     return { status: 'failed', reason: `Unknown event profile: ${adoption.profileId}` };
   }
+  if (adoption.eventId && existingSubgroupEvent && (
+    existingSubgroupEvent.scopeId !== adoption.scopeId ||
+    existingSubgroupEvent.profileId !== adoption.profileId ||
+    existingSubgroupEvent.origin !== 'adopted_group' ||
+    existingSubgroupEvent.groupLifecycleStatus !== 'poll_closed'
+  )) {
+    return {
+      status: 'failed',
+      reason: 'The requested event does not match this active adopted-group lifecycle.'
+    };
+  }
   const announcementGroupWid = profile.announcementGroupWid ||
     await input.context.communityAnnouncementGroupWidForScope?.(adoption.scopeId);
   if (origin === 'adopted_poll' && !announcementGroupWid) {
     return { status: 'failed', reason: 'Announcement group is not configured for this event profile.' };
+  }
+  let groupValidation: EventAdoptedGroupValidation | undefined;
+  if (adoption.subgroupChatId) {
+    groupValidation = await validateAdoptedGroup(
+      input.context,
+      adoption.scopeId,
+      adoption.subgroupChatId
+    );
+    if (
+      !groupValidation.displayName ||
+      !groupValidation.expectedParentChatId ||
+      groupValidation.linkedParentChatId !== groupValidation.expectedParentChatId ||
+      !groupValidation.childIsEventSubgroup ||
+      !groupValidation.parentIsCommunity ||
+      !groupValidation.parentContainsChild ||
+      !groupValidation.botIsMember ||
+      !groupValidation.botIsAdmin ||
+      !groupValidation.canRemoveMembers
+    ) {
+      return {
+        status: 'failed',
+        reason: 'The bot must be a member and group admin with member-removal permission, and the event group must expose a live title and be natively linked to the scoped community before it can be adopted.',
+        groupValidation
+      };
+    }
+  }
+
+  if (adoption.eventId && existingSubgroupEvent) {
+    return reconcileAdoptedGroupLifecycle({
+      context: input.context,
+      runtime,
+      db,
+      activeTransport: input.activeTransport,
+      adoption,
+      event: existingSubgroupEvent,
+      profile,
+      config,
+      announcementGroupWid: existingSubgroupEvent.announcementGroupWid || announcementGroupWid,
+      groupValidation
+    });
   }
   const answers = eventFlowAnswersFromRaw({
     profile,
@@ -111,19 +203,6 @@ export async function adoptEventLifecycle(input: {
   if (!answers) {
     return { status: 'failed', reason: 'Event profile answers are incomplete or invalid.' };
   }
-
-  let groupValidation: EventAdoptedGroupValidation | undefined;
-  if (adoption.subgroupChatId) {
-    groupValidation = await validateAdoptedGroup(input.context, adoption.subgroupChatId);
-    if (!groupValidation.botIsMember || !groupValidation.botIsAdmin || !groupValidation.canRemoveMembers) {
-      return {
-        status: 'failed',
-        reason: 'The bot must be a member and group admin with member-removal permission before this event group can be adopted.',
-        groupValidation
-      };
-    }
-  }
-
   const materialized = materializeEventLifecycle({
     profile,
     answers,
@@ -166,7 +245,7 @@ export async function adoptEventLifecycle(input: {
     ...(materialized.calendarLocation ? { calendarLocation: materialized.calendarLocation } : {}),
     ...(materialized.calendarDescription ? { calendarDescription: materialized.calendarDescription } : {}),
     ...(adoption.subgroupChatId ? { subgroupChatId: adoption.subgroupChatId } : {}),
-    ...(adoption.subgroupTitle ? { subgroupTitle: adoption.subgroupTitle } : {}),
+    ...(groupValidation?.displayName ? { subgroupTitle: groupValidation.displayName } : {}),
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
     ...(origin === 'adopted_poll' ? {} : { closedAt: now.toISOString() })
@@ -232,7 +311,7 @@ export async function adoptEventLifecycle(input: {
     await input.context.registerManagedGroup?.({
       scopeId: adoption.scopeId,
       chatId: adoption.subgroupChatId,
-      displayName: adoption.subgroupTitle || materialized.groupTitle
+      displayName: event.subgroupTitle
     });
   }
   await appendEventJsonLog(input.context, {
@@ -265,7 +344,6 @@ export async function adoptEventLifecycle(input: {
     locale: adoption.locale ?? 'en',
     creatorDisplayName: adoption.actorLabel || adoption.actorWid
   });
-
   await runtime.enqueuePluginJob({
     jobName: origin === 'adopted_poll' ? EVENTS_JOBS.close : EVENTS_JOBS.cleanup,
     scopeId: event.scopeId,
@@ -290,20 +368,223 @@ export async function adoptEventLifecycle(input: {
   };
 }
 
-async function validateAdoptedGroup(
+async function reconcileAdoptedGroupLifecycle(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  db: ReturnType<typeof eventsDatabase>;
+  activeTransport?: EventTextTransport | undefined;
+  adoption: EventAdoptionInput;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  announcementGroupWid?: string | undefined;
+  groupValidation?: EventAdoptedGroupValidation | undefined;
+}): Promise<EventAdoptionResult> {
+  const subgroupChatId = input.event.subgroupChatId;
+  const liveTitle = input.groupValidation?.displayName?.trim();
+  if (!subgroupChatId || !liveTitle) {
+    return {
+      status: 'failed',
+      reason: 'The adopted event group does not have a verified live id and title.',
+      ...(input.groupValidation ? { groupValidation: input.groupValidation } : {})
+    };
+  }
+  if (input.event.subgroupTitle && input.event.subgroupTitle !== liveTitle) {
+    return {
+      status: 'failed',
+      reason: 'The stored subgroup title differs from the verified live title; reconcile the title through the event title workflow first.',
+      ...(input.groupValidation ? { groupValidation: input.groupValidation } : {})
+    };
+  }
+
+  let subgroupTitle: EventAdoptionReconcileEffects['subgroupTitle'] = 'preserved';
+  if (!input.event.subgroupTitle) {
+    const updated = updateEventSubgroupTitle(input.db, {
+      eventId: input.event.id,
+      subgroupChatId,
+      subgroupTitle: liveTitle,
+      updatedAt: new Date().toISOString()
+    });
+    if (!updated) {
+      return {
+        status: 'failed',
+        reason: 'The adopted event changed while its verified subgroup title was being backfilled.',
+        ...(input.groupValidation ? { groupValidation: input.groupValidation } : {})
+      };
+    }
+    subgroupTitle = 'backfilled';
+  }
+  const event = getEvent(input.db, input.event.id);
+  if (!event) {
+    return { status: 'failed', reason: `Adopted event ${input.event.id} disappeared during reconciliation.` };
+  }
+  await input.context.registerManagedGroup?.({
+    scopeId: event.scopeId,
+    chatId: subgroupChatId,
+    displayName: liveTitle
+  });
+
+  const calendar = calendarResourceForProfile(input.config, input.profile);
+  let calendarPublication: EventAdoptionReconcileEffects['calendarPublication'] = 'unavailable';
+  if (calendar) {
+    await writePublishAndRecordScopeCalendar({
+      appConfig: input.runtime.config,
+      db: input.db,
+      config: input.config,
+      scopeId: event.scopeId,
+      calendarId: calendar.id,
+      events: listCalendarEvents(input.db, event.scopeId)
+    });
+    calendarPublication = getCalendarPublicationStatus(input.db, event.scopeId, calendar.id)?.ok
+      ? 'published'
+      : 'unavailable';
+  }
+
+  const eventGroupHint = await sendAdoptedEventGroupHint({
+    context: input.context,
+    db: input.db,
+    activeTransport: input.activeTransport,
+    event,
+    profile: input.profile,
+    announcementGroupWid: input.announcementGroupWid,
+    locale: input.adoption.locale ?? 'en',
+    creatorDisplayName: event.actorLabel || event.actorWid
+  });
+  const calendarHint = input.announcementGroupWid && input.activeTransport
+    ? await sendEventCalendarHint({
+        context: input.context,
+        runtime: input.runtime,
+        activeTransport: input.activeTransport,
+        trigger: 'unplanned_recovery',
+        scopeId: event.scopeId,
+        announcementGroupWid: input.announcementGroupWid,
+        event,
+        profile: input.profile,
+        calendars: input.config.calendars,
+        timezone: event.timezone,
+        locale: input.adoption.locale ?? 'en',
+        creatorDisplayName: event.actorLabel || event.actorWid,
+        subgroupChatId
+      })
+    : 'skipped';
+
+  const existingWeather = getEventWeatherDelivery(
+    input.db,
+    event.id,
+    EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND
+  );
+  let weather: EventAdoptionReconcileEffects['weather'] = existingWeather?.status === 'queued'
+    ? 'already_queued'
+    : existingWeather?.status === 'skipped'
+      ? 'skipped'
+      : 'not_scheduled';
+  if (!existingWeather || existingWeather.status === 'failed') {
+    const request = eventWeatherForecastJobRequest({ event, profile: input.profile, now: new Date() });
+    if (request) {
+      await input.runtime.enqueuePluginJob({
+        ...request,
+        dedupeKey: `${request.dedupeKey}:lifecycle-recovery:${event.updatedAt}`
+      });
+      weather = 'queued';
+    }
+  }
+  await input.runtime.enqueuePluginJob({
+    jobName: EVENTS_JOBS.cleanup,
+    scopeId: event.scopeId,
+    ...(event.groupId ? { groupId: event.groupId } : {}),
+    ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+    runAt: new Date(event.cleanupAt),
+    payload: { eventId: event.id, attempt: 0 },
+    dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:adopted`
+  });
+  const effects: EventAdoptionReconcileEffects = {
+    subgroupTitle,
+    calendarPublication,
+    eventGroupHint,
+    calendarHint,
+    weather,
+    cleanup: 'ensured'
+  };
+  appendEventLog(input.db, {
+    eventId: event.id,
+    action: 'events.adoption_reconciled',
+    metadata: effects
+  });
+  await appendEventJsonLog(input.context, {
+    action: 'event.adoption_reconciled',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: input.adoption.actorWid,
+    profileId: event.profileId,
+    subgroupChatId,
+    metadata: effects
+  });
+
+  return {
+    status: 'adopted',
+    event,
+    snapshotVoteCount: 0,
+    reconciled: true,
+    effects,
+    ...(input.groupValidation ? { groupValidation: input.groupValidation } : {})
+  };
+}
+
+export async function validateAdoptedGroup(
   context: PluginCommandContext,
+  scopeId: string,
   chatId: string
 ): Promise<EventAdoptedGroupValidation> {
-  const capabilities = await context.botCapabilitiesFor?.(chatId);
+  const expectedParentChatId = await context.communityGroupWidForScope?.(scopeId);
+  const [capabilities, childMetadata, parentMetadata, linkedGroups] = await Promise.all([
+    context.botCapabilitiesFor?.(chatId),
+    context.getGroupMetadataSnapshot?.(chatId),
+    expectedParentChatId
+      ? context.getGroupMetadataSnapshot?.(expectedParentChatId)
+      : undefined,
+    expectedParentChatId
+      ? context.getCommunityLinkedGroups?.(expectedParentChatId)
+      : undefined
+  ]);
+  const normalizedChatId = chatId.trim().toLowerCase();
+  const childMatches = childMetadata?.chatId.trim().toLowerCase() === normalizedChatId;
   return {
     chatId,
+    ...(childMatches && childMetadata?.displayName?.trim()
+      ? { displayName: childMetadata.displayName.trim() }
+      : {}),
+    ...(expectedParentChatId ? { expectedParentChatId } : {}),
+    ...(childMatches && childMetadata?.linkedParent
+      ? { linkedParentChatId: childMetadata.linkedParent }
+      : {}),
+    childIsEventSubgroup: Boolean(
+      childMatches &&
+      childMetadata?.isCommunity !== true &&
+      childMetadata?.isCommunityAnnounce !== true
+    ),
+    parentIsCommunity: Boolean(
+      expectedParentChatId &&
+      parentMetadata?.chatId.trim().toLowerCase() === expectedParentChatId.trim().toLowerCase() &&
+      parentMetadata.isCommunity === true
+    ),
+    parentContainsChild: linkedGroups?.some((group) =>
+      group.chatId.trim().toLowerCase() === normalizedChatId
+    ) === true,
     botIsMember: capabilities?.botIsMember === true,
     botIsAdmin: capabilities?.botIsAdmin === true || capabilities?.botIsSuperAdmin === true,
     canRemoveMembers: capabilities?.canRemoveMembers === true
   };
 }
 
-async function sendAdoptedEventGroupHint(input: {
+export type AdoptedEventGroupHintResult =
+  | 'disabled'
+  | 'already_sent'
+  | 'already_claimed'
+  | 'sent'
+  | 'skipped'
+  | 'failed';
+
+export async function sendAdoptedEventGroupHint(input: {
   context: PluginCommandContext;
   db: ReturnType<typeof eventsDatabase>;
   activeTransport?: EventTextTransport | undefined;
@@ -312,26 +593,34 @@ async function sendAdoptedEventGroupHint(input: {
   announcementGroupWid?: string | undefined;
   locale: string;
   creatorDisplayName: string;
-}): Promise<void> {
+}): Promise<AdoptedEventGroupHintResult> {
+  const persistedDelivery = persistedEventAnnouncementDisposition(
+    input.db,
+    input.event.id,
+    'event_group_hint'
+  );
+  if (persistedDelivery) {
+    return persistedDelivery;
+  }
   if (!eventGroupHintEnabled(input.profile, 'adopted')) {
-    return;
+    return 'disabled';
   }
   if (!input.event.subgroupChatId) {
     await appendAdoptedAnnouncementSkipped(input.context, input.event, 'no_event_group');
-    return;
+    return 'skipped';
   }
   if (!input.announcementGroupWid) {
     await appendAdoptedAnnouncementSkipped(input.context, input.event, 'announcement_group_missing', {
       subgroupChatId: input.event.subgroupChatId
     });
-    return;
+    return 'skipped';
   }
   if (!input.activeTransport) {
     await appendAdoptedAnnouncementSkipped(input.context, input.event, 'transport_unavailable', {
       subgroupChatId: input.event.subgroupChatId,
       announcementGroupWid: input.announcementGroupWid
     });
-    return;
+    return 'skipped';
   }
   const template = input.profile.eventGroupHint.template.trim();
   if (!template) {
@@ -339,7 +628,7 @@ async function sendAdoptedEventGroupHint(input: {
       subgroupChatId: input.event.subgroupChatId,
       announcementGroupWid: input.announcementGroupWid
     });
-    return;
+    return 'skipped';
   }
   try {
     const groupJoinUrl = await eventGroupJoinUrl(input.context, template, input.event.subgroupChatId);
@@ -358,16 +647,20 @@ async function sendAdoptedEventGroupHint(input: {
         subgroupChatId: input.event.subgroupChatId,
         announcementGroupWid: input.announcementGroupWid
       });
-      return;
+      return 'skipped';
     }
-    const sent = await input.activeTransport.sendText(input.announcementGroupWid, text);
-    recordEventAnnouncementMessage(input.db, {
+    const delivery = await sendClaimedEventAnnouncement({
+      db: input.db,
       eventId: input.event.id,
       scopeId: input.event.scopeId,
       kind: 'event_group_hint',
       chatId: input.announcementGroupWid,
-      messageId: sent.messageId
+      text,
+      sender: input.activeTransport
     });
+    if (delivery.status !== 'sent') {
+      return delivery.status;
+    }
     await appendEventJsonLog(input.context, {
       action: 'event.adopted_announcement_sent',
       scopeId: input.event.scopeId,
@@ -378,10 +671,11 @@ async function sendAdoptedEventGroupHint(input: {
       subgroupChatId: input.event.subgroupChatId,
       metadata: {
         announcementGroupWid: input.announcementGroupWid,
-        messageId: sent.messageId,
+        messageId: delivery.messageId,
         groupJoinUrl
       }
     });
+    return 'sent';
   } catch (error) {
     await appendEventJsonLog(input.context, {
       action: 'event.adopted_announcement_failed',
@@ -396,6 +690,7 @@ async function sendAdoptedEventGroupHint(input: {
         reason: error instanceof Error ? error.message : String(error)
       }
     });
+    return 'failed';
   }
 }
 
@@ -430,9 +725,9 @@ function adoptionOrigin(mode: EventAdoptionMode): EventOrigin {
 function normalizeAdoptionInput(input: EventAdoptionInput): EventAdoptionInput {
   return {
     ...input,
+    eventId: input.eventId?.trim() || undefined,
     pollWaMsgId: input.pollWaMsgId?.trim() || undefined,
     subgroupChatId: input.subgroupChatId?.trim().toLowerCase() || undefined,
-    subgroupTitle: input.subgroupTitle?.trim() || undefined,
     actorWid: input.actorWid.trim() || 'operator-console@system',
     actorLabel: input.actorLabel.trim() || input.actorWid.trim() || 'Operator Console'
   };

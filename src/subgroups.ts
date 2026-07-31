@@ -69,7 +69,8 @@ export async function resumeEventCommunitySubgroup(input: {
       title: input.subgroupTitle,
       participantWids: input.participantWids,
       participants: input.participants,
-      parentCommunityWid: input.parentCommunityWid
+      parentCommunityWid: input.parentCommunityWid,
+      allowPendingCommunityLink: true
     }
   });
 }

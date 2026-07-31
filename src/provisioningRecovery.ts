@@ -39,6 +39,8 @@ export type ResumeEventProvisioningResult =
       resumed: boolean;
       attendeeCount: number;
       parentCommunityChatId: string;
+      communityLinkStatus: 'linked' | 'pending';
+      communityLinkError?: string | undefined;
     }
   | {
       status: 'already_completed';
@@ -140,6 +142,8 @@ export async function resumeEventProvisioning(
     listCreatedGroupParticipants(db, event.id),
     input.participants
   );
+  let communityLinkStatus: 'linked' | 'pending' = 'linked';
+  let communityLinkError: string | undefined;
   const resumedAt = (input.now ?? new Date()).toISOString();
   if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
     const checkpointed = checkpointEventProvisioningCandidate(db, {
@@ -191,6 +195,8 @@ export async function resumeEventProvisioning(
       participantOutcomes,
       result.created.participants
     );
+    communityLinkStatus = result.communityLinkStatus;
+    communityLinkError = result.communityLinkError;
     if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
       const outputCheckpointed = checkpointEventProvisioningCandidate(db, {
         eventId: event.id,
@@ -266,6 +272,8 @@ export async function resumeEventProvisioning(
             attendeeCount: attendeeWids.length,
             parentCommunityChatId,
             provisioningMode: 'service',
+            communityLinkStatus,
+            communityLinkError,
             actorWid: input.actorWid,
             actorLabel: input.actorLabel
           }
@@ -310,6 +318,8 @@ export async function resumeEventProvisioning(
       attendeeCount: attendeeWids.length,
       parentCommunityChatId,
       provisioningMode: 'service',
+      communityLinkStatus,
+      communityLinkError,
       actorLabel: input.actorLabel
     }
   });
@@ -327,6 +337,8 @@ export async function resumeEventProvisioning(
       attendeeCount: attendeeWids.length,
       parentCommunityChatId,
       provisioningMode: 'service',
+      communityLinkStatus,
+      communityLinkError,
       actorWid: input.actorWid,
       actorLabel: input.actorLabel
     }
@@ -337,7 +349,9 @@ export async function resumeEventProvisioning(
     event: queuedEvent,
     resumed,
     attendeeCount: attendeeWids.length,
-    parentCommunityChatId
+    parentCommunityChatId,
+    communityLinkStatus,
+    ...(communityLinkError ? { communityLinkError } : {})
   };
 }
 

@@ -57,7 +57,6 @@ import {
 } from './provisioningRecovery';
 import {
   handleEventProvisioningRetryJob,
-  isRateLimitedCommunityLinkError,
   recoverEventProvisioningRetry
 } from './provisioningRetry';
 
@@ -555,33 +554,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         reason,
         failedAt
       });
-      let provisioningRetryScheduled: boolean | undefined;
-      let provisioningRetryScheduleError: string | undefined;
-      if (checkpointPersisted && isRateLimitedCommunityLinkError(error)) {
-        const checkpointedEvent = getEvent(db, record.id);
-        if (checkpointedEvent) {
-          try {
-            provisioningRetryScheduled = await recoverEventProvisioningRetry(
-              context,
-              checkpointedEvent,
-              new Date(failedAt)
-            );
-          } catch (scheduleError) {
-            provisioningRetryScheduleError = scheduleError instanceof Error
-              ? scheduleError.message
-              : String(scheduleError);
-            context.logger.warn(
-              {
-                error: scheduleError,
-                eventId: record.id,
-                scopeId: record.scopeId,
-                subgroupChatId: created.chatId
-              },
-              'Failed to enqueue rate-limited event subgroup provisioning retry'
-            );
-          }
-        }
-      }
       failureMetadata = {
         reason,
         subgroupChatId: created.chatId,
@@ -590,13 +562,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         stage,
         progress,
         participants: created.participants,
-        checkpointPersisted,
-        ...(provisioningRetryScheduled !== undefined
-          ? { provisioningRetryScheduled }
-          : {}),
-        ...(provisioningRetryScheduleError
-          ? { provisioningRetryScheduleError }
-          : {})
+        checkpointPersisted
       };
       if (!checkpointPersisted) {
         context.logger.error(

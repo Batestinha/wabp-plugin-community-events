@@ -187,10 +187,10 @@ export async function resumeEventProvisioning(
       );
     }
     subgroupTitle = result.created.title.trim() || subgroupTitle;
-    participantOutcomes = {
-      ...participantOutcomes,
-      ...result.created.participants
-    };
+    participantOutcomes = mergeParticipantOutcomeRecords(
+      participantOutcomes,
+      result.created.participants
+    );
     if (event.eventStatus === 'failed' && event.groupLifecycleStatus === 'none') {
       const outputCheckpointed = checkpointEventProvisioningCandidate(db, {
         eventId: event.id,
@@ -216,10 +216,10 @@ export async function resumeEventProvisioning(
       error.created.chatId.trim().toLowerCase() === subgroupChatId
     ) {
       subgroupTitle = error.created.title.trim() || subgroupTitle;
-      participantOutcomes = {
-        ...participantOutcomes,
-        ...error.created.participants
-      };
+      participantOutcomes = mergeParticipantOutcomeRecords(
+        participantOutcomes,
+        error.created.participants
+      );
       const failureCheckpointed = checkpointEventProvisioningCandidate(db, {
         eventId: event.id,
         scopeId,
@@ -345,7 +345,7 @@ export function eventProvisioningResumeDedupeKey(eventId: string, subgroupChatId
   return `${EVENTS_JOBS.close}:${eventId}:resume:${subgroupChatId}`;
 }
 
-function mergedParticipantOutcomes(
+export function mergedParticipantOutcomes(
   stored: ReturnType<typeof listCreatedGroupParticipants>,
   supplied: Record<string, CreatedGroupParticipantResult> | undefined
 ): Record<string, CreatedGroupParticipantResult> {
@@ -358,10 +358,25 @@ function mergedParticipantOutcomes(
       isInviteV4Sent: participant.isInviteV4Sent
     }
   ]));
-  return {
-    ...persisted,
-    ...(supplied ?? {})
-  };
+  return mergeParticipantOutcomeRecords(persisted, supplied ?? {});
+}
+
+export function mergeParticipantOutcomeRecords(
+  ...records: Array<Record<string, CreatedGroupParticipantResult>>
+): Record<string, CreatedGroupParticipantResult> {
+  const merged: Record<string, CreatedGroupParticipantResult> = {};
+  for (const record of records) {
+    for (const [wid, outcome] of Object.entries(record)) {
+      const previous = merged[wid];
+      merged[wid] = {
+        ...previous,
+        ...outcome,
+        isGroupCreator: previous?.isGroupCreator === true || outcome.isGroupCreator,
+        isInviteV4Sent: previous?.isInviteV4Sent === true || outcome.isInviteV4Sent
+      };
+    }
+  }
+  return merged;
 }
 
 function provisioningProgress(input: {

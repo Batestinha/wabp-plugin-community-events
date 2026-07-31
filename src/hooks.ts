@@ -53,9 +53,13 @@ import {
   type StoredEventRecord
 } from './store';
 import {
-  eventProvisioningResumeDedupeKey,
-  resumeEventProvisioning
+  eventProvisioningResumeDedupeKey
 } from './provisioningRecovery';
+import {
+  handleEventProvisioningRetryJob,
+  isRateLimitedCommunityLinkError,
+  recoverEventProvisioningRetry
+} from './provisioningRetry';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
@@ -113,28 +117,13 @@ export async function recoverEventProvisioningJobs(
   let enqueued = 0;
   for (const record of records) {
     try {
-      const result = await resumeEventProvisioning({
-        context,
-        scopeId: record.scopeId,
-        eventId: record.id,
-        subgroupChatId: record.subgroupChatId!,
-        ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
-        actorWid: 'plugin-startup@system',
-        actorLabel: 'Plugin startup recovery',
-        ...(options.now ? { now: options.now } : {})
-      });
-      if (result.status === 'queued') {
+      if (await recoverEventProvisioningRetry(context, record, options.now ?? new Date())) {
         enqueued += 1;
-      } else if (result.status === 'rejected') {
-        context.logger.warn(
-          { eventId: record.id, scopeId: record.scopeId, reason: result.reason },
-          'Unable to resume failed official.community-events subgroup provisioning'
-        );
       }
     } catch (error) {
       context.logger.warn(
         { error, eventId: record.id, scopeId: record.scopeId },
-        'Failed to recover official.community-events subgroup provisioning'
+        'Failed to schedule official.community-events subgroup provisioning recovery'
       );
     }
   }
@@ -250,6 +239,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
+  }
+  if (event.jobName === EVENTS_JOBS.provisioningRetry) {
+    return handleEventProvisioningRetryJob(context, event);
   }
   if (event.jobName === EVENTS_JOBS.weatherForecast) {
     const db = eventsDatabase(context.databases);
@@ -563,6 +555,33 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         reason,
         failedAt
       });
+      let provisioningRetryScheduled: boolean | undefined;
+      let provisioningRetryScheduleError: string | undefined;
+      if (checkpointPersisted && isRateLimitedCommunityLinkError(error)) {
+        const checkpointedEvent = getEvent(db, record.id);
+        if (checkpointedEvent) {
+          try {
+            provisioningRetryScheduled = await recoverEventProvisioningRetry(
+              context,
+              checkpointedEvent,
+              new Date(failedAt)
+            );
+          } catch (scheduleError) {
+            provisioningRetryScheduleError = scheduleError instanceof Error
+              ? scheduleError.message
+              : String(scheduleError);
+            context.logger.warn(
+              {
+                error: scheduleError,
+                eventId: record.id,
+                scopeId: record.scopeId,
+                subgroupChatId: created.chatId
+              },
+              'Failed to enqueue rate-limited event subgroup provisioning retry'
+            );
+          }
+        }
+      }
       failureMetadata = {
         reason,
         subgroupChatId: created.chatId,
@@ -571,7 +590,13 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         stage,
         progress,
         participants: created.participants,
-        checkpointPersisted
+        checkpointPersisted,
+        ...(provisioningRetryScheduled !== undefined
+          ? { provisioningRetryScheduled }
+          : {}),
+        ...(provisioningRetryScheduleError
+          ? { provisioningRetryScheduleError }
+          : {})
       };
       if (!checkpointPersisted) {
         context.logger.error(

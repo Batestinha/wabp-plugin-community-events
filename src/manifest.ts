@@ -8,7 +8,8 @@ export const EVENTS_DATABASE = 'events';
 export const EVENTS_JOBS = {
   close: 'event.close',
   cleanup: 'event.cleanup',
-  weatherForecast: 'event.weatherForecast'
+  weatherForecast: 'event.weatherForecast',
+  provisioningRetry: 'event.provisioningRetry'
 } as const;
 
 export const EVENTS_PERMISSIONS = {
@@ -49,7 +50,8 @@ export const eventsManifest: PluginManifest = {
   backgroundJobs: [
     EVENTS_JOBS.close,
     EVENTS_JOBS.cleanup,
-    EVENTS_JOBS.weatherForecast
+    EVENTS_JOBS.weatherForecast,
+    EVENTS_JOBS.provisioningRetry
   ],
   cancellation: {
     workflows: [

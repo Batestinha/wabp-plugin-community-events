@@ -37,6 +37,44 @@ export const eventsManifest: PluginManifest = {
     '/event status',
     '/event cancel'
   ],
+  help: {
+    featureId: 'events',
+    titleKey: 'official.community-events.help.feature.title',
+    summaryKey: 'official.community-events.help.feature.summary',
+    order: 20,
+    aliases: ['event', 'calendar', 'activities'],
+    topics: [
+      {
+        topicId: 'create-events',
+        titleKey: 'official.community-events.help.create.title',
+        summaryKey: 'official.community-events.help.create.summary',
+        order: 10,
+        commands: ['/event'],
+        instructionKeys: ['official.community-events.help.create.instruction'],
+        exampleKeys: ['official.community-events.help.create.example'],
+        keywords: ['create', 'poll', 'activity', 'calendar']
+      },
+      {
+        topicId: 'inspect-events',
+        titleKey: 'official.community-events.help.inspect.title',
+        summaryKey: 'official.community-events.help.inspect.summary',
+        order: 20,
+        commands: ['/event status'],
+        exampleKeys: ['official.community-events.help.status.example'],
+        keywords: ['status', 'configuration']
+      },
+      {
+        topicId: 'cancel-events',
+        titleKey: 'official.community-events.help.cancel.title',
+        summaryKey: 'official.community-events.help.cancel.summary',
+        order: 30,
+        commands: ['/event cancel'],
+        instructionKeys: ['official.community-events.help.cancel.instruction'],
+        exampleKeys: ['official.community-events.help.cancel.example'],
+        keywords: ['cancel', 'remove', 'stop']
+      }
+    ]
+  },
   eventSubscriptions: ['poll.vote', 'plugin.job', 'group.dismantled'],
   requiredPermissions: [
     EVENTS_PERMISSIONS.configure,

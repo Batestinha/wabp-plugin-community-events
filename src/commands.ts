@@ -186,7 +186,10 @@ export function registerEventsCommands(context: PluginCommandContext): void {
     mutation: 'none',
     auditAction: 'events.status',
     permission: EVENTS_PERMISSIONS.configure,
-    usage: '/event status'
+    usage: '/event status',
+    topicId: 'inspect-events',
+    descriptionKey: 'official.community-events.help.status',
+    exampleKey: 'official.community-events.help.status.example'
   }), async (ctx) => {
     const config = parseEventsConfig(await runtime.configFor(requireScopeId(ctx), ctx.message.senderWid));
     return {
@@ -202,6 +205,9 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   router.register('event', 'cancel', eventCommand({
     auditAction: 'events.cancel',
     usage: '/event cancel [eventId|event title]',
+    topicId: 'cancel-events',
+    descriptionKey: 'official.community-events.help.cancel',
+    exampleKey: 'official.community-events.help.cancel.example',
     requiresCurrentManagedGroupMembership: false,
     privateManagedTargetArgPosition: false,
     assistant: {
@@ -215,7 +221,10 @@ export function registerEventsCommands(context: PluginCommandContext): void {
 
   router.register('event', '*', eventCommand({
     auditAction: 'events.create',
-    usage: '/event [groupName|--chat groupName]'
+    usage: '/event [groupName|--chat groupName]',
+    topicId: 'create-events',
+    descriptionKey: 'official.community-events.help.command',
+    exampleKey: 'official.community-events.help.create.example'
   }), async (ctx) => startEventFlow(context, ctx));
 }
 
@@ -2201,6 +2210,9 @@ function eventCommand(input: {
   auditAction: string;
   permission?: string | undefined;
   usage: string;
+  topicId: 'create-events' | 'inspect-events' | 'cancel-events';
+  descriptionKey: string;
+  exampleKey: string;
   requiresCurrentManagedGroupMembership?: boolean | undefined;
   privateManagedTargetArgPosition?: number | false | undefined;
   assistant?: CommandMetadata['assistant'] | undefined;
@@ -2241,8 +2253,12 @@ function eventCommand(input: {
     },
     help: {
       familyKey: 'official.community-events.help.family',
-      descriptionKey: 'official.community-events.help.command',
-      usage: input.usage
+      featureId: 'events',
+      topicId: input.topicId,
+      descriptionKey: input.descriptionKey,
+      usage: input.usage,
+      exampleKeys: [input.exampleKey],
+      keywords: ['event', input.topicId]
     }
   };
 }

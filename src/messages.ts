@@ -112,5 +112,19 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.weather.none': 'No configured weather metrics were returned.',
   'official.community-events.help.family': 'Events',
   'official.community-events.help.command': 'Create a guided event poll and manage its lifecycle.',
-  'official.community-events.help.status': 'Show event plugin status for this scope.'
+  'official.community-events.help.status': 'Show event plugin status for this scope.',
+  'official.community-events.help.cancel': 'Select and cancel a published event after confirmation.',
+  'official.community-events.help.feature.title': 'Community events',
+  'official.community-events.help.feature.summary': 'Create guided event polls, inspect event settings, or cancel an event.',
+  'official.community-events.help.create.title': 'Create events',
+  'official.community-events.help.create.summary': 'Start a guided event flow for the selected group or community.',
+  'official.community-events.help.create.instruction': 'Choose an event profile and answer its questions; publication requires confirmation.',
+  'official.community-events.help.create.example': '/event --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"',
+  'official.community-events.help.inspect.title': 'Event status',
+  'official.community-events.help.inspect.summary': 'Inspect whether events are enabled and which profiles and timezone are configured.',
+  'official.community-events.help.status.example': '/event status',
+  'official.community-events.help.cancel.title': 'Cancel events',
+  'official.community-events.help.cancel.summary': 'Select an active event lifecycle and confirm its cancellation.',
+  'official.community-events.help.cancel.instruction': 'The event creator or an event manager may cancel an active event; cancellation requires confirmation.',
+  'official.community-events.help.cancel.example': '/event cancel Bouldering in Sintra'
 };

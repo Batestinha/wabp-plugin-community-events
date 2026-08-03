@@ -19,6 +19,8 @@ import {
 } from './datetime';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
+const EVENT_CONFIRM_VALUE = 'yes';
+const EVENT_PAST_COMPLETION_CONFIRM_VALUE = 'yes-complete';
 
 export interface EventFlowAnswers {
   profileId: string;
@@ -43,7 +45,9 @@ export function createEventFlowDefinition(input: {
   askPrefilledQuestions?: boolean | undefined;
   flowTypePrefix?: string | undefined;
   confirmMessageKey?: string | undefined;
+  pastCompletionConfirmMessageKey?: string | undefined;
   completeMessageKey?: string | false | undefined;
+  allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
 }): FlowDefinition {
   const timezone = input.timezone ?? 'UTC';
@@ -51,7 +55,8 @@ export function createEventFlowDefinition(input: {
   const initialData = input.initialData ?? eventInitialFlowData(input.profiles, input.prefill, {
     timezone,
     locale,
-    now: input.now?.()
+    now: input.now?.(),
+    allowPast: input.allowPastStartsAt
   });
   const initialProfileId = typeof initialData[EVENT_PROFILE_STEP_ID] === 'string'
     ? String(initialData[EVENT_PROFILE_STEP_ID])
@@ -110,6 +115,7 @@ export function createEventFlowDefinition(input: {
                 timezone,
                 locale,
                 now: input.now,
+                allowPast: input.allowPastStartsAt,
                 input: resolutionInput
               })
             }
@@ -120,6 +126,7 @@ export function createEventFlowDefinition(input: {
                   timezone,
                   locale,
                   now: input.now,
+                  allowPast: input.allowPastStartsAt,
                   profile,
                   input: resolutionInput
                 })
@@ -131,11 +138,27 @@ export function createEventFlowDefinition(input: {
       id: confirmStepId(profile),
       kind: 'choice',
       prompt: input.t(input.confirmMessageKey ?? 'official.community-events.flow.confirm', { summary: profile.label }),
-      promptForState: (state) => input.t(input.confirmMessageKey ?? 'official.community-events.flow.confirm', {
-        summary: eventConfirmationSummary(state, profile, timezone, locale, input.t)
-      }),
+      promptForState: (state) => {
+        const messageKey = input.allowPastStartsAt &&
+          eventFlowStartsInPast(state, profile, timezone, locale, input.now?.() ?? new Date())
+          ? input.pastCompletionConfirmMessageKey ?? input.confirmMessageKey ?? 'official.community-events.flow.confirm'
+          : input.confirmMessageKey ?? 'official.community-events.flow.confirm';
+        return input.t(messageKey, {
+          summary: eventConfirmationSummary(state, profile, timezone, locale, input.t)
+        });
+      },
+      optionsForState: (state) => [
+        {
+          label: input.t('official.community-events.flow.yes'),
+          value: input.allowPastStartsAt &&
+            eventFlowStartsInPast(state, profile, timezone, locale, input.now?.() ?? new Date())
+            ? EVENT_PAST_COMPLETION_CONFIRM_VALUE
+            : EVENT_CONFIRM_VALUE
+        },
+        { label: input.t('official.community-events.flow.no'), value: 'no' }
+      ],
       options: [
-        { label: input.t('official.community-events.flow.yes'), value: 'yes' },
+        { label: input.t('official.community-events.flow.yes'), value: EVENT_CONFIRM_VALUE },
         { label: input.t('official.community-events.flow.no'), value: 'no' }
       ],
       minSelections: 1,
@@ -167,6 +190,7 @@ export function eventInitialFlowData(
     timezone: string;
     locale: string;
     now?: Date | undefined;
+    allowPast?: boolean | undefined;
   } | undefined
 ): Record<string, unknown> {
   const profileId = prefill?.profileId ?? (profiles.length === 1 ? profiles[0]?.id : undefined);
@@ -195,7 +219,16 @@ export function eventConfirmPurpose(flowType: string, profile: EventProfile): st
 
 export function eventFlowConfirmed(snapshot: FlowSessionSnapshot, profile: EventProfile): boolean {
   const value = snapshot.state.data[confirmStepId(profile)];
-  return Array.isArray(value) ? value.includes('yes') : value === 'yes';
+  return Array.isArray(value)
+    ? value.includes(EVENT_CONFIRM_VALUE) || value.includes(EVENT_PAST_COMPLETION_CONFIRM_VALUE)
+    : value === EVENT_CONFIRM_VALUE || value === EVENT_PAST_COMPLETION_CONFIRM_VALUE;
+}
+
+export function eventFlowPastCompletionConfirmed(snapshot: FlowSessionSnapshot, profile: EventProfile): boolean {
+  const value = snapshot.state.data[confirmStepId(profile)];
+  return Array.isArray(value)
+    ? value.includes(EVENT_PAST_COMPLETION_CONFIRM_VALUE)
+    : value === EVENT_PAST_COMPLETION_CONFIRM_VALUE;
 }
 
 export function eventFlowSelectedProfileId(snapshot: FlowSessionSnapshot): string | undefined {
@@ -396,6 +429,7 @@ function resolveDateQuestionInput(input: {
   timezone: string;
   locale: string;
   now?: (() => Date) | undefined;
+  allowPast?: boolean | undefined;
   input: {
     definition: FlowDefinition;
     state: FlowState;
@@ -406,7 +440,8 @@ function resolveDateQuestionInput(input: {
   const options = {
     timezone: input.timezone,
     locale: input.locale,
-    now: input.now?.()
+    now: input.now?.(),
+    allowPast: input.allowPast
   };
   const parsed = parseEventDateInput(input.input.input, options);
   if (parsed.status === 'ok') {
@@ -426,6 +461,7 @@ function resolveTimeQuestionInput(input: {
   timezone: string;
   locale: string;
   now?: (() => Date) | undefined;
+  allowPast?: boolean | undefined;
   profile: EventProfile;
   input: {
     definition: FlowDefinition;
@@ -443,7 +479,8 @@ function resolveTimeQuestionInput(input: {
       const combined = combineEventDateAndTime(date, value, {
         timezone: input.timezone,
         locale: input.locale,
-        now: input.now?.()
+        now: input.now?.(),
+        allowPast: input.allowPast
       });
       if (combined.status === 'invalid') {
         return { status: 'error', reply: dateTimeErrorMessage(input.t, combined.reason) };
@@ -463,7 +500,7 @@ function resolveTimeQuestionInput(input: {
 function initialQuestionValue(
   question: EventQuestion,
   value: string,
-  options: { timezone: string; locale: string; now?: Date | undefined } | undefined
+  options: { timezone: string; locale: string; now?: Date | undefined; allowPast?: boolean | undefined } | undefined
 ): unknown {
   if (question.type === EVENT_DATE_QUESTION_TYPE && options) {
     const result = parseEventDateInput(value, options);
@@ -537,13 +574,24 @@ function eventTimePartsFromRaw(raw: unknown): ({ hour: number; minute: number; r
 function materializeEventStart(
   date: { year: number; month: number; day: number; raw?: string | undefined },
   time: { hour: number; minute: number; raw?: string | undefined },
-  options: { timezone: string; locale: string; now?: Date | undefined }
+  options: { timezone: string; locale: string; now?: Date | undefined; allowPast?: boolean | undefined }
 ): Date | undefined {
   if (!options.now) {
     return eventDateAndTimeToUtc(date, time, options.timezone);
   }
   const parsed = combineEventDateAndTime(date, time, options);
   return parsed.status === 'ok' ? parsed.date : undefined;
+}
+
+function eventFlowStartsInPast(
+  state: FlowState,
+  profile: EventProfile,
+  timezone: string,
+  locale: string,
+  now: Date
+): boolean {
+  const answers = eventFlowAnswersFromData(state.data, profile, timezone, locale);
+  return Boolean(answers && answers.startsAt.getTime() <= now.getTime());
 }
 
 function initialChoiceValue(question: EventQuestion, value: string): unknown {

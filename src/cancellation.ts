@@ -103,14 +103,18 @@ export async function cancelEventLifecycle(input: {
     })
     : undefined;
   const cancelledAt = new Date().toISOString();
-  markEventCancelled(db, {
+  const cancelled = markEventCancelled(db, {
     eventId: event.id,
+    expectedUpdatedAt: event.updatedAt,
     cancelledAt,
     cancelledByWid: actor.wid,
     cancelledByLabel: actor.label,
     calendarStatus: calendarDisposition,
     ...(input.reason ? { reason: input.reason } : {})
   });
+  if (!cancelled) {
+    return { status: 'not_cancellable', reason: 'event lifecycle changed during cancellation' };
+  }
   await setCleanupFailureStatus(runtime, event.scopeId, null);
   appendEventLog(db, {
     eventId: event.id,

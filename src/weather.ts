@@ -236,6 +236,26 @@ export async function handleEventWeatherForecastJob(
     if (result.kind !== 'forecast') {
       throw new Error('weather query returned current conditions for a forecast request');
     }
+    const currentEvent = getEvent(db, event.id);
+    const postQuerySkipReason = currentEvent
+      ? weatherRuntimeSkipReason(currentEvent, schedule.scheduledAt, new Date())
+      : 'event_missing_after_query';
+    if (postQuerySkipReason) {
+      await markWeatherSkipped(
+        context,
+        db,
+        currentEvent ?? event,
+        profile,
+        schedule.deliveryKind,
+        postQuerySkipReason,
+        schedule.scheduledAt
+      );
+      return [audit('events.weather_forecast.skipped', {
+        eventId,
+        deliveryKind: schedule.deliveryKind,
+        reason: postQuerySkipReason
+      })];
+    }
     const report = result.report;
     const forecastDay = selectForecastDay(report, event);
     if (!forecastDay) {

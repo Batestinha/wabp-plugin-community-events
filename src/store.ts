@@ -374,9 +374,10 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   calendarDurationMinutes: number;
   calendarLocation?: string | undefined;
   calendarDescription?: string | undefined;
+  expectedUpdatedAt: string;
   updatedAt: string;
-}): void {
-  db.run(
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET poll_question = ?,
             poll_options_json = ?,
@@ -398,7 +399,8 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             calendar_location = ?,
             calendar_description = ?,
             updated_at = ?
-      WHERE id = ?`,
+      WHERE id = ?
+        AND updated_at = ?`,
     input.pollQuestion,
     JSON.stringify(input.pollOptions),
     JSON.stringify(input.responseClasses),
@@ -419,8 +421,10 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
     input.calendarLocation ?? null,
     input.calendarDescription ?? null,
     input.updatedAt,
-    input.eventId
+    input.eventId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
 export function updateEventSubgroupTitle(db: PluginDatabase, input: {
@@ -498,19 +502,24 @@ export function getActiveEventBySubgroup(db: PluginDatabase, subgroupChatId: str
   return row ? eventFromRow(row) : undefined;
 }
 
-export function getEventBySubgroupChatId(db: PluginDatabase, subgroupChatId: string): StoredEventRecord | undefined {
-  const row = db.get<EventRow>(
+export function listEventsBySubgroupChatId(
+  db: PluginDatabase,
+  scopeId: string,
+  subgroupChatId: string
+): StoredEventRecord[] {
+  const rows = db.all<EventRow>(
     `SELECT * FROM event_records
-      WHERE subgroup_chat_id = ?
+      WHERE scope_id = ?
+        AND subgroup_chat_id = ?
         AND (
           (event_status = 'active' AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
           OR (event_status = 'completed' AND group_lifecycle_status = 'cleaned')
         )
-      ORDER BY starts_at ASC, id ASC
-      LIMIT 1`,
-    subgroupChatId,
+      ORDER BY starts_at ASC, id ASC`,
+    scopeId,
+    subgroupChatId
   );
-  return row ? eventFromRow(row) : undefined;
+  return rows.map(eventFromRow);
 }
 
 export function listCancellableEvents(db: PluginDatabase, scopeId: string): StoredEventRecord[] {
@@ -843,30 +852,40 @@ export function markEventClosed(db: PluginDatabase, input: {
   );
 }
 
-export function markEventCleaned(db: PluginDatabase, eventId: string, cleanedAt: string): void {
-  db.run(
+export function markEventCleaned(db: PluginDatabase, input: {
+  eventId: string;
+  expectedUpdatedAt: string;
+  cleanedAt: string;
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET event_status = 'completed',
             group_lifecycle_status = 'cleaned',
             cleaned_at = ?,
             error = NULL,
             updated_at = ?
-      WHERE id = ?`,
-    cleanedAt,
-    cleanedAt,
-    eventId
+      WHERE id = ?
+        AND event_status = 'active'
+        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        AND updated_at = ?`,
+    input.cleanedAt,
+    input.cleanedAt,
+    input.eventId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
 export function markEventCancelled(db: PluginDatabase, input: {
   eventId: string;
+  expectedUpdatedAt: string;
   cancelledAt: string;
   cancelledByWid: string;
   cancelledByLabel: string;
   calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
   reason?: string | undefined;
-}): void {
-  db.run(
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET event_status = 'cancelled',
             calendar_status = ?,
@@ -876,15 +895,20 @@ export function markEventCancelled(db: PluginDatabase, input: {
             cancel_reason = ?,
             error = NULL,
             updated_at = ?
-      WHERE id = ?`,
+      WHERE id = ?
+        AND event_status = 'active'
+        AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
+        AND updated_at = ?`,
     input.calendarStatus ?? 'cancelled',
     input.cancelledAt,
     input.cancelledByWid,
     input.cancelledByLabel,
     input.reason ?? null,
     input.cancelledAt,
-    input.eventId
+    input.eventId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
 export function updateEventCalendarStatus(db: PluginDatabase, input: {
@@ -1132,13 +1156,25 @@ export function markEventAnnouncementMessageDeleteFailed(
   );
 }
 
-export function markEventCleanupFailed(db: PluginDatabase, eventId: string, reason: string, failedAt: string): void {
-  db.run(
-    `UPDATE event_records SET group_lifecycle_status = 'cleanup_failed', error = ?, updated_at = ? WHERE id = ?`,
-    reason,
-    failedAt,
-    eventId
+export function markEventCleanupFailed(db: PluginDatabase, input: {
+  eventId: string;
+  expectedUpdatedAt: string;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET group_lifecycle_status = 'cleanup_failed', error = ?, updated_at = ?
+      WHERE id = ?
+        AND event_status = 'active'
+        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        AND updated_at = ?`,
+    input.reason,
+    input.failedAt,
+    input.eventId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
 export function markEventFailed(db: PluginDatabase, eventId: string, reason: string, failedAt: string): void {

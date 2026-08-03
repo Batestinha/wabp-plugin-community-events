@@ -317,7 +317,13 @@ async function handleGroupDismantled(
   }
 
   const cleanedAt = event.receivedAt.toISOString();
-  markEventCleaned(db, record.id, cleanedAt);
+  if (!markEventCleaned(db, {
+    eventId: record.id,
+    expectedUpdatedAt: record.updatedAt,
+    cleanedAt
+  })) {
+    return;
+  }
   await setCleanupFailureStatus(context, record.scopeId, null);
   appendEventLog(db, {
     eventId: record.id,
@@ -1259,7 +1265,17 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
       }
     }
     const cleanedAt = new Date().toISOString();
-    markEventCleaned(db, record.id, cleanedAt);
+    if (!markEventCleaned(db, {
+      eventId: record.id,
+      expectedUpdatedAt: record.updatedAt,
+      cleanedAt
+    })) {
+      return [audit('events.job.skipped', {
+        jobName: job.jobName,
+        eventId,
+        reason: 'event lifecycle changed while cleanup was running'
+      })];
+    }
     await setCleanupFailureStatus(context, record.scopeId, null);
     appendEventLog(db, {
       eventId: record.id,
@@ -1292,7 +1308,18 @@ async function cleanupFailed(
   metadata: Record<string, unknown> = {}
 ): Promise<PluginAction[]> {
   const failedAt = new Date().toISOString();
-  markEventCleanupFailed(db, record.id, reason, failedAt);
+  if (!markEventCleanupFailed(db, {
+    eventId: record.id,
+    expectedUpdatedAt: record.updatedAt,
+    reason,
+    failedAt
+  })) {
+    return [audit('events.job.skipped', {
+      jobName: EVENTS_JOBS.cleanup,
+      eventId: record.id,
+      reason: 'event lifecycle changed while cleanup was running'
+    })];
+  }
   const retryAction = cleanupRetryAction(record, config, attempt);
   await setCleanupFailureStatus(context, record.scopeId, {
     message: record.subgroupChatId
@@ -1354,7 +1381,7 @@ function cleanupRetryAction(
     ...(record.groupWid ? { groupWid: record.groupWid } : {}),
     runAt: new Date(Date.now() + delayMinutes * 60_000),
     payload: { eventId: record.id, attempt: nextAttempt },
-    dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:retry:${nextAttempt}`
+    dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:retry:${record.cleanupAt}:${nextAttempt}`
   };
 }
 

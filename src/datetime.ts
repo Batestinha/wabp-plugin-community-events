@@ -30,6 +30,7 @@ export interface EventDateTimeParseOptions {
   timezone: string;
   locale: string;
   now?: Date | undefined;
+  allowPast?: boolean | undefined;
 }
 
 export type EventDateTimeParseResult =
@@ -588,7 +589,7 @@ function validateDateTimeResult(
     if (!dayEnd || !dayStart) {
       return { status: 'invalid', reason: 'unrecognized' };
     }
-    if (dayEnd < now) {
+    if (!options.allowPast && dayEnd < now) {
       return { status: 'invalid', reason: 'past' };
     }
     if (dayStart > maxFutureDate(now)) {
@@ -599,7 +600,7 @@ function validateDateTimeResult(
   if (!validDate(result.date)) {
     return { status: 'invalid', reason: 'unrecognized' };
   }
-  if (result.date < now) {
+  if (!options.allowPast && result.date < now) {
     return { status: 'invalid', reason: 'past' };
   }
   if (result.date > maxFutureDate(now)) {

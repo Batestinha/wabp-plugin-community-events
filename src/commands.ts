@@ -21,6 +21,7 @@ import {
   eventConfirmPurpose,
   eventFlowAnswers,
   eventFlowConfirmed,
+  eventFlowPastCompletionConfirmed,
   eventInitialFlowData,
   eventFlowSelectedProfileId,
   renderEventTemplate,
@@ -52,7 +53,7 @@ import {
   completeUnplannedEventProvisioning,
   eventsDatabase,
   getEvent,
-  getEventBySubgroupChatId,
+  listEventsBySubgroupChatId,
   insertEvent,
   listCancellableEvents,
   listCalendarEvents,
@@ -115,6 +116,7 @@ interface EventUpdateDraft {
   groupWid?: string | undefined;
   chatId: string;
   eventId: string;
+  eventUpdatedAt: string;
   requestedTitle: string;
   sourcePluginId: string;
   actorWid: string;
@@ -159,6 +161,7 @@ interface PendingUpdateEventLocationSelection {
   draft: EventUpdateDraft;
   answers: PendingEventFlowAnswers;
   eventId: string;
+  pastCompletionConfirmed: boolean;
   place?: string | undefined;
   query?: string | undefined;
   provider: string;
@@ -176,6 +179,7 @@ const EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-location-select
 const EVENT_LOCATION_FREE_TEXT_OPTION_ID = 'location-query';
 const EVENT_LOCATION_MAX_CANDIDATES = 5;
 const EVENT_LOCATION_SELECTION_TTL_SECONDS = 30 * 60;
+const EVENT_UPDATE_CONFLICT_ERROR = 'event_update_conflict';
 
 export function registerEventsCommands(context: PluginCommandContext): void {
   const runtime = requireOfficialCommandRuntime(context);
@@ -434,10 +438,14 @@ export async function handleEventGroupTitleChangeIntent(
     return undefined;
   }
   const db = eventsDatabase(runtime.databases);
-  const event = getEventBySubgroupChatId(db, ctx.groupWid);
-  if (!event || event.scopeId !== scopeId) {
+  const matchingEvents = listEventsBySubgroupChatId(db, scopeId, ctx.groupWid);
+  if (matchingEvents.length === 0) {
     return undefined;
   }
+  if (matchingEvents.length > 1) {
+    return { handled: true, text: ctx.t('official.community-events.update.ambiguous') };
+  }
+  const event = matchingEvents[0]!;
 
   const actorAliases = eventActorWids(ctx);
   if (!await eventUpdateAllowed(context, { event, actorWids: actorAliases })) {
@@ -475,7 +483,8 @@ async function startEventUpdateFlow(
   const initialData = eventInitialFlowData([profile], prefill, {
     timezone,
     locale: ctx.locale,
-    now: startedAt
+    now: startedAt,
+    allowPast: true
   });
   const definition = createEventFlowDefinition({
     t: ctx.t,
@@ -487,6 +496,11 @@ async function startEventUpdateFlow(
     askPrefilledQuestions: true,
     flowTypePrefix: 'official.community-events.update',
     confirmMessageKey: 'official.community-events.update.confirm',
+    pastCompletionConfirmMessageKey: input.event.eventStatus === 'active'
+      ? 'official.community-events.update.confirmPastCompletion'
+      : 'official.community-events.update.confirm',
+    allowPastStartsAt: true,
+    now: () => startedAt,
     completeMessageKey: false
   });
   registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, ctx.t);
@@ -536,6 +550,7 @@ async function startEventUpdateFlow(
     ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
     chatId: conversationChatId,
     eventId: input.event.id,
+    eventUpdatedAt: input.event.updatedAt,
     requestedTitle: input.requestedTitle,
     sourcePluginId: input.sourcePluginId,
     actorWid: ctx.message.senderWid,
@@ -590,7 +605,7 @@ function registerEventUpdateFlowCompletionHandler(
 
     const db = eventsDatabase(runtime.databases);
     const event = getEvent(db, draft.eventId);
-    if (!event) {
+    if (!event || event.updatedAt !== draft.eventUpdatedAt) {
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
@@ -604,6 +619,15 @@ function registerEventUpdateFlowCompletionHandler(
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
+    const startsInPast = answers.startsAt.getTime() <= Date.now();
+    const pastCompletionConfirmed = eventFlowPastCompletionConfirmed(snapshot, draft.profile);
+    if (startsInPast && !pastCompletionConfirmed) {
+      await activeTransport.sendText(
+        responseChatId,
+        t('official.community-events.update.pastCompletionConfirmationRequired')
+      );
+      return true;
+    }
 
     await beginEventUpdateLocationSelection({
       context,
@@ -613,6 +637,7 @@ function registerEventUpdateFlowCompletionHandler(
       draft,
       event,
       answers,
+      pastCompletionConfirmed,
       t
     });
     return true;
@@ -627,6 +652,7 @@ async function beginEventUpdateLocationSelection(input: {
   draft: EventUpdateDraft;
   event: StoredEventRecord;
   answers: EventFlowAnswers;
+  pastCompletionConfirmed: boolean;
   t: CommandContext['t'];
 }): Promise<void> {
   const fixedLocation = fixedEventLocation(input.draft.profile, input.draft.timezone);
@@ -688,6 +714,7 @@ async function beginEventUpdateLocationSelection(input: {
       draft: input.draft,
       answers: pendingEventFlowAnswers(input.answers),
       eventId: input.event.id,
+      pastCompletionConfirmed: input.pastCompletionConfirmed,
       place,
       query: place,
       provider: output.provider,
@@ -711,11 +738,12 @@ async function completeEventUpdate(input: {
   eventId: string;
   answers: EventFlowAnswers;
   eventLocation: StoredEventLocation;
+  pastCompletionConfirmed: boolean;
   t: CommandContext['t'];
 }): Promise<void> {
   const db = eventsDatabase(input.runtime.databases);
   const event = getEvent(db, input.eventId);
-  if (!event) {
+  if (!event || event.updatedAt !== input.draft.eventUpdatedAt) {
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.update.invalid')
@@ -738,12 +766,21 @@ async function completeEventUpdate(input: {
       creatorDisplayName: event.actorLabel || event.actorWid,
       eventLocation: input.eventLocation
     });
+    const now = new Date();
+    const startsInPast = materialized.startsAt.getTime() <= now.getTime();
+    if (startsInPast && !input.pastCompletionConfirmed) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.update.pastCompletionConfirmationRequired')
+      );
+      return;
+    }
     const config = draftEventsConfig({
       timezone: input.draft.timezone,
       calendars: input.draft.calendars,
       profiles: input.draft.profiles
     });
-    await updateEventLifecycle({
+    const outcome = await updateEventLifecycle({
       context: input.context,
       runtime: input.runtime,
       activeTransport: input.activeTransport,
@@ -755,11 +792,18 @@ async function completeEventUpdate(input: {
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
       requestedTitle: input.draft.requestedTitle,
+      pastCompletionConfirmed: input.pastCompletionConfirmed,
+      now,
       sourcePluginId: input.draft.sourcePluginId
     });
+    const doneMessageKey = outcome.repairPending
+      ? 'official.community-events.update.donePastCompletionRepairPending'
+      : outcome.completionQueued
+        ? 'official.community-events.update.donePastCompletion'
+        : 'official.community-events.update.done';
     await input.activeTransport.sendText(
       input.responseChatId,
-      input.t('official.community-events.update.done', {
+      input.t(doneMessageKey, {
         title: materialized.groupTitle,
         eventId: event.id
       })
@@ -774,10 +818,9 @@ async function completeEventUpdate(input: {
       profileId: input.draft.profile.id,
       metadata: { reason, sourcePluginId: input.draft.sourcePluginId }
     });
-    await input.activeTransport.sendText(
-      input.responseChatId,
-      input.t('official.community-events.update.failed', { reason })
-    );
+    await input.activeTransport.sendText(input.responseChatId, reason === EVENT_UPDATE_CONFLICT_ERROR
+      ? input.t('official.community-events.update.invalid')
+      : input.t('official.community-events.update.failed', { reason }));
   }
 }
 
@@ -793,11 +836,22 @@ async function updateEventLifecycle(input: {
   actorWid: string;
   actorLabel: string;
   requestedTitle: string;
+  pastCompletionConfirmed: boolean;
+  now: Date;
   sourcePluginId?: string | undefined;
-}): Promise<void> {
-  const now = new Date();
-  const updatedAt = now.toISOString();
-  updateEventStructuredData(input.db, {
+}): Promise<{ completionQueued: boolean; repairPending: boolean }> {
+  const updatedAt = input.now.toISOString();
+  const completionRequested = input.event.eventStatus === 'active' &&
+    input.pastCompletionConfirmed &&
+    input.materialized.startsAt.getTime() <= input.now.getTime();
+  const cleanupAt = completionRequested ? input.now : input.materialized.cleanupAt;
+  if (input.event.subgroupChatId) {
+    const capabilities = await input.context.botCapabilitiesFor?.(input.event.subgroupChatId);
+    if (capabilities && (!capabilities.botIsAdmin || !capabilities.canChangeInfo || !capabilities.canSetSubject)) {
+      throw new Error('Bot cannot change the event subgroup subject.');
+    }
+  }
+  const updated = updateEventStructuredData(input.db, {
     eventId: input.event.id,
     pollQuestion: input.materialized.pollQuestion,
     pollOptions: input.materialized.pollOptions,
@@ -812,50 +866,82 @@ async function updateEventLifecycle(input: {
     ...(input.materialized.place ? { place: input.materialized.place } : {}),
     ...(input.materialized.style ? { style: input.materialized.style } : {}),
     closeAt: input.materialized.closeAt.toISOString(),
-    cleanupAt: input.materialized.cleanupAt.toISOString(),
+    cleanupAt: cleanupAt.toISOString(),
     groupTitle: input.materialized.groupTitle,
     calendarDurationMinutes: input.materialized.calendarDurationMinutes,
     ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
     ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
+    expectedUpdatedAt: input.event.updatedAt,
     updatedAt
   });
-
-  if (input.event.subgroupChatId) {
-    const capabilities = await input.context.botCapabilitiesFor?.(input.event.subgroupChatId);
-    if (capabilities && (!capabilities.botIsAdmin || !capabilities.canChangeInfo || !capabilities.canSetSubject)) {
-      throw new Error('Bot cannot change the event subgroup subject.');
-    }
-    await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
+  if (!updated) {
+    throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
   }
 
   const calendar = calendarResourceForProfile(input.config, input.profile);
   const calendarEvents = listCalendarEvents(input.db, input.event.scopeId);
-  const publication = await writePublishAndRecordScopeCalendar({
-    appConfig: input.runtime.config,
-    db: input.db,
-    config: input.config,
-    scopeId: input.event.scopeId,
-    calendarId: input.profile.calendar.calendarId,
-    events: calendarEvents
-  });
+  let publication: Awaited<ReturnType<typeof writePublishAndRecordScopeCalendar>> = undefined;
+  const repairFailures: string[] = [];
+  if (input.event.subgroupChatId) {
+    if (completionRequested) {
+      try {
+        await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
+      } catch (error) {
+        repairFailures.push(error instanceof Error ? error.message : String(error));
+      }
+    } else {
+      await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
+    }
+  }
+  if (completionRequested) {
+    try {
+      publication = await writePublishAndRecordScopeCalendar({
+        appConfig: input.runtime.config,
+        db: input.db,
+        config: input.config,
+        scopeId: input.event.scopeId,
+        calendarId: input.profile.calendar.calendarId,
+        events: calendarEvents
+      });
+      if (publication && !publication.ok) {
+        repairFailures.push(publication.error || 'calendar_publication_failed');
+      }
+    } catch (error) {
+      repairFailures.push(error instanceof Error ? error.message : String(error));
+    }
+  } else {
+    publication = await writePublishAndRecordScopeCalendar({
+      appConfig: input.runtime.config,
+      db: input.db,
+      config: input.config,
+      scopeId: input.event.scopeId,
+      calendarId: input.profile.calendar.calendarId,
+      events: calendarEvents
+    });
+  }
 
+  let completionQueued = false;
   if (
     input.event.subgroupChatId &&
     input.event.eventStatus === 'active' &&
     (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed') &&
-    input.materialized.cleanupAt.getTime() > now.getTime()
+    (completionRequested || cleanupAt.getTime() > input.now.getTime())
   ) {
     await input.runtime.enqueuePluginJob({
       jobName: EVENTS_JOBS.cleanup,
       scopeId: input.event.scopeId,
       ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
       ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
-      runAt: input.materialized.cleanupAt,
+      ...(!completionRequested ? { runAt: cleanupAt } : {}),
       payload: { eventId: input.event.id, attempt: 0 },
-      dedupeKey: `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${input.materialized.cleanupAt.toISOString()}`
+      dedupeKey: completionRequested
+        ? `${EVENTS_JOBS.cleanup}:${input.event.id}:past-update:${updatedAt}`
+        : `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${cleanupAt.toISOString()}`
     });
+    completionQueued = completionRequested;
   }
   if (
+    !completionRequested &&
     input.event.subgroupChatId &&
     input.event.eventStatus === 'active' &&
     (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed')
@@ -870,7 +956,7 @@ async function updateEventLifecycle(input: {
         localDate: input.materialized.localDate,
         ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
         closeAt: input.materialized.closeAt.toISOString(),
-        cleanupAt: input.materialized.cleanupAt.toISOString(),
+        cleanupAt: cleanupAt.toISOString(),
         groupTitle: input.materialized.groupTitle,
         ...(input.event.subgroupTitle || input.materialized.groupTitle ? { subgroupTitle: input.materialized.groupTitle } : {})
       },
@@ -894,7 +980,10 @@ async function updateEventLifecycle(input: {
       startsAt: input.materialized.startsAt.toISOString(),
       localDate: input.materialized.localDate,
       localTime: input.materialized.localTime,
+      completionRequested,
+      cleanupAt: cleanupAt.toISOString(),
       calendarId: input.profile.calendar.calendarId,
+      repairFailures,
       publication
     }
   });
@@ -915,9 +1004,13 @@ async function updateEventLifecycle(input: {
       startsAt: input.materialized.startsAt.toISOString(),
       localDate: input.materialized.localDate,
       localTime: input.materialized.localTime,
+      completionRequested,
+      cleanupAt: cleanupAt.toISOString(),
+      repairFailures,
       ...(publication ? { publication } : {})
     }
   });
+  return { completionQueued, repairPending: repairFailures.length > 0 };
 }
 
 async function eventUpdateAllowed(
@@ -1108,12 +1201,12 @@ async function resolveEventCancelCandidates(
   | { status: 'permission_denied' }
 > {
   const allCandidates = listCancellableEvents(input.db, input.scopeId);
-  const subgroupCandidate = input.query
-    ? undefined
-    : getEventBySubgroupChatId(input.db, input.chatId);
-  const directSubgroupCandidate = subgroupCandidate?.scopeId === input.scopeId ? subgroupCandidate : undefined;
-  const matched = directSubgroupCandidate
-    ? [directSubgroupCandidate]
+  const subgroupCandidates = input.query
+    ? []
+    : listEventsBySubgroupChatId(input.db, input.scopeId, input.chatId)
+      .filter((candidate) => candidate.eventStatus === 'active');
+  const matched = subgroupCandidates.length > 0
+    ? subgroupCandidates
     : input.query
       ? findEventCancelMatches(allCandidates, input.query, input.locale)
       : allCandidates;
@@ -1128,7 +1221,7 @@ async function resolveEventCancelCandidates(
     }
   }
   if (authorized.length === 0) {
-    return input.query || directSubgroupCandidate
+    return input.query || subgroupCandidates.length > 0
       ? { status: 'permission_denied' }
       : { status: 'none' };
   }
@@ -1456,6 +1549,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
         eventId: pending.eventId,
         answers,
         eventLocation,
+        pastCompletionConfirmed: pending.pastCompletionConfirmed,
         t
       });
     }

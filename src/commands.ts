@@ -87,6 +87,7 @@ interface EventDraft {
   actorWid: string;
   actorAliases?: string[] | undefined;
   actorLabel: string;
+  privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
   defaultAnnouncementGroupWid?: string | undefined;
   timezone: string;
   locale: string;
@@ -122,6 +123,7 @@ interface EventUpdateDraft {
   actorWid: string;
   actorAliases: string[];
   actorLabel: string;
+  privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
   timezone: string;
   locale: string;
   profile: EventProfile;
@@ -337,6 +339,7 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     actorWid: ctx.message.senderWid,
     actorAliases,
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {}),
     timezone: config.timezone,
     locale: ctx.locale,
@@ -556,6 +559,7 @@ async function startEventUpdateFlow(
     actorWid: ctx.message.senderWid,
     actorAliases,
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     timezone,
     locale: ctx.locale,
     profile,
@@ -686,8 +690,9 @@ async function beginEventUpdateLocationSelection(input: {
     );
     return;
   }
+  let output: GeocodeOutput;
   try {
-    const output = await input.context.services.call<GeocodeOutput>({
+    output = await input.context.services.call<GeocodeOutput>({
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.draft.scopeId,
@@ -700,31 +705,50 @@ async function beginEventUpdateLocationSelection(input: {
         limit: 5
       }
     });
-    if (!output.results.length) {
-      await input.activeTransport.sendText(
-        input.responseChatId,
-        input.t('official.community-events.location.noResults', { query: place })
-      );
-      return;
-    }
-    const pending: PendingEventLocationSelection = {
-      kind: 'update',
-      id: randomUUID(),
-      responseChatId: input.responseChatId,
-      draft: input.draft,
-      answers: pendingEventFlowAnswers(input.answers),
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'geocode',
+      scopeId: input.draft.scopeId,
       eventId: input.event.id,
-      pastCompletionConfirmed: input.pastCompletionConfirmed,
-      place,
+      actorWid: input.draft.actorWid,
+      profileId: input.draft.profile.id,
       query: place,
-      provider: output.provider,
-      candidates: output.results
-    };
-    await promptEventLocationConfirmation({ ...input, pending });
-  } catch {
+      error
+    });
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  const pending: PendingEventLocationSelection = {
+    kind: 'update',
+    id: randomUUID(),
+    responseChatId: input.responseChatId,
+    draft: input.draft,
+    answers: pendingEventFlowAnswers(input.answers),
+    eventId: input.event.id,
+    pastCompletionConfirmed: input.pastCompletionConfirmed,
+    place,
+    query: place,
+    provider: output.provider,
+    candidates: output.results
+  };
+  try {
+    await promptEventLocationConfirmation({ ...input, pending });
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'prompt_dispatch',
+      scopeId: input.draft.scopeId,
+      eventId: input.event.id,
+      actorWid: input.draft.actorWid,
+      profileId: input.draft.profile.id,
+      query: place,
+      error
+    });
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.promptFailed')
     );
   }
 }
@@ -1586,6 +1610,10 @@ async function promptEventLocationConfirmation(input: {
       selectionRule: PollSelectionRule.SINGLE,
       minSelections: 1,
       maxSelections: 1,
+      presentation: 'text',
+      ...(input.pending.draft.privateDeliveryFallback
+        ? { privateDeliveryFallback: input.pending.draft.privateDeliveryFallback }
+        : {}),
       expiresAt: new Date(Date.now() + EVENT_LOCATION_SELECTION_TTL_SECONDS * 1000),
       t: input.t
     });
@@ -1610,8 +1638,9 @@ async function requeryEventLocationSelection(input: {
     );
     return;
   }
+  let output: GeocodeOutput;
   try {
-    const output = await input.context.services.call<GeocodeOutput>({
+    output = await input.context.services.call<GeocodeOutput>({
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.pending.draft.scopeId,
@@ -1624,30 +1653,29 @@ async function requeryEventLocationSelection(input: {
         limit: 5
       }
     });
-    if (!output.results.length) {
-      const replaceUnresolvedPlace = input.pending.candidates.length === 0;
-      const pending = replaceUnresolvedPlace
-        ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
-        : input.pending;
-      await promptEventLocationConfirmation({
-        context: input.context,
-        runtime: input.runtime,
-        activeTransport: input.activeTransport,
-        pending: {
-          ...pending,
-          id: randomUUID(),
-          query: input.query,
-          provider: output.provider,
-          candidates: []
-        },
-        t: input.t
-      });
-      return;
-    }
-    const replaceUnresolvedPlace = input.pending.candidates.length === 0;
-    const pending = replaceUnresolvedPlace
-      ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
-      : input.pending;
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'geocode',
+      scopeId: input.pending.draft.scopeId,
+      ...(input.pending.kind === 'update' ? { eventId: input.pending.eventId } : {}),
+      actorWid: input.pending.draft.actorWid,
+      profileId: input.pending.kind === 'create'
+        ? input.pending.profile.id
+        : input.pending.draft.profile.id,
+      query: input.query,
+      error
+    });
+    await input.activeTransport.sendText(
+      input.pending.responseChatId,
+      input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  const replaceUnresolvedPlace = input.pending.candidates.length === 0;
+  const pending = replaceUnresolvedPlace
+    ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
+    : input.pending;
+  try {
     await promptEventLocationConfirmation({
       context: input.context,
       runtime: input.runtime,
@@ -1661,10 +1689,21 @@ async function requeryEventLocationSelection(input: {
       },
       t: input.t
     });
-  } catch {
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'prompt_dispatch',
+      scopeId: input.pending.draft.scopeId,
+      ...(input.pending.kind === 'update' ? { eventId: input.pending.eventId } : {}),
+      actorWid: input.pending.draft.actorWid,
+      profileId: input.pending.kind === 'create'
+        ? input.pending.profile.id
+        : input.pending.draft.profile.id,
+      query: input.query,
+      error
+    });
     await input.activeTransport.sendText(
       input.pending.responseChatId,
-      input.t('official.community-events.location.failed')
+      input.t('official.community-events.location.promptFailed')
     );
   }
 }
@@ -1703,8 +1742,9 @@ async function beginEventLocationSelection(input: {
     );
     return;
   }
+  let output: GeocodeOutput;
   try {
-    const output = await input.context.services.call<GeocodeOutput>({
+    output = await input.context.services.call<GeocodeOutput>({
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.draft.scopeId,
@@ -1717,41 +1757,48 @@ async function beginEventLocationSelection(input: {
         limit: 5
       }
     });
-    if (!output.results.length) {
-      const pending: PendingEventLocationSelection = {
-        kind: 'create',
-        id: randomUUID(),
-        responseChatId: input.responseChatId,
-        draft: input.draft,
-        profile: input.profile,
-        answers: pendingEventFlowAnswers(input.answers),
-        announcementGroupWid: input.announcementGroupWid,
-        place,
-        query: place,
-        provider: output.provider,
-        candidates: []
-      };
-      await promptEventLocationConfirmation({ ...input, pending });
-      return;
-    }
-    const pending: PendingEventLocationSelection = {
-      kind: 'create',
-      id: randomUUID(),
-      responseChatId: input.responseChatId,
-      draft: input.draft,
-      profile: input.profile,
-      answers: pendingEventFlowAnswers(input.answers),
-      announcementGroupWid: input.announcementGroupWid,
-      place,
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'geocode',
+      scopeId: input.draft.scopeId,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
       query: place,
-      provider: output.provider,
-      candidates: output.results
-    };
-    await promptEventLocationConfirmation({ ...input, pending });
-  } catch {
+      error
+    });
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.location.failed')
+    );
+    return;
+  }
+  const pending: PendingEventLocationSelection = {
+    kind: 'create',
+    id: randomUUID(),
+    responseChatId: input.responseChatId,
+    draft: input.draft,
+    profile: input.profile,
+    answers: pendingEventFlowAnswers(input.answers),
+    announcementGroupWid: input.announcementGroupWid,
+    place,
+    query: place,
+    provider: output.provider,
+    candidates: output.results
+  };
+  try {
+    await promptEventLocationConfirmation({ ...input, pending });
+  } catch (error) {
+    await recordEventLocationFailure(input.context, {
+      phase: 'prompt_dispatch',
+      scopeId: input.draft.scopeId,
+      actorWid: input.draft.actorWid,
+      profileId: input.profile.id,
+      query: place,
+      error
+    });
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.location.promptFailed')
     );
   }
 }
@@ -2513,6 +2560,32 @@ async function appendEventJsonLog(
   } catch {
     // Do not fail event creation just because the append-only operator log is unavailable.
   }
+}
+
+async function recordEventLocationFailure(
+  context: PluginCommandContext,
+  input: {
+    phase: 'geocode' | 'prompt_dispatch';
+    scopeId: string;
+    eventId?: string | undefined;
+    actorWid: string;
+    profileId: string;
+    query: string;
+    error: unknown;
+  }
+): Promise<void> {
+  await appendEventJsonLog(context, {
+    action: 'event.location.failed',
+    scopeId: input.scopeId,
+    ...(input.eventId ? { eventId: input.eventId } : {}),
+    actorWid: input.actorWid,
+    profileId: input.profileId,
+    metadata: {
+      phase: input.phase,
+      query: input.query,
+      error: input.error instanceof Error ? input.error.message : String(input.error)
+    }
+  });
 }
 
 function eventDraftKey(scopeId: string, flowSessionId: string): string {

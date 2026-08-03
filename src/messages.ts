@@ -17,6 +17,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.location.noResults': 'I could not find a place matching “{query}”. Reply with another location, /cancel, or /stop.',
   'official.community-events.location.missing': 'The event place is missing. Start again and provide a place.',
   'official.community-events.location.failed': 'I could not resolve the event place. Try again in a moment.',
+  'official.community-events.location.promptFailed': 'I found possible places but could not send the selection list. Start the request again in a moment.',
   'official.community-events.location.invalid': 'That event place selection is no longer valid. Start again.',
   'official.community-events.location.wrongRequester': 'The event place was not confirmed by the original requester.',
   'official.community-events.pollPublished': 'Event poll published.',

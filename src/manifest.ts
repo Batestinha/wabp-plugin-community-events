@@ -7,6 +7,7 @@ export const EVENTS_DATABASE = 'events';
 
 export const EVENTS_JOBS = {
   close: 'event.close',
+  provisioningRecovery: 'event.provisioningRecovery',
   cleanup: 'event.cleanup',
   weatherForecast: 'event.weatherForecast'
 } as const;
@@ -86,6 +87,7 @@ export const eventsManifest: PluginManifest = {
   dangerousActions: [],
   backgroundJobs: [
     EVENTS_JOBS.close,
+    EVENTS_JOBS.provisioningRecovery,
     EVENTS_JOBS.cleanup,
     EVENTS_JOBS.weatherForecast
   ],

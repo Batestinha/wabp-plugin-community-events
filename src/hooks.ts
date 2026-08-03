@@ -59,6 +59,14 @@ import {
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
+const EVENT_PROVISIONING_RECOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
+
+interface EventProvisioningRecoveryPayload {
+  eventId: string;
+  subgroupChatId: string;
+  attempt: number;
+}
+
 interface EventRecoveryOptions {
   now?: Date | undefined;
 }
@@ -110,33 +118,28 @@ export async function recoverEventProvisioningJobs(
 ): Promise<number> {
   const db = eventsDatabase(context.databases);
   const records = listFailedProvisioningEvents(db);
+  const runAt = options.now ?? new Date();
   let enqueued = 0;
   for (const record of records) {
-    try {
-      const result = await resumeEventProvisioning({
-        context,
-        scopeId: record.scopeId,
-        eventId: record.id,
-        subgroupChatId: record.subgroupChatId!,
-        ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
-        actorWid: 'plugin-startup@system',
-        actorLabel: 'Plugin startup recovery',
-        ...(options.now ? { now: options.now } : {})
-      });
-      if (result.status === 'queued') {
-        enqueued += 1;
-      } else if (result.status === 'rejected') {
-        context.logger.warn(
-          { eventId: record.id, scopeId: record.scopeId, reason: result.reason },
-          'Unable to resume failed official.community-events subgroup provisioning'
-        );
-      }
-    } catch (error) {
-      context.logger.warn(
-        { error, eventId: record.id, scopeId: record.scopeId },
-        'Failed to recover official.community-events subgroup provisioning'
-      );
+    const subgroupChatId = record.subgroupChatId;
+    if (!subgroupChatId) {
+      continue;
     }
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.provisioningRecovery,
+      scopeId: record.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      runAt,
+      payload: {
+        eventId: record.id,
+        subgroupChatId,
+        attempt: 1
+      } satisfies EventProvisioningRecoveryPayload,
+      dedupeKey: eventProvisioningRecoveryDedupeKey(record, 1)
+    });
+    enqueued += 1;
   }
   return enqueued;
 }
@@ -247,6 +250,9 @@ async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVo
 async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEvent): Promise<PluginAction[]> {
   if (event.jobName === EVENTS_JOBS.close) {
     return closeEvent(context, event);
+  }
+  if (event.jobName === EVENTS_JOBS.provisioningRecovery) {
+    return recoverFailedEventProvisioning(context, event);
   }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
@@ -545,6 +551,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     const failedAt = new Date().toISOString();
     let failureMetadata: Record<string, unknown> = { reason };
     let failedSubgroupChatId: string | undefined;
+    let provisioningRecoveryAction: PluginEnqueueJobAction | undefined;
     if (isManagedCommunitySubgroupProvisioningError(error)) {
       const { created, provisioning, stage } = error;
       failedSubgroupChatId = created.chatId;
@@ -584,6 +591,23 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           },
           'Event subgroup provisioning failure checkpoint was rejected by the event state guard'
         );
+      } else {
+        const failedRecord = getEvent(db, record.id);
+        if (failedRecord?.subgroupChatId === created.chatId) {
+          const attempt = 1;
+          const runAt = eventProvisioningRecoveryRunAt(attempt, new Date(failedAt));
+          provisioningRecoveryAction = eventProvisioningRecoveryAction(failedRecord, attempt, runAt);
+          appendEventLog(db, {
+            eventId: record.id,
+            action: 'events.provisioning.recovery_scheduled',
+            metadata: {
+              subgroupChatId: created.chatId,
+              attempt,
+              runAt: runAt.toISOString(),
+              stage
+            }
+          });
+        }
       }
     } else {
       markEventFailed(db, record.id, reason, failedAt);
@@ -602,8 +626,183 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(failedSubgroupChatId ? { subgroupChatId: failedSubgroupChatId } : {}),
       metadata: failureMetadata
     });
-    return [audit('events.close.failed', { eventId: record.id, ...failureMetadata })];
+    return [
+      ...(provisioningRecoveryAction ? [provisioningRecoveryAction] : []),
+      audit('events.close.failed', { eventId: record.id, ...failureMetadata })
+    ];
   }
+}
+
+async function recoverFailedEventProvisioning(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const payload = eventProvisioningRecoveryPayload(job.payload);
+  if (!payload) {
+    return [audit('events.provisioning.recovery_skipped', {
+      reason: 'invalid payload'
+    })];
+  }
+  const db = eventsDatabase(context.databases);
+  const record = getEvent(db, payload.eventId);
+  if (!record || record.scopeId !== job.scopeId) {
+    return [audit('events.provisioning.recovery_skipped', {
+      eventId: payload.eventId,
+      subgroupChatId: payload.subgroupChatId,
+      attempt: payload.attempt,
+      reason: 'event missing or scope mismatch'
+    })];
+  }
+  if (record.subgroupChatId !== payload.subgroupChatId) {
+    return [audit('events.provisioning.recovery_rejected', {
+      eventId: record.id,
+      subgroupChatId: payload.subgroupChatId,
+      attempt: payload.attempt,
+      reason: `Event is bound to subgroup ${record.subgroupChatId ?? 'none'}.`
+    })];
+  }
+
+  try {
+    const result = await resumeEventProvisioning({
+      context,
+      scopeId: record.scopeId,
+      eventId: record.id,
+      subgroupChatId: payload.subgroupChatId,
+      ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
+      actorWid: 'plugin-recovery@system',
+      actorLabel: 'Plugin provisioning recovery'
+    });
+    if (result.status === 'rejected' || result.status === 'not_found') {
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.provisioning.recovery_rejected',
+        metadata: {
+          subgroupChatId: payload.subgroupChatId,
+          attempt: payload.attempt,
+          reason: result.reason
+        }
+      });
+    }
+    return [audit(
+      result.status === 'queued'
+        ? 'events.provisioning.recovery_queued'
+        : result.status === 'already_completed'
+          ? 'events.provisioning.recovery_already_completed'
+          : 'events.provisioning.recovery_rejected',
+      {
+        eventId: record.id,
+        subgroupChatId: payload.subgroupChatId,
+        attempt: payload.attempt,
+        status: result.status,
+        ...('reason' in result ? { reason: result.reason } : {})
+      }
+    )];
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const latest = getEvent(db, record.id) ?? record;
+    if (
+      isManagedCommunitySubgroupProvisioningError(error) &&
+      latest.eventStatus === 'failed' &&
+      latest.groupLifecycleStatus === 'none' &&
+      latest.subgroupChatId === payload.subgroupChatId &&
+      payload.attempt < EVENT_PROVISIONING_RECOVERY_DELAYS_MS.length
+    ) {
+      const nextAttempt = payload.attempt + 1;
+      const runAt = eventProvisioningRecoveryRunAt(nextAttempt, new Date());
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.provisioning.recovery_scheduled',
+        metadata: {
+          subgroupChatId: payload.subgroupChatId,
+          failedAttempt: payload.attempt,
+          attempt: nextAttempt,
+          runAt: runAt.toISOString(),
+          reason,
+          stage: error.stage
+        }
+      });
+      return [
+        eventProvisioningRecoveryAction(latest, nextAttempt, runAt),
+        audit('events.provisioning.recovery_retry_scheduled', {
+          eventId: record.id,
+          subgroupChatId: payload.subgroupChatId,
+          failedAttempt: payload.attempt,
+          attempt: nextAttempt,
+          runAt: runAt.toISOString(),
+          reason,
+          stage: error.stage
+        })
+      ];
+    }
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.provisioning.recovery_failed',
+      metadata: {
+        subgroupChatId: payload.subgroupChatId,
+        attempt: payload.attempt,
+        reason,
+        retryable: isManagedCommunitySubgroupProvisioningError(error)
+      }
+    });
+    return [audit('events.provisioning.recovery_failed', {
+      eventId: record.id,
+      subgroupChatId: payload.subgroupChatId,
+      attempt: payload.attempt,
+      reason
+    })];
+  }
+}
+
+function eventProvisioningRecoveryPayload(payload: unknown): EventProvisioningRecoveryPayload | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  const candidate = payload as Record<string, unknown>;
+  const eventId = typeof candidate.eventId === 'string' ? candidate.eventId.trim() : '';
+  const subgroupChatId = typeof candidate.subgroupChatId === 'string'
+    ? candidate.subgroupChatId.trim().toLowerCase()
+    : '';
+  const attempt = candidate.attempt;
+  if (!eventId || !subgroupChatId.endsWith('@g.us') || !Number.isInteger(attempt) || Number(attempt) < 1) {
+    return undefined;
+  }
+  return { eventId, subgroupChatId, attempt: Number(attempt) };
+}
+
+function eventProvisioningRecoveryRunAt(attempt: number, now: Date): Date {
+  const delay = EVENT_PROVISIONING_RECOVERY_DELAYS_MS[Math.min(
+    EVENT_PROVISIONING_RECOVERY_DELAYS_MS.length - 1,
+    Math.max(0, attempt - 1)
+  )]!;
+  return new Date(now.getTime() + delay);
+}
+
+function eventProvisioningRecoveryAction(
+  record: StoredEventRecord,
+  attempt: number,
+  runAt: Date
+): PluginEnqueueJobAction {
+  const subgroupChatId = record.subgroupChatId;
+  if (!subgroupChatId) {
+    throw new Error(`Event ${record.id} does not have an exact subgroup recovery target.`);
+  }
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.provisioningRecovery,
+    scopeId: record.scopeId,
+    runAt,
+    payload: {
+      eventId: record.id,
+      subgroupChatId,
+      attempt
+    } satisfies EventProvisioningRecoveryPayload,
+    dedupeKey: eventProvisioningRecoveryDedupeKey(record, attempt)
+  };
+}
+
+function eventProvisioningRecoveryDedupeKey(record: StoredEventRecord, attempt: number): string {
+  return `${EVENTS_JOBS.provisioningRecovery}:${record.scopeId}:${record.id}:${record.subgroupChatId}:${attempt}:${record.updatedAt}`;
 }
 
 async function publishClosedEventCalendar(

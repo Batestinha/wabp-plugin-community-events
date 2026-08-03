@@ -12,7 +12,7 @@ export const eventsPlugin: BotPlugin = {
     return registerEventsCancellations(context);
   },
   registerHooks(context) {
-    return createEventsHooks(context);
+    return createEventsHooks(context, { recoverJobs: false });
   }
 };
 

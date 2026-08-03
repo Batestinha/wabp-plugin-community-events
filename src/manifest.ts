@@ -1,6 +1,11 @@
 import type { PluginManifest } from '../../../platform/pluginRuntime/manifest';
 import { eventsConfigSchema } from './config';
 import { eventsMessages } from './messages';
+import {
+  EVENT_ALBUM_SOURCE_LIST_METHOD,
+  EVENT_ALBUM_SOURCE_RESOLVE_METHOD,
+  EVENT_ALBUM_SOURCE_SERVICE_ID
+} from './serviceApi';
 
 export const EVENTS_PLUGIN_ID = 'official.community-events';
 export const EVENTS_DATABASE = 'events';
@@ -28,7 +33,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.4.0',
+  version: '0.5.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -77,6 +82,14 @@ export const eventsManifest: PluginManifest = {
     ]
   },
   eventSubscriptions: ['poll.vote', 'plugin.job', 'group.dismantled'],
+  services: [{
+    serviceId: EVENT_ALBUM_SOURCE_SERVICE_ID,
+    description: 'List and resolve scoped community events as immutable album metadata sources.',
+    methods: [
+      { name: EVENT_ALBUM_SOURCE_LIST_METHOD, access: 'read' },
+      { name: EVENT_ALBUM_SOURCE_RESOLVE_METHOD, access: 'read' }
+    ]
+  }],
   requiredPermissions: [
     EVENTS_PERMISSIONS.configure,
     EVENTS_PERMISSIONS.manage,

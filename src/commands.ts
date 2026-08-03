@@ -150,8 +150,8 @@ interface PendingCreateEventLocationSelection {
   profile: EventProfile;
   answers: PendingEventFlowAnswers;
   announcementGroupWid: string;
-  place?: string | undefined;
-  query?: string | undefined;
+  displayPlace: string;
+  searchQuery: string;
   provider: string;
   candidates: GeocoderPlace[];
 }
@@ -164,8 +164,8 @@ interface PendingUpdateEventLocationSelection {
   answers: PendingEventFlowAnswers;
   eventId: string;
   pastCompletionConfirmed: boolean;
-  place?: string | undefined;
-  query?: string | undefined;
+  displayPlace: string;
+  searchQuery: string;
   provider: string;
   candidates: GeocoderPlace[];
 }
@@ -674,7 +674,7 @@ async function beginEventUpdateLocationSelection(input: {
   }
   if (
     input.event.eventLocation?.source === 'question' &&
-    (input.event.eventLocation.displayLabel === place || input.event.eventLocation.query === place)
+    input.event.eventLocation.displayLabel === place
   ) {
     await completeEventUpdate({
       ...input,
@@ -729,8 +729,8 @@ async function beginEventUpdateLocationSelection(input: {
     answers: pendingEventFlowAnswers(input.answers),
     eventId: input.event.id,
     pastCompletionConfirmed: input.pastCompletionConfirmed,
-    place,
-    query: place,
+    displayPlace: place,
+    searchQuery: place,
     provider: output.provider,
     candidates: output.results
   };
@@ -1534,18 +1534,17 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       return true;
     }
     const profile = pending.kind === 'create' ? pending.profile : pending.draft.profile;
-    const query = eventLocationQuery(profile, answers.answers);
-    if (!query) {
+    const displayPlace = eventLocationQuery(profile, answers.answers);
+    if (!displayPlace || displayPlace !== pending.displayPlace) {
       await activeTransport.sendText(
         pending.responseChatId,
         t('official.community-events.location.invalid')
       );
       return true;
     }
-    const displayLabel = pending.place ?? query;
     const eventLocation = geocodedEventLocation({
-      query: pending.query ?? query,
-      displayLabel,
+      query: pending.searchQuery,
+      displayLabel: displayPlace,
       timezone: pending.draft.timezone,
       provider: pending.provider,
       place: candidate
@@ -1589,10 +1588,15 @@ async function promptEventLocationConfirmation(input: {
   t: CommandContext['t'];
 }): Promise<void> {
   const options = eventLocationCandidateOptions(input.pending.candidates);
-  const place = input.pending.place ?? input.pending.query ?? input.pending.candidates[0]?.label ?? '';
   const question = options.length > 0
-    ? input.t('official.community-events.location.select', { query: place })
-    : input.t('official.community-events.location.noResults', { query: input.pending.query ?? place });
+    ? input.t('official.community-events.location.select', {
+      displayPlace: input.pending.displayPlace,
+      searchQuery: input.pending.searchQuery
+    })
+    : input.t('official.community-events.location.noResults', {
+      displayPlace: input.pending.displayPlace,
+      searchQuery: input.pending.searchQuery
+    });
   await rememberActiveEventLocationSelection(input.runtime, input.pending);
   try {
     await input.context.flowEngine.promptChoice({
@@ -1610,7 +1614,6 @@ async function promptEventLocationConfirmation(input: {
       selectionRule: PollSelectionRule.SINGLE,
       minSelections: 1,
       maxSelections: 1,
-      presentation: 'text',
       ...(input.pending.draft.privateDeliveryFallback
         ? { privateDeliveryFallback: input.pending.draft.privateDeliveryFallback }
         : {}),
@@ -1671,19 +1674,15 @@ async function requeryEventLocationSelection(input: {
     );
     return;
   }
-  const replaceUnresolvedPlace = input.pending.candidates.length === 0;
-  const pending = replaceUnresolvedPlace
-    ? pendingWithReplacedEventLocationAnswer(input.pending, input.query)
-    : input.pending;
   try {
     await promptEventLocationConfirmation({
       context: input.context,
       runtime: input.runtime,
       activeTransport: input.activeTransport,
       pending: {
-        ...pending,
+        ...input.pending,
         id: randomUUID(),
-        query: input.query,
+        searchQuery: input.query,
         provider: output.provider,
         candidates: output.results
       },
@@ -1780,8 +1779,8 @@ async function beginEventLocationSelection(input: {
     profile: input.profile,
     answers: pendingEventFlowAnswers(input.answers),
     announcementGroupWid: input.announcementGroupWid,
-    place,
-    query: place,
+    displayPlace: place,
+    searchQuery: place,
     provider: output.provider,
     candidates: output.results
   };
@@ -2698,27 +2697,6 @@ function eventLocationSelectionActorWids(pending: PendingEventLocationSelection)
 
 function isCommandLikeLocationReply(value: string): boolean {
   return value.trim().startsWith('/');
-}
-
-function pendingWithReplacedEventLocationAnswer(
-  pending: PendingEventLocationSelection,
-  query: string
-): PendingEventLocationSelection {
-  const profile = pending.kind === 'create' ? pending.profile : pending.draft.profile;
-  if (profile.location.source !== 'question') {
-    return pending;
-  }
-  return {
-    ...pending,
-    place: query,
-    answers: {
-      ...pending.answers,
-      answers: {
-        ...pending.answers.answers,
-        [profile.location.questionKey]: query
-      }
-    }
-  };
 }
 
 function eventLocationCandidateOptions(candidates: GeocoderPlace[]): Array<{ id: string; label: string }> {

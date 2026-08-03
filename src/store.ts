@@ -85,6 +85,9 @@ export interface StoredEventRecord {
   cancelledByLabel?: string | undefined;
   cancelReason?: string | undefined;
   error?: string | undefined;
+  provisioningRecoveryGeneration?: string | undefined;
+  provisioningRecoveryAttempt?: number | undefined;
+  provisioningRecoveryNextRunAt?: string | undefined;
 }
 
 export interface StoredEventVote {
@@ -207,6 +210,9 @@ interface EventRow extends PluginDatabaseRow {
   cancelled_by_label: string | null;
   cancel_reason: string | null;
   error: string | null;
+  provisioning_recovery_generation: string | null;
+  provisioning_recovery_attempt: number | null;
+  provisioning_recovery_next_run_at: string | null;
 }
 
 interface VoteRow extends PluginDatabaseRow {
@@ -296,8 +302,9 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
-      cancel_reason, error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
+      provisioning_recovery_next_run_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -340,7 +347,10 @@ export function insertEvent(db: PluginDatabase, event: StoredEventRecord): void 
     event.cancelledByWid ?? null,
     event.cancelledByLabel ?? null,
     event.cancelReason ?? null,
-    event.error ?? null
+    event.error ?? null,
+    event.provisioningRecoveryGeneration ?? null,
+    event.provisioningRecoveryAttempt ?? null,
+    event.provisioningRecoveryNextRunAt ?? null
   );
 }
 
@@ -586,6 +596,9 @@ export function markEventProvisioningResumed(db: PluginDatabase, input: {
             subgroup_chat_id = ?,
             subgroup_title = ?,
             error = NULL,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
             updated_at = ?
       WHERE id = ?
         AND scope_id = ?
@@ -1151,6 +1164,9 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
   participants: Record<string, CreatedGroupParticipantResult>;
   reason: string;
   failedAt: string;
+  recoveryGeneration: string;
+  recoveryAttempt: number;
+  recoveryNextRunAt: string;
 }): boolean {
   return db.transaction(() => {
     const current = db.get<{ id: string }>(
@@ -1184,6 +1200,9 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
               subgroup_chat_id = ?,
               subgroup_title = ?,
               error = ?,
+              provisioning_recovery_generation = ?,
+              provisioning_recovery_attempt = ?,
+              provisioning_recovery_next_run_at = ?,
               updated_at = ?
         WHERE id = ?
           AND scope_id = ?
@@ -1193,6 +1212,9 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
       input.subgroupChatId,
       input.subgroupTitle,
       input.reason,
+      input.recoveryGeneration,
+      input.recoveryAttempt,
+      input.recoveryNextRunAt,
       input.failedAt,
       input.eventId,
       input.scopeId,
@@ -1203,6 +1225,74 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
     }
     return true;
   });
+}
+
+export function initializeEventProvisioningRecovery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  generation: string;
+  attempt: number;
+  nextRunAt: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_generation = ?,
+            provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND subgroup_chat_id = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.generation,
+    input.attempt,
+    input.nextRunAt,
+    input.updatedAt,
+    input.eventId,
+    input.scopeId,
+    input.subgroupChatId
+  );
+  return result.changes === 1;
+}
+
+export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  generation: string;
+  expectedAttempt: number;
+  nextAttempt: number;
+  nextRunAt: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND subgroup_chat_id = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?`,
+    input.nextAttempt,
+    input.nextRunAt,
+    input.updatedAt,
+    input.eventId,
+    input.scopeId,
+    input.subgroupChatId,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
 }
 
 export function markEventMissed(db: PluginDatabase, eventId: string, reason: string, missedAt: string): void {
@@ -1540,7 +1630,16 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(row.cancelled_by_wid ? { cancelledByWid: row.cancelled_by_wid } : {}),
     ...(row.cancelled_by_label ? { cancelledByLabel: row.cancelled_by_label } : {}),
     ...(row.cancel_reason ? { cancelReason: row.cancel_reason } : {}),
-    ...(row.error ? { error: row.error } : {})
+    ...(row.error ? { error: row.error } : {}),
+    ...(row.provisioning_recovery_generation
+      ? { provisioningRecoveryGeneration: row.provisioning_recovery_generation }
+      : {}),
+    ...(row.provisioning_recovery_attempt !== null
+      ? { provisioningRecoveryAttempt: Number(row.provisioning_recovery_attempt) }
+      : {}),
+    ...(row.provisioning_recovery_next_run_at
+      ? { provisioningRecoveryNextRunAt: row.provisioning_recovery_next_run_at }
+      : {})
   };
 }
 

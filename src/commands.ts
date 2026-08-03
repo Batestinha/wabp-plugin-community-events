@@ -9,6 +9,7 @@ import {
   type ManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
+import { requireIdentityAddress } from '../../../platform/identity/messageActor';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
@@ -295,8 +296,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
   });
   registerEventFlowCompletionHandlers(context, definition.flowType, eventProfiles, ctx.t);
   const actorAliases = eventActorWids(ctx);
-  const privateActorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
+  const privateActorWid = eventPrivateChatWid(ctx);
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
   const conversationChatId = ctx.message.context === 'group'
     ? privateActorWid
     : ctx.message.chatId;
@@ -336,7 +337,7 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
     ...(ctx.groupWid ? { groupWid: ctx.groupWid } : {}),
     chatId: conversationChatId,
-    actorWid: ctx.message.senderWid,
+    actorWid: privateActorWid,
     actorAliases,
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
     ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
@@ -369,8 +370,8 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
   const scopeId = requireScopeId(ctx);
   const db = eventsDatabase(runtime.databases);
   const actorAliases = eventActorWids(ctx);
-  const actorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
+  const actorWid = eventPrivateChatWid(ctx);
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
   const actorLabel = ctx.message.senderDisplayName ?? actorWid;
   const query = ctx.command.args.join(' ').trim();
   const resolution = await resolveEventCancelCandidates(context, {
@@ -509,8 +510,8 @@ async function startEventUpdateFlow(
   registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, ctx.t);
 
   const actorAliases = eventActorWids(ctx);
-  const privateActorWid = eventPrivateChatWid(actorAliases, ctx.actor?.wid ?? ctx.message.senderWid) ?? ctx.message.senderWid;
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actorAliases);
+  const privateActorWid = eventPrivateChatWid(ctx);
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
   const conversationChatId = ctx.message.context === 'group'
     ? privateActorWid
     : ctx.message.chatId;
@@ -2340,9 +2341,7 @@ function draftEventsConfig(draft: {
 }
 
 function eventCreatorParticipantWid(draft: EventDraft): string {
-  const aliases = uniqueEventWids([draft.actorWid, ...(draft.actorAliases ?? [])]);
-  return aliases.find((wid) => !wid.endsWith('@g.us')) ??
-    draft.actorWid;
+  return draft.actorWid;
 }
 
 function eventCommand(input: {
@@ -2444,12 +2443,12 @@ function eventActorWids(ctx: CommandContext): string[] {
   ]);
 }
 
-function privateFlowDeliveryFallback(ctx: CommandContext, actorWids: string[]): PrivateDeliveryFallback | undefined {
+function privateFlowDeliveryFallback(ctx: CommandContext): PrivateDeliveryFallback | undefined {
   const groupWid = ctx.groupWid?.trim() || (ctx.message.context === 'group' ? ctx.message.chatId : '');
   if (!groupWid.endsWith('@g.us')) {
     return undefined;
   }
-  const mentionWid = eventMentionWid(actorWids);
+  const mentionWid = requireIdentityAddress(requireEventActor(ctx)).mentionWid;
   return mentionWid
     ? {
         chatId: groupWid,
@@ -2459,16 +2458,15 @@ function privateFlowDeliveryFallback(ctx: CommandContext, actorWids: string[]): 
     : undefined;
 }
 
-function eventPrivateChatWid(actorWids: string[], preferredWid?: string | undefined): string | undefined {
-  const preferred = preferredWid?.trim();
-  if (preferred && !preferred.endsWith('@g.us')) {
-    return preferred;
-  }
-  return actorWids.find((wid) => wid.endsWith('@c.us')) ?? actorWids.find((wid) => !wid.endsWith('@g.us'));
+function eventPrivateChatWid(ctx: CommandContext): string {
+  return requireIdentityAddress(requireEventActor(ctx)).deliveryChatId;
 }
 
-function eventMentionWid(actorWids: string[]): string | undefined {
-  return actorWids.find((wid) => wid.endsWith('@c.us')) ?? actorWids.find((wid) => wid.endsWith('@lid')) ?? actorWids[0];
+function requireEventActor(ctx: CommandContext): NonNullable<CommandContext['actor']> {
+  if (!ctx.actor) {
+    throw new Error('Authoritative identity address is required for the community-events command.');
+  }
+  return ctx.actor;
 }
 
 function uniqueEventWids(values: Array<string | undefined>): string[] {

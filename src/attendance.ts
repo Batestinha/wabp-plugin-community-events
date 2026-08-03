@@ -34,7 +34,7 @@ export function voterWidsForResponseBehavior(
 }
 
 export async function missingEventSubgroupAttendeeWids(
-  context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolvePrivateRecipient'>,
+  context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolveIdentityAddress'>,
   subgroupChatId: string,
   attendeeWids: readonly string[],
   participantOutcomes: Readonly<Record<string, CreatedGroupParticipantResult>> = {}
@@ -56,7 +56,7 @@ export interface EventSubgroupAttendeeCoverage {
 }
 
 export async function eventSubgroupAttendeeCoverage(
-  context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolvePrivateRecipient'>,
+  context: Pick<PluginRuntimeContext, 'getGroupParticipants' | 'resolveIdentityAddress'>,
   subgroupChatId: string,
   attendeeWids: readonly string[],
   participantOutcomes: Readonly<Record<string, CreatedGroupParticipantResult>> = {}
@@ -73,9 +73,10 @@ export async function eventSubgroupAttendeeCoverage(
   const pendingInviteWids: string[] = [];
   const missingAttendeeWids: string[] = [];
   for (const attendeeWid of attendeeWids) {
-    const aliases = context.resolvePrivateRecipient
-      ? (await context.resolvePrivateRecipient(attendeeWid)).aliases
-      : [attendeeWid];
+    if (!context.resolveIdentityAddress) {
+      throw new Error('Authoritative identity address service is unavailable.');
+    }
+    const aliases = (await context.resolveIdentityAddress(attendeeWid)).aliases;
     const candidateWids = [...new Set(
       [attendeeWid, ...aliases].map((wid) => wid.trim()).filter(Boolean)
     )];

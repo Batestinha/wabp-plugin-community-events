@@ -4,6 +4,8 @@ import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowType
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
 import type { PluginCancellationRegistration, PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../platform/jobs/queue';
 import {
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
@@ -39,6 +41,11 @@ import {
   type EventFlowAnswers,
   type EventFlowPrefill
 } from './flow';
+import {
+  EventCreationFlowStarter,
+  eventDraftKey,
+  type EventDraft
+} from './eventCreationFlowStarter';
 import { appendScopeEventJsonLog } from './log';
 import {
   eventGroupHintEnabled,
@@ -101,26 +108,6 @@ const SCOPE_TARGET: CommandTargetSpec = {
   fallback: 'current_scope'
 };
 
-interface EventDraft {
-  flowSessionId: string;
-  flowType: string;
-  scopeId: string;
-  groupId?: string | undefined;
-  groupWid?: string | undefined;
-  chatId: string;
-  actorWid: string;
-  actorIdentityId: string;
-  actorLabel: string;
-  privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
-  defaultAnnouncementGroupWid?: string | undefined;
-  timezone: string;
-  locale: string;
-  profiles: EventProfile[];
-  calendars: EventCalendarResource[];
-  prefill: EventFlowPrefill;
-  createdAt: string;
-}
-
 interface EventCancelDraft {
   flowSessionId: string;
   flowType: string;
@@ -177,6 +164,8 @@ interface EventTextTransport {
   ): Promise<OutboundSendResult>;
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
+
+export type EventFlowCompletionContext = PluginCommandContext | PluginRuntimeContext;
 
 type PendingEventFlowAnswers = Omit<EventFlowAnswers, 'startsAt'> & {
   startsAt: string;
@@ -360,63 +349,41 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     actorIdentityId: actor.identityId
   });
   const scopeId = requireScopeId(ctx);
-  const config = parseEventsConfig(await runtime.configFor(scopeId, actor.identityId));
-  if (!config.enabled) {
-    return { handled: true, text: ctx.t('official.community-events.disabled') };
-  }
-  if (config.eventProfiles.length === 0) {
-    return { handled: true, text: ctx.t('official.community-events.notConfigured') };
-  }
-  const eventProfiles = localizeDefaultEventProfiles(config.eventProfiles, ctx.t);
-  const defaultAnnouncementGroupWid = await context.communityAnnouncementGroupWidForScope?.(scopeId) ||
-    ctx.groupWid;
-  if (!defaultAnnouncementGroupWid && !eventProfiles.some((profile) => profile.announcementGroupWid)) {
-    return { handled: true, text: ctx.t('official.community-events.notConfigured') };
-  }
-
-  const prefill = parseEventPrefillArgs(ctx.remainingArgs ?? ctx.command.args, eventProfiles);
-  const startedAt = new Date();
-  const initialData = eventInitialFlowData(eventProfiles, prefill, {
-    timezone: config.timezone,
-    locale: ctx.locale,
-    now: startedAt
-  });
-  const definition = createEventFlowDefinition({
-    t: ctx.t,
-    profiles: eventProfiles,
-    prefill,
-    timezone: config.timezone,
-    locale: ctx.locale,
-    initialData,
-    completeMessageKey: false
-  });
-  registerEventFlowCompletionHandlers(context, definition.flowType, eventProfiles, ctx.t);
-  const privateActorWid = actor.deliveryChatId;
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
-  const conversationChatId = ctx.message.context === 'group'
-    ? privateActorWid
-    : ctx.message.chatId;
-  const flowMessage = ctx.message.context === 'group' && privateActorWid !== ctx.message.senderWid
-    ? {
-        ...ctx.message,
-        senderWid: privateActorWid,
-        authorWid: privateActorWid
-      }
-    : ctx.message;
-  let flowSessionId: string;
-  let usedPrivateDeliveryFallback = false;
+  const starter = new EventCreationFlowStarter({
+    flowEngine: context.flowEngine,
+    dataStore: runtime.dataStore,
+    i18n: context.i18n,
+    configFor: runtime.configFor,
+    ...(context.enabledFor ? { enabledFor: context.enabledFor } : {}),
+    ...(context.resolveStableIdentityById
+      ? { resolveStableIdentityById: context.resolveStableIdentityById }
+      : {}),
+    ...(context.communityAnnouncementGroupWidForScope
+      ? { communityAnnouncementGroupWidForScope: context.communityAnnouncementGroupWidForScope }
+      : {}),
+    ...(context.explainPermission ? { explainPermission: context.explainPermission } : {})
+  }, (flowType, profiles, t) => {
+    registerEventFlowCompletionHandlers(context, flowType, profiles, t);
+  });
+  let started: Awaited<ReturnType<EventCreationFlowStarter['startCommand']>>;
   try {
-    const flowStart = await context.flowEngine.startFlow({
-      definition,
-      message: flowMessage,
+    started = await starter.startCommand({
+      actor: requireIdentityAddress(requireEventActor(ctx)),
+      actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+      externalIdempotencyKey: eventCreationCommandIdempotencyKey(scopeId, actor.identityId, ctx.message.id),
+      origin: {
+        chatId: ctx.message.chatId,
+        context: ctx.message.context
+      },
       scopeId,
-      conversationChatId,
-      conversationContext: 'private',
-      initialData,
+      ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
+      ...(ctx.groupWid ? { groupWid: ctx.groupWid } : {}),
+      locale: ctx.locale,
+      t: ctx.t,
+      prefillArgs: ctx.remainingArgs ?? ctx.command.args,
       ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
-    flowSessionId = flowStart.flowSessionId;
-    usedPrivateDeliveryFallback = Boolean(flowStart.privateDeliveryFallback);
   } catch {
     return {
       handled: true,
@@ -425,32 +392,20 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
         : ctx.t('official.community-events.startFailed')
     };
   }
-  const draft: EventDraft = {
-    flowSessionId,
-    flowType: definition.flowType,
-    scopeId,
-    ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
-    ...(ctx.groupWid ? { groupWid: ctx.groupWid } : {}),
-    chatId: conversationChatId,
-    actorWid: actor.canonicalWid,
-    actorIdentityId: actor.identityId,
-    actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
-    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
-    ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {}),
-    timezone: config.timezone,
-    locale: ctx.locale,
-    profiles: eventProfiles,
-    calendars: config.calendars,
-    prefill,
-    createdAt: new Date().toISOString()
-  };
-  await runtime.dataStore.set(eventDraftKey(scopeId, flowSessionId), draft);
+  if (started.kind === 'unavailable') {
+    return {
+      handled: true,
+      text: ctx.t(started.reason === 'disabled'
+        ? 'official.community-events.disabled'
+        : 'official.community-events.notConfigured')
+    };
+  }
   if (ctx.message.context !== 'group') {
     return { handled: true, response: { kind: 'none' as const } };
   }
   return {
     handled: true,
-    text: ctx.t(usedPrivateDeliveryFallback
+    text: ctx.t(started.usedPrivateDeliveryFallback
       ? 'official.community-events.startedInGroupFallback'
       : 'official.community-events.startedPrivate')
   };
@@ -1720,19 +1675,20 @@ function uniqueEvents(events: StoredEventRecord[]): StoredEventRecord[] {
   return unique;
 }
 
-function registerEventFlowCompletionHandlers(
-  context: PluginCommandContext,
+export function registerEventFlowCompletionHandlers(
+  context: EventFlowCompletionContext,
   flowType: string,
   profiles: EventProfile[],
   t: CommandContext['t']
 ): void {
-  const runtime = requireOfficialCommandRuntime(context);
+  const runtime = requireEventFlowRuntime(context);
+  const flowEngine = requireEventFlowEngine(context);
   for (const profile of profiles) {
-    context.flowEngine.registerPromptHandler(eventConfirmPurpose(flowType, profile), async (lock, activeTransport) => {
+    flowEngine.registerPromptHandler(eventConfirmPurpose(flowType, profile), async (lock, activeTransport) => {
       if (!lock.flowSessionId) {
         return false;
       }
-      const snapshot = await context.flowEngine.getSessionSnapshot(lock.flowSessionId);
+      const snapshot = await flowEngine.getSessionSnapshot(lock.flowSessionId);
       if (!snapshot || snapshot.flowType !== flowType || !snapshot.scopeId) {
         return false;
       }
@@ -1911,7 +1867,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
 }
 
 async function promptEventLocationConfirmation(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   pending: PendingEventLocationSelection;
@@ -1929,7 +1885,7 @@ async function promptEventLocationConfirmation(input: {
     });
   await rememberActiveEventLocationSelection(input.runtime, input.pending);
   try {
-    await input.context.flowEngine.promptChoice({
+    await requireEventFlowEngine(input.context).promptChoice({
       purpose: EVENT_LOCATION_SELECTION_PURPOSE,
       subjectType: 'CommunityEventLocation',
       subjectId: input.pending.id,
@@ -1957,7 +1913,7 @@ async function promptEventLocationConfirmation(input: {
 }
 
 async function requeryEventLocationSelection(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   pending: PendingEventLocationSelection;
@@ -2038,7 +1994,7 @@ async function requeryEventLocationSelection(input: {
 }
 
 async function beginEventLocationSelection(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   responseChatId: string;
@@ -2133,7 +2089,7 @@ async function beginEventLocationSelection(input: {
 }
 
 async function publishConfirmedEvent(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   responseChatId: string;
@@ -2383,7 +2339,7 @@ async function eventProfileSnapshotIsCurrent(input: {
 }
 
 async function createUnplannedEventLifecycle(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   db: ReturnType<typeof eventsDatabase>;
@@ -2610,7 +2566,7 @@ async function createUnplannedEventLifecycle(input: {
 }
 
 async function provisionUnplannedEventSubgroup(input: {
-  context: PluginCommandContext;
+  context: EventFlowCompletionContext;
   db: ReturnType<typeof eventsDatabase>;
   event: StoredEventRecord;
   creatorParticipantWid: string;
@@ -2769,8 +2725,55 @@ function eventCommand(input: {
   };
 }
 
+function requireEventFlowEngine(context: EventFlowCompletionContext) {
+  if (!context.flowEngine) {
+    throw new Error('Community event flows require the platform flow engine.');
+  }
+  return context.flowEngine;
+}
+
+function requireEventFlowRuntime(context: EventFlowCompletionContext): OfficialPluginCommandRuntime {
+  if ('router' in context) {
+    return requireOfficialCommandRuntime(context);
+  }
+  if (
+    !context.pluginId
+    || !context.manifest
+    || !context.dataStore
+    || !context.ephemeralStore
+    || !context.configFor
+    || !context.setConfig
+  ) {
+    throw new Error('Community event flows require an initialized plugin runtime context.');
+  }
+  return {
+    pluginId: context.pluginId,
+    manifest: context.manifest,
+    config: context.config,
+    dataStore: context.dataStore,
+    ephemeralStore: context.ephemeralStore,
+    ...(context.databases ? { databases: context.databases } : {}),
+    ...(context.mediaStore ? { mediaStore: context.mediaStore } : {}),
+    configFor: context.configFor,
+    setConfig: context.setConfig,
+    ...(context.communityGroupWidForScope
+      ? { communityGroupWidForScope: context.communityGroupWidForScope }
+      : {}),
+    ...(context.ensureChatArchivePolicyForScope
+      ? { ensureChatArchivePolicyForScope: context.ensureChatArchivePolicyForScope }
+      : {}),
+    ...(context.sendAssistantStatusText
+      ? { sendAssistantStatusText: context.sendAssistantStatusText }
+      : {}),
+    enqueuePluginJob: (input) => enqueueRuntimePluginJob(context.queue, {
+      pluginId: context.pluginId,
+      ...input
+    })
+  };
+}
+
 async function eventActorPermissionAllowed(
-  context: PluginCommandContext,
+  context: EventFlowCompletionContext,
   input: {
     actor: EventAuthorizationPrincipal;
     action: string;
@@ -2829,7 +2832,7 @@ function eventAuthorizationActor(ctx: CommandContext): EventAuthorizationActor |
 }
 
 async function resolveEventDraftAuthorizationActor(
-  context: PluginCommandContext,
+  context: EventFlowCompletionContext,
   draft: Pick<EventDraft, 'actorIdentityId' | 'actorWid'>
 ): Promise<EventAuthorizationActor | undefined> {
   const expectedIdentityId = draft.actorIdentityId?.trim();
@@ -2856,83 +2859,8 @@ function requireEventActor(ctx: CommandContext): NonNullable<CommandContext['act
   return ctx.actor;
 }
 
-function parseEventPrefillArgs(args: string[], profiles: EventProfile[]): EventFlowPrefill {
-  const answers: Record<string, string> = {};
-  let profileId: string | undefined;
-  const questionKeys = new Map<string, string>();
-  for (const profile of profiles) {
-    for (const question of profile.questions) {
-      questionKeys.set(question.key.toLowerCase(), question.key);
-    }
-  }
-
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index] ?? '';
-    if (!arg.startsWith('--') || arg === '--') {
-      continue;
-    }
-    const [rawFlag, inlineValue] = splitFlag(arg);
-    const flag = rawFlag.toLowerCase();
-    const next = inlineValue ?? args[index + 1];
-    const consumedNext = inlineValue === undefined && next !== undefined && !next.startsWith('--');
-
-    if (flag === 'profile') {
-      if (next && !next.startsWith('--')) {
-        profileId = next.trim();
-        if (consumedNext) index += 1;
-      }
-      continue;
-    }
-
-    if (flag === 'answer') {
-      const parsed = next && !next.startsWith('--') ? splitAnswer(next) : undefined;
-      if (parsed) {
-        const key = questionKeys.get(parsed.key.toLowerCase()) ?? parsed.key;
-        answers[key] = parsed.value;
-        if (consumedNext) index += 1;
-      }
-      continue;
-    }
-
-    const questionKey = questionKeys.get(flag);
-    if (questionKey && next && !next.startsWith('--')) {
-      answers[questionKey] = next.trim();
-      if (consumedNext) index += 1;
-    }
-  }
-
-  if (!profileId && profiles.length === 1 && Object.keys(answers).length > 0) {
-    profileId = profiles[0]?.id;
-  }
-  const validProfileId = profileId && profiles.some((profile) => profile.id === profileId)
-    ? profileId
-    : undefined;
-  return {
-    ...(validProfileId ? { profileId: validProfileId } : {}),
-    answers
-  };
-}
-
-function splitFlag(arg: string): [string, string | undefined] {
-  const body = arg.replace(/^--/, '');
-  const equals = body.indexOf('=');
-  return equals >= 0
-    ? [body.slice(0, equals), body.slice(equals + 1)]
-    : [body, undefined];
-}
-
-function splitAnswer(value: string): { key: string; value: string } | undefined {
-  const equals = value.indexOf('=');
-  if (equals <= 0) {
-    return undefined;
-  }
-  const key = value.slice(0, equals).trim();
-  const answer = value.slice(equals + 1).trim();
-  return key && answer ? { key, value: answer } : undefined;
-}
-
 async function appendEventJsonLog(
-  context: PluginCommandContext,
+  context: EventFlowCompletionContext,
   entry: Parameters<typeof appendScopeEventJsonLog>[0]['entry']
 ): Promise<void> {
   try {
@@ -2943,7 +2871,7 @@ async function appendEventJsonLog(
 }
 
 async function recordEventLocationFailure(
-  context: PluginCommandContext,
+  context: EventFlowCompletionContext,
   input: {
     phase: 'geocode' | 'prompt_dispatch';
     scopeId: string;
@@ -2968,8 +2896,12 @@ async function recordEventLocationFailure(
   });
 }
 
-function eventDraftKey(scopeId: string, flowSessionId: string): string {
-  return `event-draft:${scopeId}:${flowSessionId}`;
+function eventCreationCommandIdempotencyKey(
+  scopeId: string,
+  actorIdentityId: string,
+  messageId: string
+): string {
+  return `event-create:command:${scopeId}:${actorIdentityId}:${messageId}`;
 }
 
 function eventCancelDraftKey(scopeId: string, flowSessionId: string): string {

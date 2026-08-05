@@ -1,5 +1,5 @@
-import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
-import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from '../shared';
+import type { AppConfig } from '../../../platform/config/runtimeConfig';
+import type { OfficialPluginCommandRuntime } from '../shared';
 import {
   persistedEventAnnouncementDisposition,
   sendClaimedEventAnnouncement
@@ -30,9 +30,14 @@ export type EventCalendarHintResult =
   | 'skipped'
   | 'failed';
 
+export interface EventCalendarHintContext {
+  config: AppConfig;
+  getGroupInviteCode?(groupWid: string): Promise<string | null>;
+}
+
 export async function sendEventCalendarHint(input: {
-  context: PluginCommandContext;
-  runtime?: OfficialPluginCommandRuntime | undefined;
+  context: EventCalendarHintContext;
+  runtime: OfficialPluginCommandRuntime;
   activeTransport: CalendarHintTextTransport;
   trigger: CalendarHintTrigger;
   scopeId: string;
@@ -53,7 +58,7 @@ export async function sendEventCalendarHint(input: {
   if (!enabled) {
     return 'disabled';
   }
-  const runtime = input.runtime ?? requireOfficialCommandRuntime(input.context);
+  const runtime = input.runtime;
   const db = eventsDatabase(runtime.databases);
   const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', 'initial');
   if (persistedDelivery) {
@@ -174,7 +179,7 @@ export async function sendEventCalendarHint(input: {
 
 async function recordCalendarHintSkipped(
   input: {
-    context: PluginCommandContext;
+    context: EventCalendarHintContext;
     trigger: CalendarHintTrigger;
     scopeId: string;
     announcementGroupWid: string;
@@ -238,7 +243,7 @@ function botVisibleCalendarSubscriptionUrl(input: Parameters<typeof eventsCalend
 }
 
 async function appendEventJsonLog(
-  context: PluginCommandContext,
+  context: EventCalendarHintContext,
   entry: Parameters<typeof appendScopeEventJsonLog>[0]['entry']
 ): Promise<void> {
   try {

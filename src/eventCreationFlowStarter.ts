@@ -15,6 +15,7 @@ import {
   eventCalendarResourceSchema,
   eventProfileSchema,
   localizeDefaultEventProfiles,
+  localizeSubgroupSuggestionPreFlowNotice,
   parseEventsConfig,
   type EventCalendarResource,
   type EventProfile
@@ -152,6 +153,7 @@ export type EventCreationPreflightResult =
       profiles: EventProfile[];
       calendars: EventCalendarResource[];
       timezone: string;
+      suggestionRefusalNoticeText?: string | undefined;
       defaultAnnouncementGroupWid?: string | undefined;
     }
   | {
@@ -170,6 +172,7 @@ export interface AutomaticEventCreationStartInput extends EventCreationTarget {
   actorLabel?: string | undefined;
   externalIdempotencyKey: string;
   origin: FlowStartOrigin;
+  includeSuggestionRefusalNotice?: boolean | undefined;
   privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
 }
 
@@ -270,6 +273,16 @@ export class EventCreationFlowStarter {
             flowSessionId: prepared.flowSessionId
           };
         }
+        const promptDelivered = await this.context.flowEngine.ensureSessionStepPromptDelivered(
+          prepared.flowSessionId
+        ).catch(() => false);
+        if (!promptDelivered) {
+          return {
+            kind: 'unavailable',
+            reason: 'flow_recovery_unavailable',
+            flowSessionId: prepared.flowSessionId
+          };
+        }
         return {
           kind: 'started',
           flowSessionId: prepared.flowSessionId,
@@ -329,6 +342,10 @@ export class EventCreationFlowStarter {
       resolvedLocale!.languagePackScopes
     );
     const profiles = localizeDefaultEventProfiles(config.eventProfiles, t);
+    const suggestionPreFlowNotice = localizeSubgroupSuggestionPreFlowNotice(
+      config.subgroupSuggestionConversion.preFlowNotice,
+      t
+    );
     const defaultAnnouncementGroupWid = await this.context.communityAnnouncementGroupWidForScope?.(input.scopeId)
       || input.groupWid;
     if (!defaultAnnouncementGroupWid && !profiles.some((profile) => profile.announcementGroupWid)) {
@@ -342,6 +359,9 @@ export class EventCreationFlowStarter {
       profiles,
       calendars: config.calendars,
       timezone: config.timezone,
+      ...(suggestionPreFlowNotice.enabled
+        ? { suggestionRefusalNoticeText: suggestionPreFlowNotice.template.trim() }
+        : {}),
       ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {})
     };
   }
@@ -375,6 +395,9 @@ export class EventCreationFlowStarter {
       origin: input.origin,
       scopeId: input.scopeId,
       initialData,
+      ...(input.includeSuggestionRefusalNotice && input.prepared.suggestionRefusalNoticeText
+        ? { initialPromptPreface: input.prepared.suggestionRefusalNoticeText }
+        : {}),
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
         const draft: EventDraft = {
@@ -417,6 +440,16 @@ export class EventCreationFlowStarter {
         flowStart.flowSessionId
       ).catch(() => undefined);
       if (!recovered) {
+        return {
+          kind: 'unavailable',
+          reason: 'flow_recovery_unavailable',
+          flowSessionId: flowStart.flowSessionId
+        };
+      }
+      const promptDelivered = await this.context.flowEngine.ensureSessionStepPromptDelivered(
+        flowStart.flowSessionId
+      ).catch(() => false);
+      if (!promptDelivered) {
         return {
           kind: 'unavailable',
           reason: 'flow_recovery_unavailable',

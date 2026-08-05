@@ -245,7 +245,8 @@ export async function reconcileEventSuggestionsForScope(
             scopeId: input.scopeId,
             actorIdentityId: creatorIdentityId,
             externalIdempotencyKey: eventSuggestionFlowIdempotencyKey(key),
-            origin: { chatId: target.communityJid, context: 'group' }
+            origin: { chatId: target.communityJid, context: 'group' },
+            includeSuggestionRefusalNotice: true
           });
           const flowSessionId = startedFlowSessionId(flow);
           if (!flowSessionId) {

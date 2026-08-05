@@ -17,6 +17,7 @@ export interface EventSuggestionConversionKey {
   scopeId: string;
   communityJid: string;
   suggestedGroupJid: string;
+  suggestionCreatorJid: string;
 }
 
 export interface StoredEventSuggestionConversion extends EventSuggestionConversionKey {
@@ -37,6 +38,7 @@ interface EventSuggestionConversionRow extends PluginDatabaseRow {
   scope_id: string;
   community_jid: string;
   suggested_group_jid: string;
+  suggestion_creator_jid: string;
   creator_identity_id: string | null;
   status: EventSuggestionConversionStatus;
   flow_session_id: string | null;
@@ -58,12 +60,14 @@ export function observeEventSuggestionConversion(
   const observedAt = input.observedAt ?? new Date().toISOString();
   db.run(
     `INSERT INTO community_event_suggestion_conversions (
-       scope_id, community_jid, suggested_group_jid, status, first_seen_at, updated_at
-     ) VALUES (?, ?, ?, 'observed', ?, ?)
-     ON CONFLICT(scope_id, community_jid, suggested_group_jid) DO NOTHING`,
+       scope_id, community_jid, suggested_group_jid, suggestion_creator_jid,
+       status, first_seen_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'observed', ?, ?)
+     ON CONFLICT(scope_id, community_jid, suggested_group_jid, suggestion_creator_jid) DO NOTHING`,
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     observedAt,
     observedAt
   );
@@ -77,10 +81,14 @@ export function getEventSuggestionConversion(
   const key = normalizedKey(input);
   const row = db.get<EventSuggestionConversionRow>(
     `SELECT * FROM community_event_suggestion_conversions
-      WHERE scope_id = ? AND community_jid = ? AND suggested_group_jid = ?`,
+      WHERE scope_id = ?
+        AND community_jid = ?
+        AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?`,
     key.scopeId,
     key.communityJid,
-    key.suggestedGroupJid
+    key.suggestedGroupJid,
+    key.suggestionCreatorJid
   );
   return row ? fromRow(row) : undefined;
 }
@@ -93,7 +101,8 @@ export function listEventSuggestionConversions(
   return db.all<EventSuggestionConversionRow>(
     `SELECT * FROM community_event_suggestion_conversions
       WHERE scope_id = ?
-      ORDER BY first_seen_at ASC, community_jid ASC, suggested_group_jid ASC`,
+      ORDER BY first_seen_at ASC, community_jid ASC, suggested_group_jid ASC,
+        suggestion_creator_jid ASC`,
     normalizedScopeId
   ).map(fromRow);
 }
@@ -120,6 +129,7 @@ export function claimEventSuggestionConversion(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND status IN ('observed', 'flow_started_pending_reject', 'reject_outcome_unknown')
         AND (lease_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
     leaseId,
@@ -128,6 +138,7 @@ export function claimEventSuggestionConversion(
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     now
   );
   if (updated.changes !== 1) {
@@ -160,6 +171,7 @@ export function bindEventSuggestionCreatorIdentity(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND lease_id = ?
         AND status IN ('observed', 'flow_started_pending_reject', 'reject_outcome_unknown')`,
     creatorIdentityId,
@@ -167,6 +179,7 @@ export function bindEventSuggestionCreatorIdentity(
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     leaseId
   );
   if (updated.changes !== 1) {
@@ -197,6 +210,7 @@ export function markEventSuggestionFlowStarted(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND lease_id = ?
         AND status = 'observed'`,
     flowSessionId,
@@ -205,6 +219,7 @@ export function markEventSuggestionFlowStarted(
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     leaseId
   );
   if (updated.changes !== 1) {
@@ -265,12 +280,14 @@ export function markEventSuggestionDisappeared(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND status = 'observed'
         AND lease_id IS NULL`,
     updatedAt,
     key.scopeId,
     key.communityJid,
-    key.suggestedGroupJid
+    key.suggestedGroupJid,
+    key.suggestionCreatorJid
   ).changes === 1;
 }
 
@@ -293,12 +310,14 @@ export function releaseEventSuggestionConversionClaim(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND lease_id = ?`,
     input.error?.trim() || null,
     updatedAt,
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     requiredValue(input.leaseId, 'leaseId')
   ).changes === 1;
 }
@@ -347,6 +366,7 @@ function updateClaimedStatus(
       WHERE scope_id = ?
         AND community_jid = ?
         AND suggested_group_jid = ?
+        AND suggestion_creator_jid = ?
         AND lease_id = ?
         AND status IN (${placeholders})`,
     transition.to,
@@ -358,6 +378,7 @@ function updateClaimedStatus(
     key.scopeId,
     key.communityJid,
     key.suggestedGroupJid,
+    key.suggestionCreatorJid,
     leaseId,
     ...transition.from
   );
@@ -382,7 +403,11 @@ function normalizedKey(input: EventSuggestionConversionKey): EventSuggestionConv
   return {
     scopeId: requiredValue(input.scopeId, 'scopeId'),
     communityJid: requiredValue(input.communityJid, 'communityJid').toLowerCase(),
-    suggestedGroupJid: requiredValue(input.suggestedGroupJid, 'suggestedGroupJid').toLowerCase()
+    suggestedGroupJid: requiredValue(input.suggestedGroupJid, 'suggestedGroupJid').toLowerCase(),
+    suggestionCreatorJid: requiredValue(
+      input.suggestionCreatorJid,
+      'suggestionCreatorJid'
+    ).toLowerCase()
   };
 }
 
@@ -399,6 +424,7 @@ function fromRow(row: EventSuggestionConversionRow): StoredEventSuggestionConver
     scopeId: row.scope_id,
     communityJid: row.community_jid,
     suggestedGroupJid: row.suggested_group_jid,
+    suggestionCreatorJid: row.suggestion_creator_jid,
     ...(row.creator_identity_id ? { creatorIdentityId: row.creator_identity_id } : {}),
     status: row.status,
     ...(row.flow_session_id ? { flowSessionId: row.flow_session_id } : {}),

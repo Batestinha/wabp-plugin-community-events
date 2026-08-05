@@ -81,7 +81,7 @@ export const eventsControls: ControlDescriptor[] = [
   control(
     'subgroupSuggestionConversion.policy',
     'Subgroup suggestion conversion',
-    'Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh event-creation invitations. Suggested group titles are discarded and never used as event prefill.',
+    'Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill.',
     30,
     {
       type: 'enum',
@@ -100,7 +100,7 @@ export const eventsControls: ControlDescriptor[] = [
     true,
     {
       dangerous: true,
-      confirmationMessage: 'Automatically converting subgroup suggestions rejects the native WhatsApp suggestion and starts a fresh event-creation invitation. The suggested group title is discarded.'
+      confirmationMessage: 'Automatically converting subgroup suggestions starts a fresh blank event-creation flow and then rejects the native WhatsApp suggestion. The suggested group title is discarded.'
     }
   ),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {

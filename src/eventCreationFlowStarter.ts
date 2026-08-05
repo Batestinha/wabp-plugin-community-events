@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type {
   FlowEngine,
   FlowStartOrigin,
@@ -11,6 +12,8 @@ import type { CurrentManagedGroupMembershipMode } from '../../../platform/govern
 import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
 import {
   eventProfilePermission,
+  eventCalendarResourceSchema,
+  eventProfileSchema,
   localizeDefaultEventProfiles,
   parseEventsConfig,
   type EventCalendarResource,
@@ -18,12 +21,16 @@ import {
 } from './config';
 import {
   createEventFlowDefinition,
+  EVENT_CREATION_FLOW_TYPE_PREFIX,
   eventInitialFlowData,
+  isEventCreationFlowType,
+  restoreEventFlowDefinition,
   type EventFlowPrefill
 } from './flow';
 import { EVENTS_PLUGIN_ID } from './manifest';
 
 export interface EventDraft {
+  schemaVersion: 1;
   flowSessionId: string;
   flowType: string;
   scopeId: string;
@@ -40,8 +47,63 @@ export interface EventDraft {
   profiles: EventProfile[];
   calendars: EventCalendarResource[];
   prefill: EventFlowPrefill;
+  initialData: Record<string, unknown>;
   createdAt: string;
 }
+
+const eventFlowPrefillSchema = z.object({
+  profileId: z.string().trim().min(1).optional(),
+  answers: z.record(z.string())
+}).strict();
+
+const privateDeliveryFallbackSchema = z.object({
+  chatId: z.string().trim().min(1),
+  mentionedWids: z.array(z.string().trim().min(1)),
+  quotePolicy: z.discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('required'),
+      messageId: z.string().trim().min(1),
+      sourceChatId: z.string().trim().min(1).optional(),
+      reason: z.string().optional()
+    }).strict(),
+    z.object({
+      mode: z.literal('optional'),
+      messageId: z.string().trim().min(1),
+      sourceChatId: z.string().trim().min(1).optional(),
+      reason: z.string().optional()
+    }).strict(),
+    z.object({
+      mode: z.literal('none'),
+      reason: z.string()
+    }).strict()
+  ]).optional(),
+  quotedMessageId: z.string().trim().min(1).optional()
+}).strict();
+
+export const eventDraftSchema = z.object({
+  schemaVersion: z.literal(1),
+  flowSessionId: z.string().trim().min(1),
+  flowType: z.string().trim().refine(
+    isEventCreationFlowType,
+    'Expected an event creation flow type'
+  ),
+  scopeId: z.string().trim().min(1),
+  groupId: z.string().trim().min(1).optional(),
+  groupWid: z.string().trim().min(1).optional(),
+  chatId: z.string().trim().min(1),
+  actorWid: z.string().trim().min(1),
+  actorIdentityId: z.string().trim().min(1),
+  actorLabel: z.string().trim().min(1),
+  privateDeliveryFallback: privateDeliveryFallbackSchema.optional(),
+  defaultAnnouncementGroupWid: z.string().trim().min(1).optional(),
+  timezone: z.string().trim().min(1),
+  locale: z.string().trim().min(1),
+  profiles: z.array(eventProfileSchema).min(1),
+  calendars: z.array(eventCalendarResourceSchema).min(1),
+  prefill: eventFlowPrefillSchema,
+  initialData: z.record(z.unknown()),
+  createdAt: z.string().datetime()
+}).strict();
 
 export interface EventCreationFlowStarterContext {
   flowEngine: FlowEngine;
@@ -78,6 +140,7 @@ export type EventCreationPreflightUnavailableReason =
   | 'authorization_unavailable'
   | 'permission_denied'
   | 'active_private_flow'
+  | 'flow_recovery_unavailable'
   | 'already_started';
 
 export type EventCreationPreflightResult =
@@ -179,9 +242,14 @@ export class EventCreationFlowStarter {
       ...(input.externalIdempotencyKey ? { externalIdempotencyKey: input.externalIdempotencyKey } : {})
     });
     if (inspection.kind !== 'available') {
+      const duplicateIsActive = inspection.kind === 'duplicate'
+        && inspection.session.status === 'ACTIVE'
+        && inspection.session.expiresAt > new Date();
       return {
         kind: 'unavailable',
-        reason: inspection.kind === 'duplicate' ? 'already_started' : 'active_private_flow',
+        reason: inspection.kind === 'duplicate'
+          ? duplicateIsActive ? 'already_started' : 'flow_recovery_unavailable'
+          : 'active_private_flow',
         flowSessionId: inspection.session.id
       };
     }
@@ -192,6 +260,16 @@ export class EventCreationFlowStarter {
     const prepared = await this.preflightAutomatic(input);
     if (prepared.kind === 'unavailable') {
       if (prepared.reason === 'already_started' && prepared.flowSessionId) {
+        const recovered = await this.context.flowEngine.ensureDefinitionForSession(
+          prepared.flowSessionId
+        ).catch(() => undefined);
+        if (!recovered) {
+          return {
+            kind: 'unavailable',
+            reason: 'flow_recovery_unavailable',
+            flowSessionId: prepared.flowSessionId
+          };
+        }
         return {
           kind: 'started',
           flowSessionId: prepared.flowSessionId,
@@ -272,7 +350,7 @@ export class EventCreationFlowStarter {
     prepared: Extract<EventCreationPreflightResult, { kind: 'ready' }>;
     actorLabel: string;
     prefill: EventFlowPrefill;
-  }): Promise<Extract<EventCreationStartResult, { kind: 'started' }>> {
+  }): Promise<EventCreationStartResult> {
     const startedAt = new Date();
     const initialData = eventInitialFlowData(input.prepared.profiles, input.prefill, {
       timezone: input.prepared.timezone,
@@ -300,6 +378,7 @@ export class EventCreationFlowStarter {
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
         const draft: EventDraft = {
+          schemaVersion: 1,
           flowSessionId: session.id,
           flowType: definition.flowType,
           scopeId: input.scopeId,
@@ -318,9 +397,13 @@ export class EventCreationFlowStarter {
           profiles: input.prepared.profiles,
           calendars: input.prepared.calendars,
           prefill: input.prefill,
+          initialData,
           createdAt: startedAt.toISOString()
         };
-        await this.context.dataStore.set(eventDraftKey(input.scopeId, session.id), draft);
+        await this.context.dataStore.set(
+          eventDraftKey(input.scopeId, session.id),
+          eventDraftSchema.parse(draft)
+        );
         draftCreated = true;
       },
       onSessionStartFailed: async (session) => {
@@ -329,12 +412,85 @@ export class EventCreationFlowStarter {
         }
       }
     });
+    if (flowStart.deduplicated) {
+      const recovered = await this.context.flowEngine.ensureDefinitionForSession(
+        flowStart.flowSessionId
+      ).catch(() => undefined);
+      if (!recovered) {
+        return {
+          kind: 'unavailable',
+          reason: 'flow_recovery_unavailable',
+          flowSessionId: flowStart.flowSessionId
+        };
+      }
+    }
     return {
       kind: 'started',
       ...flowStart,
       usedPrivateDeliveryFallback: Boolean(flowStart.privateDeliveryFallback)
     };
   }
+}
+
+const eventCreationResolverRegistrations = new WeakSet<FlowEngine>();
+
+export function registerEventCreationFlowDefinitionResolver(
+  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n'>,
+  registerCompletionHandlers: RegisterEventCreationCompletionHandlers
+): void {
+  if (eventCreationResolverRegistrations.has(context.flowEngine)) {
+    return;
+  }
+  context.flowEngine.registerDefinitionResolver({
+    ownerId: EVENTS_PLUGIN_ID,
+    flowTypePrefix: EVENT_CREATION_FLOW_TYPE_PREFIX,
+    async resolve(session) {
+      if (!session.scopeId) {
+        throw new Error(`Event creation flow ${session.id} has no scope.`);
+      }
+      const rawDraft = await context.dataStore.get(
+        eventDraftKey(session.scopeId, session.id)
+      );
+      const parsed = eventDraftSchema.safeParse(rawDraft);
+      if (!parsed.success) {
+        throw new Error(`Event creation flow ${session.id} has no valid durable draft recipe.`);
+      }
+      const draft = parsed.data;
+      if (
+        draft.flowSessionId !== session.id
+        || draft.flowType !== session.flowType
+        || draft.scopeId !== session.scopeId
+        || draft.actorIdentityId !== session.identityId
+      ) {
+        throw new Error(`Event creation flow ${session.id} durable draft does not match its session.`);
+      }
+      const t = await translatorForEventDraft(context.i18n, draft);
+      const definition = restoreEventFlowDefinition({
+        flowType: draft.flowType,
+        t,
+        profiles: draft.profiles,
+        prefill: draft.prefill,
+        timezone: draft.timezone,
+        locale: draft.locale,
+        initialData: draft.initialData
+      });
+      registerCompletionHandlers(definition.flowType, draft.profiles, t);
+      return definition;
+    }
+  });
+  eventCreationResolverRegistrations.add(context.flowEngine);
+}
+
+async function translatorForEventDraft(
+  i18n: EventCreationFlowStarterContext['i18n'],
+  draft: EventDraft
+): Promise<TranslateFn> {
+  const service = i18n as EventCreationFlowStarterContext['i18n'] & Pick<I18nService, 'translatorForIdentity'>;
+  if (typeof service.translatorForIdentity === 'function') {
+    return service.translatorForIdentity(draft.actorIdentityId, draft.scopeId);
+  }
+  const locale = await i18n.resolveIdentityLocale(draft.actorIdentityId, draft.scopeId);
+  return i18n.translator(locale.locale, locale.languagePackScopes);
 }
 
 export function eventDraftKey(scopeId: string, flowSessionId: string): string {

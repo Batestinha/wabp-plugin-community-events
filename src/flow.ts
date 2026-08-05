@@ -35,6 +35,8 @@ export interface EventFlowPrefill {
   answers: Record<string, string>;
 }
 
+export const EVENT_CREATION_FLOW_TYPE_PREFIX = 'official.community-events.create.';
+
 export function createEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
@@ -50,6 +52,55 @@ export function createEventFlowDefinition(input: {
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
 }): FlowDefinition {
+  const flowType = input.flowTypePrefix
+    ? `${input.flowTypePrefix}.${randomUUID()}`
+    : `${EVENT_CREATION_FLOW_TYPE_PREFIX}${randomUUID()}`;
+  return buildEventFlowDefinition(input, flowType);
+}
+
+export function restoreEventFlowDefinition(input: {
+  flowType: string;
+  t: TranslateFn;
+  profiles: EventProfile[];
+  prefill?: EventFlowPrefill | undefined;
+  timezone?: string | undefined;
+  locale?: string | undefined;
+  initialData: Record<string, unknown>;
+}): FlowDefinition {
+  const flowType = input.flowType.trim();
+  if (!isEventCreationFlowType(flowType)) {
+    throw new Error(`Invalid event creation flow type: ${flowType || '(empty)'}`);
+  }
+  return buildEventFlowDefinition({
+    t: input.t,
+    profiles: input.profiles,
+    prefill: input.prefill,
+    timezone: input.timezone,
+    locale: input.locale,
+    initialData: input.initialData,
+    completeMessageKey: false
+  }, flowType);
+}
+
+export function isEventCreationFlowType(flowType: string): boolean {
+  return flowType.startsWith(EVENT_CREATION_FLOW_TYPE_PREFIX)
+    && flowType.length > EVENT_CREATION_FLOW_TYPE_PREFIX.length;
+}
+
+function buildEventFlowDefinition(input: {
+  t: TranslateFn;
+  profiles: EventProfile[];
+  prefill?: EventFlowPrefill | undefined;
+  timezone?: string | undefined;
+  locale?: string | undefined;
+  initialData?: Record<string, unknown> | undefined;
+  askPrefilledQuestions?: boolean | undefined;
+  confirmMessageKey?: string | undefined;
+  pastCompletionConfirmMessageKey?: string | undefined;
+  completeMessageKey?: string | false | undefined;
+  allowPastStartsAt?: boolean | undefined;
+  now?: (() => Date) | undefined;
+}, flowType: string): FlowDefinition {
   const timezone = input.timezone ?? 'UTC';
   const locale = input.locale ?? 'en';
   const initialData = input.initialData ?? eventInitialFlowData(input.profiles, input.prefill, {
@@ -167,7 +218,7 @@ export function createEventFlowDefinition(input: {
   }
 
   return {
-    flowType: `${input.flowTypePrefix ?? 'official.community-events.create'}.${randomUUID()}`,
+    flowType,
     t: input.t,
     initialStepId: initialProfile
       ? input.askPrefilledQuestions

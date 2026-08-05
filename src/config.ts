@@ -131,7 +131,10 @@ const eventCalendarResourceObjectSchema = z.object({
   }).strict().default({})
 }).strict();
 
-const eventCalendarResourceSchema = z.preprocess(normalizeEventCalendarResourceInput, eventCalendarResourceObjectSchema);
+export const eventCalendarResourceSchema = z.preprocess(
+  normalizeEventCalendarResourceInput,
+  eventCalendarResourceObjectSchema
+);
 
 export const eventLocationConfigSchema = z.discriminatedUnion('source', [
   z.object({

@@ -71,6 +71,12 @@ import {
   resumeEventProvisioning
 } from './provisioningRecovery';
 import { recoverEventQuestionKeyRenames } from './questionKeyRenameRecovery';
+import {
+  handleEventSuggestionReconcileJob,
+  recoverEventSuggestionConversionJobs
+} from './suggestionConversion';
+import { registerEventFlowCompletionHandlers } from './commands';
+import { registerEventCreationFlowDefinitionResolver } from './eventCreationFlowStarter';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
@@ -93,6 +99,15 @@ interface EventsHooksOptions {
 }
 
 export function createEventsHooks(context: PluginRuntimeContext, options: EventsHooksOptions = {}): PluginRuntimeHooks {
+  if (context.flowEngine) {
+    registerEventCreationFlowDefinitionResolver({
+      flowEngine: context.flowEngine,
+      dataStore: context.dataStore,
+      i18n: context.i18n
+    }, (flowType, profiles, t) => {
+      registerEventFlowCompletionHandlers(context, flowType, profiles, t);
+    });
+  }
   if (options.recoverJobs !== false) {
     void recoverEventJobs(context).catch((error) => {
       context.logger.error({ error }, 'official.community-events job recovery failed');
@@ -121,10 +136,11 @@ export async function recoverEventJobs(
   const cleanupJobs = await recoverEventCleanupJobs(context);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs;
+  const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + suggestionReconcileJobs;
   if (enqueued > 0 || questionKeyRenames.settled > 0 || questionKeyRenames.unresolved > 0) {
     context.logger.info(
-      { enqueued, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs },
+      { enqueued, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -318,6 +334,10 @@ async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVo
 }
 
 async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEvent): Promise<PluginAction[]> {
+  if (event.jobName === EVENTS_JOBS.suggestionReconcile) {
+    await handleEventSuggestionReconcileJob(context, event);
+    return [];
+  }
   if (event.jobName === EVENTS_JOBS.questionKeyRenameRecovery) {
     const operationId = jobPayloadQuestionKeyRenameOperationId(event.payload);
     if (operationId) {

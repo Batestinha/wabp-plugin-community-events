@@ -2,6 +2,7 @@ CREATE TABLE community_event_suggestion_conversions (
   scope_id TEXT NOT NULL,
   community_jid TEXT NOT NULL,
   suggested_group_jid TEXT NOT NULL,
+  suggestion_creator_jid TEXT NOT NULL,
   creator_identity_id TEXT,
   status TEXT NOT NULL CHECK (status IN (
     'observed',
@@ -19,7 +20,7 @@ CREATE TABLE community_event_suggestion_conversions (
   rejected_at TEXT,
   flow_started_at TEXT,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (scope_id, community_jid, suggested_group_jid)
+  PRIMARY KEY (scope_id, community_jid, suggested_group_jid, suggestion_creator_jid)
 );
 
 CREATE INDEX community_event_suggestion_conversions_recovery_idx

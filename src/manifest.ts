@@ -18,7 +18,8 @@ export const EVENTS_JOBS = {
   cleanup: 'event.cleanup',
   editRepair: 'event.editRepair',
   weatherForecast: 'event.weatherForecast',
-  questionKeyRenameRecovery: 'event.questionKeyRenameRecovery'
+  questionKeyRenameRecovery: 'event.questionKeyRenameRecovery',
+  suggestionReconcile: 'event.suggestionReconcile'
 } as const;
 
 export const EVENTS_PERMISSIONS = {
@@ -37,7 +38,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.6.1',
+  version: '0.7.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -151,7 +152,8 @@ export const eventsManifest: PluginManifest = {
     EVENTS_JOBS.cleanup,
     EVENTS_JOBS.editRepair,
     EVENTS_JOBS.weatherForecast,
-    EVENTS_JOBS.questionKeyRenameRecovery
+    EVENTS_JOBS.questionKeyRenameRecovery,
+    EVENTS_JOBS.suggestionReconcile
   ],
   cancellation: {
     workflows: [

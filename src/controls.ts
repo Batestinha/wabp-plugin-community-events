@@ -115,7 +115,7 @@ export const eventsControls: ControlDescriptor[] = [
   control(
     'subgroupSuggestionConversion.preFlowNotice.template',
     'Suggestion refusal notice text',
-    'Private text sent before event setup after an eligible native subgroup suggestion is refused. Suggested titles and other suggestion metadata are not available as template variables.',
+    'Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.',
     50,
     { type: 'string', required: true, max: 1000 },
     {

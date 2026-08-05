@@ -56,6 +56,9 @@ export const DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE = 'Event created by {creatorDi
 export const DEFAULT_EVENT_WEATHER_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.weather.template'
 ]!;
+export const DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE = eventsMessages[
+  'official.community-events.subgroupSuggestionConversion.preFlowNotice.template'
+]!;
 
 const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');
 const optionalAuthoredTextSchema = z.string().transform((value) => value.trim() ? value : '');
@@ -438,8 +441,24 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   }
 };
 
+const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
+  .max(1000)
+  .refine((value) => value.trim().length > 0, 'Required')
+  .refine(
+    (value) => !/\{(?:suggested[-_]?title|title)\}/i.test(value),
+    'Suggested subgroup titles are not available to the notice template'
+  );
+
+export const eventSubgroupSuggestionPreFlowNoticeConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  template: eventSubgroupSuggestionPreFlowNoticeTemplateSchema.default(
+    DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE
+  )
+}).strict().default({});
+
 export const eventSubgroupSuggestionConversionConfigSchema = z.object({
-  policy: z.enum(EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES).default('off')
+  policy: z.enum(EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES).default('off'),
+  preFlowNotice: eventSubgroupSuggestionPreFlowNoticeConfigSchema
 }).strict().default({});
 
 const eventsConfigObjectSchema = z.object({
@@ -478,11 +497,26 @@ export type EventCalendarResource = z.infer<typeof eventCalendarResourceSchema>;
 export type EventLocationConfig = z.infer<typeof eventLocationConfigSchema>;
 export type EventWeatherConfig = z.infer<typeof eventWeatherConfigSchema>;
 export type EventProfile = z.infer<typeof eventProfileSchema>;
+export type EventSubgroupSuggestionPreFlowNoticeConfig = z.infer<typeof eventSubgroupSuggestionPreFlowNoticeConfigSchema>;
 export type EventSubgroupSuggestionConversionConfig = z.infer<typeof eventSubgroupSuggestionConversionConfigSchema>;
 export type EventsConfig = z.infer<typeof eventsConfigSchema>;
 
 export function parseEventsConfig(input: unknown): EventsConfig {
   return eventsConfigSchema.parse(input);
+}
+
+export function localizeSubgroupSuggestionPreFlowNotice(
+  notice: EventSubgroupSuggestionPreFlowNoticeConfig,
+  t: TranslateFn
+): EventSubgroupSuggestionPreFlowNoticeConfig {
+  return {
+    ...notice,
+    template: localizeIfDefault(
+      notice.template,
+      DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE,
+      () => t('official.community-events.subgroupSuggestionConversion.preFlowNotice.template')
+    )
+  };
 }
 
 export function localizeDefaultEventProfiles(profiles: EventProfile[], t: TranslateFn): EventProfile[] {

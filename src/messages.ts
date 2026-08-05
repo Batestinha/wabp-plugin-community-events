@@ -14,6 +14,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.permissionDenied': 'You do not have permission to create this event type.',
   'official.community-events.subgroupSuggestionConversion.policy.off': 'Off',
   'official.community-events.subgroupSuggestionConversion.policy.auto_convert': 'Automatically convert',
+  'official.community-events.subgroupSuggestionConversion.preFlowNotice.template': 'Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.',
   'official.community-events.location.select': 'Which result matches the event place “{displayPlace}”?\nSearch: “{searchQuery}”. The search only resolves coordinates; it does not rename the event place.',
   'official.community-events.location.freeText': 'Refine search',
   'official.community-events.location.noResults': 'I could not find a result for “{searchQuery}”. The event place remains “{displayPlace}”. Reply with a more specific search, /cancel, or /stop.',

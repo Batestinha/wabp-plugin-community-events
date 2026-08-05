@@ -1,5 +1,6 @@
 import { defineControl } from '../../../platform/operatorConsole/controlCatalog/define';
 import type { ControlDescriptor, ControlSchemaMetadata, ControlUiHint } from '../../../platform/operatorConsole/controlCatalog/types';
+import { DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE } from './config';
 
 function control(
   path: string,
@@ -101,6 +102,26 @@ export const eventsControls: ControlDescriptor[] = [
     {
       dangerous: true,
       confirmationMessage: 'Automatically converting subgroup suggestions starts a fresh blank event-creation flow and then rejects the native WhatsApp suggestion. The suggested group title is discarded.'
+    }
+  ),
+  control(
+    'subgroupSuggestionConversion.preFlowNotice.enabled',
+    'Suggestion refusal notice',
+    'Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt.',
+    40,
+    { type: 'boolean' },
+    { widget: 'toggle' }
+  ),
+  control(
+    'subgroupSuggestionConversion.preFlowNotice.template',
+    'Suggestion refusal notice text',
+    'Private text sent before event setup after an eligible native subgroup suggestion is refused. Suggested titles and other suggestion metadata are not available as template variables.',
+    50,
+    { type: 'string', required: true, max: 1000 },
+    {
+      widget: 'text',
+      multiline: true,
+      placeholder: DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE
     }
   ),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {

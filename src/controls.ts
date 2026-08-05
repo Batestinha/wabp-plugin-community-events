@@ -8,8 +8,13 @@ function control(
   order: number,
   schema: ControlSchemaMetadata,
   ui: ControlUiHint,
-  configurable = true
+  configurable = true,
+  safety: {
+    dangerous?: boolean | undefined;
+    confirmationMessage?: string | undefined;
+  } = {}
 ): ControlDescriptor {
+  const dangerous = safety.dangerous ?? false;
   return defineControl({
     id: `plugin.official.community-events.${path}`,
     label,
@@ -24,7 +29,15 @@ function control(
     schema,
     ui: { helpText: description, ...ui },
     restartRequirement: 'NO_RESTART',
-    dangerous: false,
+    dangerous,
+    ...(dangerous
+      ? {
+          confirmation: {
+            required: true,
+            message: safety.confirmationMessage ?? 'This changes Community Events automation.'
+          }
+        }
+      : {}),
     sensitivity: { sensitive: false, redact: 'none' },
     auditAction: 'operator_console.plugin_config.update',
     relatedCommandIds: ['/event new', '/event edit', '/event status'],
@@ -65,6 +78,31 @@ const eventsPanelControl = defineControl({
 export const eventsControls: ControlDescriptor[] = [
   control('enabled', 'Enabled', 'Enable guided event creation in this scope.', 10, { type: 'boolean' }, { widget: 'toggle' }),
   control('timezone', 'Timezone', 'IANA timezone used when combining event date and time answers.', 20, { type: 'string', format: 'timezone' }, { widget: 'select' }),
+  control(
+    'subgroupSuggestionConversion.policy',
+    'Subgroup suggestion conversion',
+    'Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh event-creation invitations. Suggested group titles are discarded and never used as event prefill.',
+    30,
+    {
+      type: 'enum',
+      enum: [
+        { value: 'off', label: 'Off' },
+        { value: 'auto_convert', label: 'Automatically convert' }
+      ]
+    },
+    {
+      widget: 'segmented',
+      options: [
+        { value: 'off', label: 'Off' },
+        { value: 'auto_convert', label: 'Automatically convert' }
+      ]
+    },
+    true,
+    {
+      dangerous: true,
+      confirmationMessage: 'Automatically converting subgroup suggestions rejects the native WhatsApp suggestion and starts a fresh event-creation invitation. The suggested group title is discarded.'
+    }
+  ),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',

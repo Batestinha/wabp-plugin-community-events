@@ -6,6 +6,7 @@ export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
 export const EVENT_CHOICE_QUESTION_TYPE = 'choice';
 export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
+export const EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES = ['off', 'auto_convert'] as const;
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
@@ -434,9 +435,14 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   }
 };
 
+export const eventSubgroupSuggestionConversionConfigSchema = z.object({
+  policy: z.enum(EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES).default('off')
+}).strict().default({});
+
 const eventsConfigObjectSchema = z.object({
   enabled: z.boolean().default(false),
   timezone: z.string().trim().min(1).default('UTC'),
+  subgroupSuggestionConversion: eventSubgroupSuggestionConversionConfigSchema,
   cleanup: z.object({
     retryDelaysMinutes: z.array(z.number().int().positive().max(24 * 60 * 30)).max(12).default([15, 60, 360, 1440]),
     lastFailureMessage: z.string().trim().default(''),
@@ -469,6 +475,7 @@ export type EventCalendarResource = z.infer<typeof eventCalendarResourceSchema>;
 export type EventLocationConfig = z.infer<typeof eventLocationConfigSchema>;
 export type EventWeatherConfig = z.infer<typeof eventWeatherConfigSchema>;
 export type EventProfile = z.infer<typeof eventProfileSchema>;
+export type EventSubgroupSuggestionConversionConfig = z.infer<typeof eventSubgroupSuggestionConversionConfigSchema>;
 export type EventsConfig = z.infer<typeof eventsConfigSchema>;
 
 export function parseEventsConfig(input: unknown): EventsConfig {

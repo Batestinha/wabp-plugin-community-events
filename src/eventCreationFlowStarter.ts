@@ -245,13 +245,10 @@ export class EventCreationFlowStarter {
       ...(input.externalIdempotencyKey ? { externalIdempotencyKey: input.externalIdempotencyKey } : {})
     });
     if (inspection.kind !== 'available') {
-      const duplicateIsActive = inspection.kind === 'duplicate'
-        && inspection.session.status === 'ACTIVE'
-        && inspection.session.expiresAt > new Date();
       return {
         kind: 'unavailable',
         reason: inspection.kind === 'duplicate'
-          ? duplicateIsActive ? 'already_started' : 'flow_recovery_unavailable'
+          ? 'already_started'
           : 'active_private_flow',
         flowSessionId: inspection.session.id
       };
@@ -263,17 +260,7 @@ export class EventCreationFlowStarter {
     const prepared = await this.preflightAutomatic(input);
     if (prepared.kind === 'unavailable') {
       if (prepared.reason === 'already_started' && prepared.flowSessionId) {
-        const recovered = await this.context.flowEngine.ensureDefinitionForSession(
-          prepared.flowSessionId
-        ).catch(() => undefined);
-        if (!recovered) {
-          return {
-            kind: 'unavailable',
-            reason: 'flow_recovery_unavailable',
-            flowSessionId: prepared.flowSessionId
-          };
-        }
-        const promptDelivered = await this.context.flowEngine.ensureSessionStepPromptDelivered(
+        const promptDelivered = await this.context.flowEngine.ensureInitialPromptDelivered(
           prepared.flowSessionId
         ).catch(() => false);
         if (!promptDelivered) {
@@ -436,17 +423,7 @@ export class EventCreationFlowStarter {
       }
     });
     if (flowStart.deduplicated) {
-      const recovered = await this.context.flowEngine.ensureDefinitionForSession(
-        flowStart.flowSessionId
-      ).catch(() => undefined);
-      if (!recovered) {
-        return {
-          kind: 'unavailable',
-          reason: 'flow_recovery_unavailable',
-          flowSessionId: flowStart.flowSessionId
-        };
-      }
-      const promptDelivered = await this.context.flowEngine.ensureSessionStepPromptDelivered(
+      const promptDelivered = await this.context.flowEngine.ensureInitialPromptDelivered(
         flowStart.flowSessionId
       ).catch(() => false);
       if (!promptDelivered) {

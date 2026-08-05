@@ -4,7 +4,9 @@ import { eventsMessages } from './messages';
 import {
   EVENT_ALBUM_SOURCE_LIST_METHOD,
   EVENT_ALBUM_SOURCE_RESOLVE_METHOD,
-  EVENT_ALBUM_SOURCE_SERVICE_ID
+  EVENT_ALBUM_SOURCE_SERVICE_ID,
+  EVENT_SUBGROUP_OWNERSHIP_RESOLVE_METHOD,
+  EVENT_SUBGROUP_OWNERSHIP_SERVICE_ID
 } from './serviceApi';
 
 export const EVENTS_PLUGIN_ID = 'official.community-events';
@@ -14,7 +16,9 @@ export const EVENTS_JOBS = {
   close: 'event.close',
   provisioningRecovery: 'event.provisioningRecovery',
   cleanup: 'event.cleanup',
-  weatherForecast: 'event.weatherForecast'
+  editRepair: 'event.editRepair',
+  weatherForecast: 'event.weatherForecast',
+  questionKeyRenameRecovery: 'event.questionKeyRenameRecovery'
 } as const;
 
 export const EVENTS_PERMISSIONS = {
@@ -33,13 +37,16 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.5.0',
+  version: '0.6.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
   defaultMessages: eventsMessages,
   commands: [
     '/event',
+    '/event new',
+    '/event edit',
+    '/event list',
     '/event status',
     '/event cancel'
   ],
@@ -51,20 +58,49 @@ export const eventsManifest: PluginManifest = {
     aliases: ['event', 'calendar', 'activities'],
     topics: [
       {
+        topicId: 'overview-events',
+        titleKey: 'official.community-events.help.feature.title',
+        summaryKey: 'official.community-events.help.feature.summary',
+        order: 5,
+        commands: ['/event'],
+        exampleKeys: ['official.community-events.help.overview.example'],
+        keywords: ['event', 'help', 'usage']
+      },
+      {
         topicId: 'create-events',
         titleKey: 'official.community-events.help.create.title',
         summaryKey: 'official.community-events.help.create.summary',
         order: 10,
-        commands: ['/event'],
+        commands: ['/event new'],
         instructionKeys: ['official.community-events.help.create.instruction'],
         exampleKeys: ['official.community-events.help.create.example'],
         keywords: ['create', 'poll', 'activity', 'calendar']
       },
       {
+        topicId: 'edit-events',
+        titleKey: 'official.community-events.help.edit.title',
+        summaryKey: 'official.community-events.help.edit.summary',
+        order: 20,
+        commands: ['/event edit'],
+        instructionKeys: ['official.community-events.help.edit.instruction'],
+        exampleKeys: ['official.community-events.help.edit.example'],
+        keywords: ['edit', 'update', 'rename', 'date']
+      },
+      {
+        topicId: 'list-events',
+        titleKey: 'official.community-events.help.list.title',
+        summaryKey: 'official.community-events.help.list.summary',
+        order: 30,
+        commands: ['/event list'],
+        instructionKeys: ['official.community-events.help.list.instruction'],
+        exampleKeys: ['official.community-events.help.list.example'],
+        keywords: ['list', 'future', 'upcoming']
+      },
+      {
         topicId: 'inspect-events',
         titleKey: 'official.community-events.help.inspect.title',
         summaryKey: 'official.community-events.help.inspect.summary',
-        order: 20,
+        order: 40,
         commands: ['/event status'],
         exampleKeys: ['official.community-events.help.status.example'],
         keywords: ['status', 'configuration']
@@ -73,7 +109,7 @@ export const eventsManifest: PluginManifest = {
         topicId: 'cancel-events',
         titleKey: 'official.community-events.help.cancel.title',
         summaryKey: 'official.community-events.help.cancel.summary',
-        order: 30,
+        order: 50,
         commands: ['/event cancel'],
         instructionKeys: ['official.community-events.help.cancel.instruction'],
         exampleKeys: ['official.community-events.help.cancel.example'],
@@ -82,14 +118,25 @@ export const eventsManifest: PluginManifest = {
     ]
   },
   eventSubscriptions: ['poll.vote', 'plugin.job', 'group.dismantled'],
-  services: [{
-    serviceId: EVENT_ALBUM_SOURCE_SERVICE_ID,
-    description: 'List and resolve scoped community events as immutable album metadata sources.',
-    methods: [
-      { name: EVENT_ALBUM_SOURCE_LIST_METHOD, access: 'read' },
-      { name: EVENT_ALBUM_SOURCE_RESOLVE_METHOD, access: 'read' }
-    ]
-  }],
+  services: [
+    {
+      serviceId: EVENT_ALBUM_SOURCE_SERVICE_ID,
+      description: 'List and resolve scoped community events as immutable album metadata sources.',
+      methods: [
+        { name: EVENT_ALBUM_SOURCE_LIST_METHOD, access: 'read' },
+        { name: EVENT_ALBUM_SOURCE_RESOLVE_METHOD, access: 'read' }
+      ]
+    },
+    {
+      serviceId: EVENT_SUBGROUP_OWNERSHIP_SERVICE_ID,
+      description: 'Resolve whether a managed subgroup is owned by an event lifecycle.',
+      methods: [{
+        name: EVENT_SUBGROUP_OWNERSHIP_RESOLVE_METHOD,
+        access: 'read',
+        availability: 'installed'
+      }]
+    }
+  ],
   requiredPermissions: [
     EVENTS_PERMISSIONS.configure,
     EVENTS_PERMISSIONS.manage,
@@ -102,7 +149,9 @@ export const eventsManifest: PluginManifest = {
     EVENTS_JOBS.close,
     EVENTS_JOBS.provisioningRecovery,
     EVENTS_JOBS.cleanup,
-    EVENTS_JOBS.weatherForecast
+    EVENTS_JOBS.editRepair,
+    EVENTS_JOBS.weatherForecast,
+    EVENTS_JOBS.questionKeyRenameRecovery
   ],
   cancellation: {
     workflows: [
@@ -111,10 +160,20 @@ export const eventsManifest: PluginManifest = {
         description: 'Guided event setup before an event poll is published.',
         mode: 'core-flow',
         scope: 'actor-chat',
-        commands: ['/event'],
+        commands: ['/event new'],
         cancellableStates: ['active'],
         terminalStates: ['completed', 'cancelled', 'expired'],
         effects: ['discard-event-draft']
+      },
+      {
+        id: 'event-edit',
+        description: 'Guided structured update of an existing event lifecycle.',
+        mode: 'core-flow',
+        scope: 'actor-chat',
+        commands: ['/event edit'],
+        cancellableStates: ['active'],
+        terminalStates: ['completed', 'cancelled', 'expired'],
+        effects: ['discard-event-update-draft']
       },
       {
         id: 'event-cancel-confirmation',
@@ -131,7 +190,7 @@ export const eventsManifest: PluginManifest = {
         description: 'Pending event location confirmation after event setup and before publication.',
         mode: 'plugin-handler',
         scope: 'actor-chat',
-        commands: ['/event'],
+        commands: ['/event new', '/event edit'],
         cancellableStates: ['active'],
         terminalStates: ['completed', 'cancelled', 'expired'],
         effects: ['discard-pending-location-selection']
@@ -153,7 +212,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
   databases: eventsDatabases,
-  dataVersion: '3',
+  dataVersion: '8',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [
@@ -177,7 +236,17 @@ export const eventsManifest: PluginManifest = {
       {
         intent: 'event_create',
         description: 'Start a guided event creation flow.',
-        commands: ['/event']
+        commands: ['/event new']
+      },
+      {
+        intent: 'event_edit',
+        description: 'Update an event by ID, title, or current event subgroup.',
+        commands: ['/event edit']
+      },
+      {
+        intent: 'event_list',
+        description: 'List future active events in chronological order.',
+        commands: ['/event list']
       },
       {
         intent: 'event_status',

@@ -11,7 +11,7 @@ import {
   appendEventLog,
   checkpointEventProvisioningCandidate,
   eventsDatabase,
-  getActiveEventBySubgroup,
+  getLiveEventBySubgroup,
   getEvent,
   listCreatedGroupParticipants,
   listVotes,
@@ -79,7 +79,7 @@ export async function resumeEventProvisioning(
     );
   }
 
-  const activeConflict = getActiveEventBySubgroup(db, subgroupChatId);
+  const activeConflict = getLiveEventBySubgroup(db, subgroupChatId);
   if (activeConflict && activeConflict.id !== event.id) {
     return rejected(
       event,
@@ -173,6 +173,7 @@ export async function resumeEventProvisioning(
     const result = await resumeEventCommunitySubgroup({
       context: input.context,
       scopeId,
+      actorIdentityId: requireRecoveryActorIdentityId(event),
       actorWid: input.actorWid?.trim() || event.actorWid,
       subgroupChatId,
       subgroupTitle,
@@ -341,6 +342,14 @@ export async function resumeEventProvisioning(
   };
 }
 
+function requireRecoveryActorIdentityId(event: StoredEventRecord): string {
+  const actorIdentityId = event.actorIdentityId?.trim();
+  if (!actorIdentityId) {
+    throw new Error(`Event ${event.id} has no authoritative creator identity for provisioning recovery.`);
+  }
+  return actorIdentityId;
+}
+
 export function eventProvisioningResumeDedupeKey(eventId: string, subgroupChatId: string): string {
   return `${EVENTS_JOBS.close}:${eventId}:resume:${subgroupChatId}`;
 }
@@ -411,7 +420,9 @@ function completedWithSubgroup(event: StoredEventRecord, subgroupChatId: string)
     (event.groupLifecycleStatus === 'poll_closed' || event.groupLifecycleStatus === 'cleanup_failed')
   ) || (
     event.eventStatus === 'completed' &&
-    event.groupLifecycleStatus === 'cleaned'
+    (event.groupLifecycleStatus === 'poll_closed' ||
+      event.groupLifecycleStatus === 'cleanup_failed' ||
+      event.groupLifecycleStatus === 'cleaned')
   );
 }
 

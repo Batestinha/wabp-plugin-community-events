@@ -1,5 +1,5 @@
-import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
-import type { PollVoteUpdate } from '../../../platform/transport/transportTypes';
+import type { PluginCommandContext, PluginPollVote } from '../../../platform/pluginRuntime/types';
+import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
@@ -14,6 +14,7 @@ import { sendEventCalendarHint } from './calendarHint';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
 import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
+import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
@@ -25,7 +26,7 @@ import {
   appendEventLog,
   eventsDatabase,
   getActiveEventByPoll,
-  getActiveEventBySubgroup,
+  getLiveEventBySubgroup,
   getCalendarPublicationStatus,
   getEvent,
   getEventWeatherDelivery,
@@ -36,6 +37,7 @@ import {
   updateEventSubgroupTitle,
   upsertVote,
   type EventOrigin,
+  type NewStoredEventRecord,
   type StoredEventLocation,
   type StoredEventRecord
 } from './store';
@@ -56,9 +58,13 @@ export interface EventAdoptionInput {
   pollWaMsgId?: string | undefined;
   subgroupChatId?: string | undefined;
   eventLocation?: StoredEventLocation | undefined;
+  actorIdentityId: string;
+}
+
+type ResolvedEventAdoptionInput = EventAdoptionInput & {
   actorWid: string;
   actorLabel: string;
-}
+};
 
 export type EventAdoptionResult =
   | {
@@ -105,7 +111,31 @@ export async function adoptEventLifecycle(input: {
 }): Promise<EventAdoptionResult> {
   const runtime = input.runtime ?? requireOfficialCommandRuntime(input.context);
   const db = eventsDatabase(runtime.databases);
-  const adoption = normalizeAdoptionInput(input.adoption);
+  const request = normalizeAdoptionInput(input.adoption);
+  if (!request.actorIdentityId) {
+    return { status: 'failed', reason: 'An authoritative actor identity id is required.' };
+  }
+  if (!input.context.resolveStableIdentityById) {
+    return { status: 'failed', reason: 'The authoritative identity address service is unavailable.' };
+  }
+  let actorAddress: Awaited<ReturnType<NonNullable<PluginCommandContext['resolveStableIdentityById']>>>;
+  try {
+    actorAddress = await input.context.resolveStableIdentityById(request.actorIdentityId);
+  } catch {
+    return { status: 'failed', reason: 'The authoritative actor identity could not be resolved.' };
+  }
+  if (actorAddress.identityId !== request.actorIdentityId) {
+    return { status: 'failed', reason: 'The authoritative actor identity resolution was inconsistent.' };
+  }
+  const actorWid = actorAddress.addressBookWid.trim();
+  if (!actorWid) {
+    return { status: 'failed', reason: 'The authoritative actor identity has no address-book address.' };
+  }
+  const adoption: ResolvedEventAdoptionInput = {
+    ...request,
+    actorWid,
+    actorLabel: actorAddress.displayName?.trim() || actorWid
+  };
   const origin = adoptionOrigin(adoption.mode);
 
   if (origin === 'adopted_poll' && !adoption.pollWaMsgId) {
@@ -121,7 +151,7 @@ export async function adoptEventLifecycle(input: {
     return { status: 'failed', reason: 'This poll is already attached to an active event.' };
   }
   const existingSubgroupEvent = adoption.subgroupChatId
-    ? getActiveEventBySubgroup(db, adoption.subgroupChatId)
+    ? getLiveEventBySubgroup(db, adoption.subgroupChatId)
     : undefined;
   if (!adoption.eventId && existingSubgroupEvent) {
     return { status: 'failed', reason: 'This event group is already attached to an active event.' };
@@ -133,7 +163,7 @@ export async function adoptEventLifecycle(input: {
     return { status: 'failed', reason: 'The requested event id does not match the active event attached to this group.' };
   }
 
-  const config = parseEventsConfig(await runtime.configFor(adoption.scopeId, adoption.actorWid));
+  const config = parseEventsConfig(await runtime.configFor(adoption.scopeId, adoption.actorIdentityId));
   const profile = config.eventProfiles.find((candidate) => candidate.id === adoption.profileId);
   if (!profile) {
     return { status: 'failed', reason: `Unknown event profile: ${adoption.profileId}` };
@@ -213,15 +243,17 @@ export async function adoptEventLifecycle(input: {
   });
   const eventId = newEventId();
   const now = new Date();
-  const event: StoredEventRecord = {
+  const event: NewStoredEventRecord = {
     id: eventId,
     scopeId: adoption.scopeId,
     profileId: profile.id,
+    profileRevision: eventProfileQuestionSchemaRevision(profile),
     profileLabel: profile.label,
     origin,
     eventStatus: 'active',
     groupLifecycleStatus: origin === 'adopted_poll' ? 'poll_open' : 'poll_closed',
     calendarStatus: 'included',
+    actorIdentityId: adoption.actorIdentityId,
     actorWid: adoption.actorWid,
     actorLabel: adoption.actorLabel,
     ...(announcementGroupWid ? { announcementGroupWid } : {}),
@@ -237,7 +269,6 @@ export async function adoptEventLifecycle(input: {
     localDate: materialized.localDate,
     ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
     ...(materialized.place ? { place: materialized.place } : {}),
-    ...(materialized.style ? { style: materialized.style } : {}),
     closeAt: materialized.closeAt.toISOString(),
     cleanupAt: materialized.cleanupAt.toISOString(),
     groupTitle: materialized.groupTitle,
@@ -252,7 +283,7 @@ export async function adoptEventLifecycle(input: {
   };
 
   let snapshotVoteCount = 0;
-  let snapshotVotes: PollVoteUpdate[] = [];
+  let snapshotVotes: PluginPollVote[] = [];
   if (adoption.pollWaMsgId) {
     if (!input.context.pollVoteReadbackFor) {
       throw new IncompletePollVoteReadbackError({
@@ -263,8 +294,9 @@ export async function adoptEventLifecycle(input: {
         reason: 'poll_readback_not_configured'
       });
     }
-    snapshotVotes = requireCompletePollVotes(
-      await input.context.pollVoteReadbackFor(adoption.pollWaMsgId)
+    snapshotVotes = await resolvePluginPollVotes(
+      requireCompletePollVotes(await input.context.pollVoteReadbackFor(adoption.pollWaMsgId)),
+      requireAdoptionPollVoteIdentityResolver(input.context)
     );
     snapshotVoteCount = snapshotVotes.length;
   }
@@ -286,6 +318,7 @@ export async function adoptEventLifecycle(input: {
         eventId: event.id,
         scopeId: event.scopeId,
         kind: 'poll',
+        deliveryKey: 'initial',
         chatId: event.announcementGroupWid,
         messageId: event.pollWaMsgId,
         createdAt: event.createdAt
@@ -373,7 +406,7 @@ async function reconcileAdoptedGroupLifecycle(input: {
   runtime: OfficialPluginCommandRuntime;
   db: ReturnType<typeof eventsDatabase>;
   activeTransport?: EventTextTransport | undefined;
-  adoption: EventAdoptionInput;
+  adoption: ResolvedEventAdoptionInput;
   event: StoredEventRecord;
   profile: EventProfile;
   config: ReturnType<typeof parseEventsConfig>;
@@ -389,6 +422,7 @@ async function reconcileAdoptedGroupLifecycle(input: {
       ...(input.groupValidation ? { groupValidation: input.groupValidation } : {})
     };
   }
+
   if (input.event.subgroupTitle && input.event.subgroupTitle !== liveTitle) {
     return {
       status: 'failed',
@@ -580,6 +614,7 @@ export type AdoptedEventGroupHintResult =
   | 'disabled'
   | 'already_sent'
   | 'already_claimed'
+  | 'superseded'
   | 'sent'
   | 'skipped'
   | 'failed';
@@ -597,7 +632,8 @@ export async function sendAdoptedEventGroupHint(input: {
   const persistedDelivery = persistedEventAnnouncementDisposition(
     input.db,
     input.event.id,
-    'event_group_hint'
+    'event_group_hint',
+    'initial'
   );
   if (persistedDelivery) {
     return persistedDelivery;
@@ -654,6 +690,7 @@ export async function sendAdoptedEventGroupHint(input: {
       eventId: input.event.id,
       scopeId: input.event.scopeId,
       kind: 'event_group_hint',
+      deliveryKey: 'initial',
       chatId: input.announcementGroupWid,
       text,
       sender: input.activeTransport
@@ -722,14 +759,22 @@ function adoptionOrigin(mode: EventAdoptionMode): EventOrigin {
   return 'adopted_group';
 }
 
+function requireAdoptionPollVoteIdentityResolver(
+  context: PluginCommandContext
+): NonNullable<PluginCommandContext['resolveIdentityAddress']> {
+  if (!context.resolveIdentityAddress) {
+    throw new Error('Authoritative poll-voter identity resolution is unavailable.');
+  }
+  return context.resolveIdentityAddress;
+}
+
 function normalizeAdoptionInput(input: EventAdoptionInput): EventAdoptionInput {
   return {
     ...input,
     eventId: input.eventId?.trim() || undefined,
     pollWaMsgId: input.pollWaMsgId?.trim() || undefined,
     subgroupChatId: input.subgroupChatId?.trim().toLowerCase() || undefined,
-    actorWid: input.actorWid.trim() || 'operator-console@system',
-    actorLabel: input.actorLabel.trim() || input.actorWid.trim() || 'Operator Console'
+    actorIdentityId: input.actorIdentityId.trim()
   };
 }
 

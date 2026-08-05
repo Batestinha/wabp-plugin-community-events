@@ -6,17 +6,23 @@ import {
   EVENT_ALBUM_SOURCE_LIST_METHOD,
   EVENT_ALBUM_SOURCE_RESOLVE_METHOD,
   EVENT_ALBUM_SOURCE_SERVICE_ID,
+  EVENT_SUBGROUP_OWNERSHIP_RESOLVE_METHOD,
+  EVENT_SUBGROUP_OWNERSHIP_SERVICE_ID,
   type EventAlbumSource,
   type EventAlbumSourceListInput,
   type EventAlbumSourceResolveInput,
+  type EventSubgroupOwnershipResolveInput,
   eventAlbumSourceListInputSchema,
   eventAlbumSourceListOutputSchema,
   eventAlbumSourceResolveInputSchema,
-  eventAlbumSourceResolveOutputSchema
+  eventAlbumSourceResolveOutputSchema,
+  eventSubgroupOwnershipResolveInputSchema,
+  eventSubgroupOwnershipResolveOutputSchema
 } from './serviceApi';
 import {
   eventsDatabase,
   getEvent,
+  listEventsBySubgroupChatId,
   listScopeEvents,
   type StoredEventRecord
 } from './store';
@@ -36,7 +42,7 @@ export function registerEventAlbumSourceServices(
         outputSchema: eventAlbumSourceListOutputSchema,
         async handler(rawInput, call) {
           const input = rawInput as EventAlbumSourceListInput;
-          await assertEventsEnabled(context, call.scopeId, call.actorWid);
+          await assertEventsEnabled(context, call.scopeId, call.actorIdentityId);
           const referenceTime = input.referenceTime ? new Date(input.referenceTime) : new Date();
           const earliest = referenceTime.getTime() - input.lookbackDays * DAY_MS;
           const latest = referenceTime.getTime() + input.lookaheadDays * DAY_MS;
@@ -64,7 +70,7 @@ export function registerEventAlbumSourceServices(
         outputSchema: eventAlbumSourceResolveOutputSchema,
         async handler(rawInput, call) {
           const input = rawInput as EventAlbumSourceResolveInput;
-          await assertEventsEnabled(context, call.scopeId, call.actorWid);
+          await assertEventsEnabled(context, call.scopeId, call.actorIdentityId);
           const event = getEvent(eventsDatabase(context.databases), input.eventId);
           if (!event) {
             return { kind: 'unavailable' as const, reason: 'not_found' as const };
@@ -79,6 +85,29 @@ export function registerEventAlbumSourceServices(
         }
       }
     ]
+  }, {
+    serviceId: EVENT_SUBGROUP_OWNERSHIP_SERVICE_ID,
+    methods: [{
+      name: EVENT_SUBGROUP_OWNERSHIP_RESOLVE_METHOD,
+      access: 'read',
+      inputSchema: eventSubgroupOwnershipResolveInputSchema,
+      outputSchema: eventSubgroupOwnershipResolveOutputSchema,
+      async handler(rawInput, call) {
+        const input = rawInput as EventSubgroupOwnershipResolveInput;
+        const matches = listEventsBySubgroupChatId(
+          eventsDatabase(context.databases),
+          call.scopeId,
+          input.subgroupChatId
+        );
+        if (matches.length === 0) {
+          return { kind: 'unowned' as const };
+        }
+        if (matches.length === 1) {
+          return { kind: 'owned' as const, eventId: matches[0]!.id };
+        }
+        return { kind: 'ambiguous' as const, eventIds: matches.map((event) => event.id) };
+      }
+    }]
   }];
 }
 
@@ -117,9 +146,9 @@ export function eventAlbumSource(event: StoredEventRecord): EventAlbumSource | u
 async function assertEventsEnabled(
   context: PluginServiceRegistrationContext,
   scopeId: string,
-  actorWid?: string | undefined
+  actorIdentityId?: string | undefined
 ): Promise<void> {
-  const config = parseEventsConfig(await context.configFor(scopeId, actorWid));
+  const config = parseEventsConfig(await context.configFor(scopeId, actorIdentityId));
   if (!config.enabled) {
     throw new Error('official.community-events is disabled for this scope.');
   }

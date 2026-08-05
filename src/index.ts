@@ -1,11 +1,15 @@
 import type { BotPlugin } from '../../../platform/pluginRuntime/types';
 import { registerEventsCancellations, registerEventsCommands } from './commands';
 import { createEventsHooks } from './hooks';
+import { migrateEventIdentityData } from './identityMigration';
 import { eventsManifest } from './manifest';
 import { registerEventAlbumSourceServices } from './service';
 
 export const eventsPlugin: BotPlugin = {
   manifest: eventsManifest,
+  lifecycle: {
+    migrateData: migrateEventIdentityData
+  },
   registerCommands(context) {
     registerEventsCommands(context);
   },

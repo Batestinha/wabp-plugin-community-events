@@ -4,6 +4,9 @@ export const EVENT_ALBUM_SOURCE_SERVICE_ID = 'official.community-events.album-so
 export const EVENT_ALBUM_SOURCE_LIST_METHOD = 'listCandidates';
 export const EVENT_ALBUM_SOURCE_RESOLVE_METHOD = 'resolve';
 
+export const EVENT_SUBGROUP_OWNERSHIP_SERVICE_ID = 'official.community-events.subgroup-ownership.v1';
+export const EVENT_SUBGROUP_OWNERSHIP_RESOLVE_METHOD = 'resolve';
+
 export const EVENT_ALBUM_SOURCE_DEFAULT_LIMIT = 12;
 export const EVENT_ALBUM_SOURCE_MAX_LIMIT = 24;
 export const EVENT_ALBUM_SOURCE_DEFAULT_LOOKBACK_DAYS = 180;
@@ -48,8 +51,26 @@ export const eventAlbumSourceResolveOutputSchema = z.discriminatedUnion('kind', 
   }).strict()
 ]);
 
+export const eventSubgroupOwnershipResolveInputSchema = z.object({
+  subgroupChatId: z.string().trim().min(1).max(256)
+}).strict();
+
+export const eventSubgroupOwnershipResolveOutputSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('unowned') }).strict(),
+  z.object({
+    kind: z.literal('owned'),
+    eventId: z.string().trim().min(1).max(128)
+  }).strict(),
+  z.object({
+    kind: z.literal('ambiguous'),
+    eventIds: z.array(z.string().trim().min(1).max(128)).min(2)
+  }).strict()
+]);
+
 export type EventAlbumSourceListInput = z.infer<typeof eventAlbumSourceListInputSchema>;
 export type EventAlbumSource = z.infer<typeof eventAlbumSourceSchema>;
 export type EventAlbumSourceListOutput = z.infer<typeof eventAlbumSourceListOutputSchema>;
 export type EventAlbumSourceResolveInput = z.infer<typeof eventAlbumSourceResolveInputSchema>;
 export type EventAlbumSourceResolveOutput = z.infer<typeof eventAlbumSourceResolveOutputSchema>;
+export type EventSubgroupOwnershipResolveInput = z.infer<typeof eventSubgroupOwnershipResolveInputSchema>;
+export type EventSubgroupOwnershipResolveOutput = z.infer<typeof eventSubgroupOwnershipResolveOutputSchema>;

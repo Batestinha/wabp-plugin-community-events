@@ -6,6 +6,7 @@ export interface EventJsonLogEntry {
   action: string;
   scopeId: string;
   eventId?: string | undefined;
+  actorIdentityId?: string | undefined;
   actorWid?: string | undefined;
   profileId?: string | undefined;
   pollWaMsgId?: string | undefined;

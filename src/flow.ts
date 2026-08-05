@@ -609,7 +609,12 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
   }
   return t('official.community-events.flow.confirmSummary', {
     profile: profile.label,
-    startsAt: formatEventDateTime(answers.startsAt, timezone, locale)
+    startsAt: formatEventDateTime(answers.startsAt, timezone, locale),
+    cleanupAt: formatEventDateTime(
+      new Date(answers.startsAt.getTime() + profile.group.cleanupOffsetHoursAfterStart * 3_600_000),
+      timezone,
+      locale
+    )
   });
 }
 

@@ -3,17 +3,26 @@ import { PollSelectionRule } from '@prisma/client';
 import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
-import type { PluginCancellationRegistration, PluginCommandContext, PluginGroupTitleChangeIntent } from '../../../platform/pluginRuntime/types';
+import type { PluginCancellationRegistration, PluginCommandContext } from '../../../platform/pluginRuntime/types';
 import {
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
-import type { PrivateDeliveryFallback } from '../../../platform/transport/transportTypes';
+import type {
+  OutboundSendResult,
+  PrivateDeliveryFallback,
+  SendTextOptions
+} from '../../../platform/transport/transportTypes';
 import { requireIdentityAddress } from '../../../platform/identity/messageActor';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
 import { cancelEventLifecycle } from './cancellation';
-import { sendClaimedEventAnnouncement } from './announcementDelivery';
+import {
+  eventAnnouncementTransportIdempotencyKey,
+  sendClaimedEventAnnouncement
+} from './announcementDelivery';
+import { repairEventEdit } from './editRepair';
 import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
+import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { sendEventCalendarHint } from './calendarHint';
 import { formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
@@ -31,7 +40,12 @@ import {
   type EventFlowPrefill
 } from './flow';
 import { appendScopeEventJsonLog } from './log';
-import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import {
+  eventGroupHintEnabled,
+  eventGroupJoinUrl,
+  renderEventEditAnnouncement,
+  renderEventGroupAnnouncement
+} from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
@@ -58,10 +72,13 @@ import {
   insertEvent,
   listCancellableEvents,
   listCalendarEvents,
+  listScopeEvents,
   newEventId,
   recordEventAnnouncementMessage,
   updateEventStructuredData,
+  type EventAnnouncementDeliveryIntent,
   type StoredEventLocation,
+  type NewStoredEventRecord,
   type StoredEventRecord,
 } from './store';
 
@@ -70,6 +87,12 @@ const CHAT_TARGET: CommandTargetSpec = {
   name: 'chat',
   flag: 'chat',
   position: 0
+};
+
+const CHAT_FLAG_TARGET: CommandTargetSpec = {
+  kind: 'group',
+  name: 'chat',
+  flag: 'chat'
 };
 
 const SCOPE_TARGET: CommandTargetSpec = {
@@ -86,7 +109,7 @@ interface EventDraft {
   groupWid?: string | undefined;
   chatId: string;
   actorWid: string;
-  actorAliases?: string[] | undefined;
+  actorIdentityId: string;
   actorLabel: string;
   privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
   defaultAnnouncementGroupWid?: string | undefined;
@@ -104,9 +127,10 @@ interface EventCancelDraft {
   scopeId: string;
   chatId: string;
   actorWid: string;
-  actorAliases: string[];
+  actorIdentityId: string;
   actorLabel: string;
   candidateEventIds: string[];
+  creatorIdentityIds: Record<string, string>;
   createdAt: string;
 }
 
@@ -122,7 +146,8 @@ interface EventUpdateDraft {
   requestedTitle: string;
   sourcePluginId: string;
   actorWid: string;
-  actorAliases: string[];
+  actorIdentityId: string;
+  creatorIdentityId?: string | undefined;
   actorLabel: string;
   privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
   timezone: string;
@@ -134,8 +159,22 @@ interface EventUpdateDraft {
   createdAt: string;
 }
 
+interface EventAuthorizationPrincipal {
+  identityId: string;
+  canonicalWid: string;
+}
+
+interface EventAuthorizationActor extends EventAuthorizationPrincipal {
+  deliveryChatId: string;
+  mentionWid: string;
+}
+
 interface EventTextTransport {
-  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+  sendText(
+    chatId: string,
+    text: string,
+    options?: SendTextOptions | undefined
+  ): Promise<OutboundSendResult>;
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
@@ -198,7 +237,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
     descriptionKey: 'official.community-events.help.status',
     exampleKey: 'official.community-events.help.status.example'
   }), async (ctx) => {
-    const config = parseEventsConfig(await runtime.configFor(requireScopeId(ctx), ctx.message.senderWid));
+    const config = parseEventsConfig(await runtime.configFor(requireScopeId(ctx), eventAuthorizationActor(ctx)?.identityId));
     return {
       handled: true,
       text: ctx.t('official.community-events.status', {
@@ -226,13 +265,64 @@ export function registerEventsCommands(context: PluginCommandContext): void {
     }
   }), async (ctx) => startEventCancelFlow(context, ctx));
 
-  router.register('event', '*', eventCommand({
+  router.register('event', 'new', eventCommand({
     auditAction: 'events.create',
-    usage: '/event [groupName|--chat groupName]',
+    usage: '/event new [--chat groupName]',
     topicId: 'create-events',
     descriptionKey: 'official.community-events.help.command',
     exampleKey: 'official.community-events.help.create.example'
   }), async (ctx) => startEventFlow(context, ctx));
+
+  router.register('event', 'edit', eventCommand({
+    auditAction: 'events.edit',
+    usage: '/event edit [eventId|event title]',
+    topicId: 'edit-events',
+    descriptionKey: 'official.community-events.help.edit',
+    exampleKey: 'official.community-events.help.edit.example',
+    requiresCurrentManagedGroupMembership: false,
+    privateManagedTargetArgPosition: false,
+    assistant: {
+      intentTags: ['event', 'edit'],
+      argumentHints: ['<eventId>', '<event title>'],
+      examples: ['/event edit evt-1234abcd', '/event edit Bouldering in Sintra'],
+      executable: true,
+      requiresConfirmation: true
+    }
+  }), async (ctx) => startEventEditFlow(context, ctx));
+
+  router.register('event', 'list', eventCommand({
+    mutation: 'none',
+    auditAction: 'events.list',
+    usage: '/event list',
+    topicId: 'list-events',
+    descriptionKey: 'official.community-events.help.list',
+    exampleKey: 'official.community-events.help.list.example',
+    requiresCurrentManagedGroupMembership: false,
+    privateManagedTargetArgPosition: false,
+    assistant: {
+      intentTags: ['event', 'list'],
+      examples: ['/event list'],
+      executable: true,
+      requiresConfirmation: false
+    }
+  }), async (ctx) => listFutureEvents(context, ctx));
+
+  router.register('event', '*', eventCommand({
+    mutation: 'none',
+    auditAction: 'events.usage',
+    usage: '/event',
+    topicId: 'overview-events',
+    descriptionKey: 'official.community-events.help.command',
+    exampleKey: 'official.community-events.help.overview.example',
+    requiresManagedGroup: false,
+    targeting: false,
+    assistant: {
+      intentTags: ['event', 'help'],
+      examples: ['/event'],
+      executable: true,
+      requiresConfirmation: false
+    }
+  }), async (ctx) => ({ handled: true, text: ctx.t('official.community-events.usage') }));
 }
 
 export function registerEventsCancellations(context: PluginCommandContext): PluginCancellationRegistration[] {
@@ -240,14 +330,17 @@ export function registerEventsCancellations(context: PluginCommandContext): Plug
   return [{
     workflowId: EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID,
     cancel: async (input) => {
+      const actorIdentityId = input.actorIdentityId.trim();
+      if (!actorIdentityId) {
+        return undefined;
+      }
       const result = await cancelActiveEventLocationSelectionsForActor(context, runtime, {
-        actorWids: input.actorWids,
-        chatId: input.message.chatId
+        actorIdentityId
       });
       if (result.cancelled === 0) {
         return undefined;
       }
-      const t = await context.i18n.translatorForIdentity(input.actor.wid, result.scopeId);
+      const t = await context.i18n.translatorForIdentity(actorIdentityId, result.scopeId);
       return {
         workflowId: EVENT_LOCATION_SELECTION_CANCELLATION_WORKFLOW_ID,
         cancelled: true,
@@ -259,12 +352,15 @@ export function registerEventsCancellations(context: PluginCommandContext): Plug
 
 async function startEventFlow(context: PluginCommandContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
+  const actor = eventAuthorizationActor(ctx);
+  if (!actor) {
+    return { handled: true, text: ctx.t('official.community-events.permissionDenied') };
+  }
   await cancelActiveEventLocationSelectionsForActor(context, runtime, {
-    actorWids: eventActorWids(ctx),
-    chatId: ctx.message.chatId
+    actorIdentityId: actor.identityId
   });
   const scopeId = requireScopeId(ctx);
-  const config = parseEventsConfig(await runtime.configFor(scopeId, ctx.message.senderWid));
+  const config = parseEventsConfig(await runtime.configFor(scopeId, actor.identityId));
   if (!config.enabled) {
     return { handled: true, text: ctx.t('official.community-events.disabled') };
   }
@@ -295,9 +391,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     completeMessageKey: false
   });
   registerEventFlowCompletionHandlers(context, definition.flowType, eventProfiles, ctx.t);
-  const actorAliases = eventActorWids(ctx);
-  const privateActorWid = eventPrivateChatWid(ctx);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
+  const privateActorWid = actor.deliveryChatId;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const conversationChatId = ctx.message.context === 'group'
     ? privateActorWid
     : ctx.message.chatId;
@@ -337,8 +432,8 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
     ...(ctx.groupId ? { groupId: ctx.groupId } : {}),
     ...(ctx.groupWid ? { groupWid: ctx.groupWid } : {}),
     chatId: conversationChatId,
-    actorWid: privateActorWid,
-    actorAliases,
+    actorWid: actor.canonicalWid,
+    actorIdentityId: actor.identityId,
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
     ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {}),
@@ -361,17 +456,109 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
   };
 }
 
+async function startEventEditFlow(context: PluginCommandContext, ctx: CommandContext) {
+  const runtime = requireOfficialCommandRuntime(context);
+  const actor = eventAuthorizationActor(ctx);
+  if (!actor) {
+    return { handled: true, text: ctx.t('official.community-events.update.permissionDenied') };
+  }
+  await cancelActiveEventLocationSelectionsForActor(context, runtime, {
+    actorIdentityId: actor.identityId
+  });
+  const scopeId = requireScopeId(ctx);
+  const config = parseEventsConfig(await runtime.configFor(scopeId, actor.identityId));
+  if (!config.enabled) {
+    return { handled: true, text: ctx.t('official.community-events.disabled') };
+  }
+
+  const db = eventsDatabase(runtime.databases);
+  const query = ctx.command.args.join(' ').trim();
+  const subgroupChatId = ctx.groupWid ?? (ctx.message.context === 'group' ? ctx.message.chatId : undefined);
+  const subgroupMatches = !query && subgroupChatId
+    ? listEventsBySubgroupChatId(db, scopeId, subgroupChatId).filter(eventIsEditable)
+    : [];
+  const allEditable = listScopeEvents(db, scopeId)
+    .filter(eventIsEditable);
+  const matches = subgroupMatches.length > 0
+    ? subgroupMatches
+    : query
+      ? findEventMatches(allEditable, query, ctx.locale)
+      : [];
+
+  if (matches.length === 0) {
+    return { handled: true, text: ctx.t('official.community-events.edit.noEvents') };
+  }
+  if (matches.length > 1) {
+    return { handled: true, text: ctx.t('official.community-events.edit.ambiguous') };
+  }
+
+  const event = matches[0]!;
+  const creatorIdentityId = event.actorIdentityId;
+  if (!await eventUpdateAllowed(context, { event, actor, creatorIdentityId })) {
+    return { handled: true, text: ctx.t('official.community-events.update.permissionDenied') };
+  }
+  if (event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open') {
+    return {
+      handled: true,
+      text: ctx.t('official.community-events.edit.pollOpen', {
+        title: eventDisplayTitle(event),
+        eventId: event.id
+      })
+    };
+  }
+
+  return startEventUpdateFlow(context, ctx, {
+    event,
+    config,
+    requestedTitle: eventDisplayTitle(event),
+    sourcePluginId: EVENTS_PLUGIN_ID,
+    actor,
+    creatorIdentityId
+  });
+}
+
+async function listFutureEvents(context: PluginCommandContext, ctx: CommandContext) {
+  const runtime = requireOfficialCommandRuntime(context);
+  const scopeId = requireScopeId(ctx);
+  const config = parseEventsConfig(await runtime.configFor(scopeId, eventAuthorizationActor(ctx)?.identityId));
+  if (!config.enabled) {
+    return { handled: true, text: ctx.t('official.community-events.disabled') };
+  }
+  const now = Date.now();
+  const events = listScopeEvents(eventsDatabase(runtime.databases), scopeId)
+    .filter((event) => event.eventStatus === 'active' && new Date(event.startsAt).getTime() >= now)
+    .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime() || left.id.localeCompare(right.id));
+  if (events.length === 0) {
+    return { handled: true, text: ctx.t('official.community-events.list.none') };
+  }
+  const items = events.map((event) => ctx.t('official.community-events.list.item', {
+    title: eventDisplayTitle(event),
+    startsAt: eventStartsAtLabel(event, ctx.locale),
+    status: eventLifecycleLabel(event, ctx.t),
+    eventId: event.id
+  }));
+  return {
+    handled: true,
+    text: ctx.t('official.community-events.list.result', {
+      count: String(items.length),
+      events: items.join('\n')
+    })
+  };
+}
+
 async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
+  const actor = eventAuthorizationActor(ctx);
+  if (!actor) {
+    return { handled: true, text: ctx.t('official.community-events.cancel.permissionDenied') };
+  }
   await cancelActiveEventLocationSelectionsForActor(context, runtime, {
-    actorWids: eventActorWids(ctx),
-    chatId: ctx.message.chatId
+    actorIdentityId: actor.identityId
   });
   const scopeId = requireScopeId(ctx);
   const db = eventsDatabase(runtime.databases);
-  const actorAliases = eventActorWids(ctx);
-  const actorWid = eventPrivateChatWid(ctx);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
+  const actorWid = actor.deliveryChatId;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const actorLabel = ctx.message.senderDisplayName ?? actorWid;
   const query = ctx.command.args.join(' ').trim();
   const resolution = await resolveEventCancelCandidates(context, {
@@ -380,7 +567,7 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
     chatId: ctx.message.chatId,
     query,
     locale: ctx.locale,
-    actorWids: actorAliases
+    actor
   });
 
   if (resolution.status === 'none') {
@@ -418,50 +605,14 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
     flowType: definition.flowType,
     scopeId,
     chatId: ctx.message.chatId,
-    actorWid,
-    actorAliases,
+    actorWid: actor.canonicalWid,
+    actorIdentityId: actor.identityId,
     actorLabel,
     candidateEventIds: resolution.candidates.map((event) => event.id),
+    creatorIdentityIds: resolution.creatorIdentityIds,
     createdAt: new Date().toISOString()
   } satisfies EventCancelDraft);
   return { handled: true, text: ctx.t('official.community-events.cancel.started') };
-}
-
-export async function handleEventGroupTitleChangeIntent(
-  context: PluginCommandContext,
-  input: PluginGroupTitleChangeIntent
-) {
-  const ctx = input.commandContext;
-  if (!ctx.groupWid) {
-    return undefined;
-  }
-  const runtime = requireOfficialCommandRuntime(context);
-  const scopeId = requireScopeId(ctx);
-  const config = parseEventsConfig(await runtime.configFor(scopeId, ctx.message.senderWid));
-  if (!config.enabled) {
-    return undefined;
-  }
-  const db = eventsDatabase(runtime.databases);
-  const matchingEvents = listEventsBySubgroupChatId(db, scopeId, ctx.groupWid);
-  if (matchingEvents.length === 0) {
-    return undefined;
-  }
-  if (matchingEvents.length > 1) {
-    return { handled: true, text: ctx.t('official.community-events.update.ambiguous') };
-  }
-  const event = matchingEvents[0]!;
-
-  const actorAliases = eventActorWids(ctx);
-  if (!await eventUpdateAllowed(context, { event, actorWids: actorAliases })) {
-    return { handled: true, text: ctx.t('official.community-events.update.permissionDenied') };
-  }
-
-  return startEventUpdateFlow(context, ctx, {
-    event,
-    config,
-    requestedTitle: input.requestedTitle,
-    sourcePluginId: input.sourcePluginId
-  });
 }
 
 async function startEventUpdateFlow(
@@ -472,6 +623,8 @@ async function startEventUpdateFlow(
     config: ReturnType<typeof parseEventsConfig>;
     requestedTitle: string;
     sourcePluginId: string;
+    actor: EventAuthorizationActor;
+    creatorIdentityId?: string | undefined;
   }
 ) {
   const runtime = requireOfficialCommandRuntime(context);
@@ -509,9 +662,8 @@ async function startEventUpdateFlow(
   });
   registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, ctx.t);
 
-  const actorAliases = eventActorWids(ctx);
-  const privateActorWid = eventPrivateChatWid(ctx);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx);
+  const privateActorWid = input.actor.deliveryChatId;
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, input.actor);
   const conversationChatId = ctx.message.context === 'group'
     ? privateActorWid
     : ctx.message.chatId;
@@ -557,8 +709,9 @@ async function startEventUpdateFlow(
     eventUpdatedAt: input.event.updatedAt,
     requestedTitle: input.requestedTitle,
     sourcePluginId: input.sourcePluginId,
-    actorWid: ctx.message.senderWid,
-    actorAliases,
+    actorWid: input.actor.canonicalWid,
+    actorIdentityId: input.actor.identityId,
+    ...(input.creatorIdentityId ? { creatorIdentityId: input.creatorIdentityId } : {}),
     actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
     ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     timezone,
@@ -610,11 +763,15 @@ function registerEventUpdateFlowCompletionHandler(
 
     const db = eventsDatabase(runtime.databases);
     const event = getEvent(db, draft.eventId);
-    if (!event || event.updatedAt !== draft.eventUpdatedAt) {
+    if (!event || !eventIsEditable(event) || event.updatedAt !== draft.eventUpdatedAt) {
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
-    if (!await eventUpdateAllowed(context, { event, actorWids: draft.actorAliases })) {
+    if (!await eventUpdateAllowed(context, {
+      event,
+      actor: { identityId: draft.actorIdentityId, canonicalWid: draft.actorWid },
+      creatorIdentityId: draft.creatorIdentityId
+    })) {
       await activeTransport.sendText(responseChatId, t('official.community-events.update.permissionDenied'));
       return true;
     }
@@ -626,7 +783,7 @@ function registerEventUpdateFlowCompletionHandler(
     }
     const startsInPast = answers.startsAt.getTime() <= Date.now();
     const pastCompletionConfirmed = eventFlowPastCompletionConfirmed(snapshot, draft.profile);
-    if (startsInPast && !pastCompletionConfirmed) {
+    if (event.eventStatus === 'active' && startsInPast && !pastCompletionConfirmed) {
       await activeTransport.sendText(
         responseChatId,
         t('official.community-events.update.pastCompletionConfirmationRequired')
@@ -697,7 +854,7 @@ async function beginEventUpdateLocationSelection(input: {
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.draft.scopeId,
-      actorWid: input.draft.actorWid,
+      actorIdentityId: input.draft.actorIdentityId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       input: {
@@ -768,17 +925,37 @@ async function completeEventUpdate(input: {
 }): Promise<void> {
   const db = eventsDatabase(input.runtime.databases);
   const event = getEvent(db, input.eventId);
-  if (!event || event.updatedAt !== input.draft.eventUpdatedAt) {
+  if (!event || !eventIsEditable(event) || event.updatedAt !== input.draft.eventUpdatedAt) {
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.update.invalid')
     );
     return;
   }
-  if (!await eventUpdateAllowed(input.context, { event, actorWids: input.draft.actorAliases })) {
+  if (!await eventUpdateAllowed(input.context, {
+    event,
+    actor: {
+      identityId: input.draft.actorIdentityId,
+      canonicalWid: input.draft.actorWid
+    },
+    creatorIdentityId: input.draft.creatorIdentityId
+  })) {
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t('official.community-events.update.permissionDenied')
+    );
+    return;
+  }
+  if (!await eventProfileSnapshotIsCurrent({
+    runtime: input.runtime,
+    scopeId: input.draft.scopeId,
+    actorIdentityId: input.draft.actorIdentityId,
+    snapshot: input.draft.profile,
+    t: input.t
+  })) {
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      input.t('official.community-events.update.invalid')
     );
     return;
   }
@@ -793,7 +970,7 @@ async function completeEventUpdate(input: {
     });
     const now = new Date();
     const startsInPast = materialized.startsAt.getTime() <= now.getTime();
-    if (startsInPast && !input.pastCompletionConfirmed) {
+    if (event.eventStatus === 'active' && startsInPast && !input.pastCompletionConfirmed) {
       await input.activeTransport.sendText(
         input.responseChatId,
         input.t('official.community-events.update.pastCompletionConfirmationRequired')
@@ -816,21 +993,36 @@ async function completeEventUpdate(input: {
       materialized,
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
+      locale: input.draft.locale,
       requestedTitle: input.draft.requestedTitle,
       pastCompletionConfirmed: input.pastCompletionConfirmed,
       now,
+      operationId: input.draft.flowSessionId,
       sourcePluginId: input.draft.sourcePluginId
     });
+    if (!outcome.changed) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.update.noChanges', {
+          title: materialized.groupTitle,
+          eventId: event.id
+        })
+      );
+      return;
+    }
     const doneMessageKey = outcome.repairPending
-      ? 'official.community-events.update.donePastCompletionRepairPending'
-      : outcome.completionQueued
+      ? outcome.completedNow
+        ? 'official.community-events.update.donePastCompletionRepairPending'
+        : 'official.community-events.update.doneRepairPending'
+      : outcome.completedNow
         ? 'official.community-events.update.donePastCompletion'
         : 'official.community-events.update.done';
     await input.activeTransport.sendText(
       input.responseChatId,
       input.t(doneMessageKey, {
         title: materialized.groupTitle,
-        eventId: event.id
+        eventId: event.id,
+        cleanupAt: formatEventDateTime(outcome.cleanupAt, event.timezone, input.draft.locale)
       })
     );
   } catch (error) {
@@ -845,7 +1037,7 @@ async function completeEventUpdate(input: {
     });
     await input.activeTransport.sendText(input.responseChatId, reason === EVENT_UPDATE_CONFLICT_ERROR
       ? input.t('official.community-events.update.invalid')
-      : input.t('official.community-events.update.failed', { reason }));
+      : input.t('official.community-events.update.failed'));
   }
 }
 
@@ -860,24 +1052,102 @@ async function updateEventLifecycle(input: {
   materialized: MaterializedEventLifecycle;
   actorWid: string;
   actorLabel: string;
+  locale: string;
   requestedTitle: string;
   pastCompletionConfirmed: boolean;
   now: Date;
+  operationId: string;
   sourcePluginId?: string | undefined;
-}): Promise<{ completionQueued: boolean; repairPending: boolean }> {
-  const updatedAt = input.now.toISOString();
+}): Promise<{ changed: boolean; completedNow: boolean; repairPending: boolean; cleanupAt: Date }> {
+  const previousUpdatedAtMs = new Date(input.event.updatedAt).getTime();
+  const updatedAt = new Date(Math.max(
+    input.now.getTime(),
+    Number.isFinite(previousUpdatedAtMs) ? previousUpdatedAtMs + 1 : input.now.getTime()
+  )).toISOString();
   const completionRequested = input.event.eventStatus === 'active' &&
     input.pastCompletionConfirmed &&
     input.materialized.startsAt.getTime() <= input.now.getTime();
-  const cleanupAt = completionRequested ? input.now : input.materialized.cleanupAt;
-  if (input.event.subgroupChatId) {
-    const capabilities = await input.context.botCapabilitiesFor?.(input.event.subgroupChatId);
+  const cleanupAt = input.materialized.cleanupAt;
+  const timezone = input.event.timezone || input.config.timezone;
+  const changed = completionRequested || eventStructuredDataChanged(input.event, {
+    materialized: input.materialized,
+    cleanupAt,
+    timezone
+  });
+  if (!changed) {
+    return { changed: false, completedNow: false, repairPending: false, cleanupAt };
+  }
+  const liveSubgroupChatId =
+    input.event.subgroupChatId &&
+    (input.event.eventStatus === 'active' || input.event.eventStatus === 'completed') &&
+    (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed')
+      ? input.event.subgroupChatId
+      : undefined;
+  if (liveSubgroupChatId) {
+    const capabilities = await input.context.botCapabilitiesFor?.(liveSubgroupChatId);
     if (capabilities && (!capabilities.botIsAdmin || !capabilities.canChangeInfo || !capabilities.canSetSubject)) {
       throw new Error('Bot cannot change the event subgroup subject.');
     }
   }
+  const calendar = calendarResourceForProfile(input.config, input.profile);
+  const announcementGroupWid = input.profile.eventEditAnnouncement.enabled
+    ? input.event.announcementGroupWid?.trim()
+    : undefined;
+  let announcementIntent: EventAnnouncementDeliveryIntent | undefined;
+  if (input.profile.eventEditAnnouncement.enabled) {
+    if (!announcementGroupWid) {
+      throw new Error('Event edit announcement is enabled, but the event announcement group is unavailable.');
+    }
+    const prospectiveEvent: StoredEventRecord = {
+      ...input.event,
+      eventStatus: completionRequested ? 'completed' : input.event.eventStatus,
+      pollQuestion: input.materialized.pollQuestion,
+      pollOptions: input.materialized.pollOptions,
+      responseClasses: input.materialized.responseClasses,
+      answers: input.materialized.answers,
+      eventLocation: input.materialized.eventLocation,
+      startsAt: input.materialized.startsAt.toISOString(),
+      startsAtUtc: input.materialized.startsAt.toISOString(),
+      timezone,
+      localDate: input.materialized.localDate,
+      localTime: input.materialized.localTime,
+      place: input.materialized.place,
+      closeAt: input.materialized.closeAt.toISOString(),
+      cleanupAt: cleanupAt.toISOString(),
+      groupTitle: input.materialized.groupTitle,
+      ...(input.event.subgroupChatId ? { subgroupTitle: input.materialized.groupTitle } : {}),
+      calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+      calendarLocation: input.materialized.calendarLocation,
+      calendarDescription: input.materialized.calendarDescription,
+      updatedAt
+    };
+    const text = renderEventEditAnnouncement({
+      template: input.profile.eventEditAnnouncement.template,
+      profile: input.profile,
+      event: prospectiveEvent,
+      previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
+      editorDisplayName: input.actorLabel || input.actorWid,
+      locale: input.locale
+    });
+    if (!text.trim()) {
+      throw new Error('Event edit announcement rendered empty.');
+    }
+    announcementIntent = {
+      scopeId: input.event.scopeId,
+      kind: 'event_edit',
+      deliveryKey: input.operationId,
+      chatId: announcementGroupWid,
+      text,
+      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+        eventId: input.event.id,
+        kind: 'event_edit',
+        deliveryKey: input.operationId
+      })
+    };
+  }
   const updated = updateEventStructuredData(input.db, {
     eventId: input.event.id,
+    profileRevision: eventProfileQuestionSchemaRevision(input.profile),
     pollQuestion: input.materialized.pollQuestion,
     pollOptions: input.materialized.pollOptions,
     responseClasses: input.materialized.responseClasses,
@@ -885,11 +1155,10 @@ async function updateEventLifecycle(input: {
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
-    timezone: input.event.timezone || input.config.timezone,
+    timezone,
     localDate: input.materialized.localDate,
     ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
     ...(input.materialized.place ? { place: input.materialized.place } : {}),
-    ...(input.materialized.style ? { style: input.materialized.style } : {}),
     closeAt: input.materialized.closeAt.toISOString(),
     cleanupAt: cleanupAt.toISOString(),
     groupTitle: input.materialized.groupTitle,
@@ -897,86 +1166,79 @@ async function updateEventLifecycle(input: {
     ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
     ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
     expectedUpdatedAt: input.event.updatedAt,
-    updatedAt
+    updatedAt,
+    ...(completionRequested ? { completeEvent: true } : {}),
+    ...(announcementIntent ? { announcementIntent } : {}),
+    repairIntent: {
+      operationId: input.operationId,
+      scopeId: input.event.scopeId,
+      ...(liveSubgroupChatId ? { subgroupChatId: liveSubgroupChatId } : {}),
+      targetGroupTitle: input.materialized.groupTitle,
+      calendarId: input.profile.calendar.calendarId,
+      ...(announcementIntent ? { announcementDeliveryKey: announcementIntent.deliveryKey } : {})
+    }
   });
   if (!updated) {
     throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
   }
 
-  const calendar = calendarResourceForProfile(input.config, input.profile);
-  const calendarEvents = listCalendarEvents(input.db, input.event.scopeId);
-  let publication: Awaited<ReturnType<typeof writePublishAndRecordScopeCalendar>> = undefined;
-  const repairFailures: string[] = [];
-  if (input.event.subgroupChatId) {
-    if (completionRequested) {
-      try {
-        await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
-      } catch (error) {
-        repairFailures.push(error instanceof Error ? error.message : String(error));
-      }
-    } else {
-      await input.activeTransport.setGroupSubject(input.event.subgroupChatId, input.materialized.groupTitle);
-    }
-  }
-  if (completionRequested) {
+  const repair = await repairEventEdit({
+    appConfig: input.runtime.config,
+    db: input.db,
+    operationId: input.operationId,
+    configFor: async () => input.config,
+    sender: input.activeTransport,
+    now: input.now
+  });
+  const repairFailures = [...repair.failures];
+  if (repair.status === 'pending') {
     try {
-      publication = await writePublishAndRecordScopeCalendar({
-        appConfig: input.runtime.config,
-        db: input.db,
-        config: input.config,
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.editRepair,
         scopeId: input.event.scopeId,
-        calendarId: input.profile.calendar.calendarId,
-        events: calendarEvents
+        ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+        ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+        ...(repair.retryAt ? { runAt: repair.retryAt } : { delayMs: 5_000 }),
+        payload: { operationId: input.operationId, attempt: 0 },
+        dedupeKey: `${EVENTS_JOBS.editRepair}:${input.operationId}:initial`
       });
-      if (publication && !publication.ok) {
-        repairFailures.push(publication.error || 'calendar_publication_failed');
-      }
     } catch (error) {
-      repairFailures.push(error instanceof Error ? error.message : String(error));
+      repairFailures.push(`repair_job: ${error instanceof Error ? error.message : String(error)}`);
     }
-  } else {
-    publication = await writePublishAndRecordScopeCalendar({
-      appConfig: input.runtime.config,
-      db: input.db,
-      config: input.config,
-      scopeId: input.event.scopeId,
-      calendarId: input.profile.calendar.calendarId,
-      events: calendarEvents
-    });
   }
 
-  let completionQueued = false;
+  const completedNow = completionRequested;
   if (
-    input.event.subgroupChatId &&
-    input.event.eventStatus === 'active' &&
-    (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed') &&
-    (completionRequested || cleanupAt.getTime() > input.now.getTime())
+    liveSubgroupChatId
   ) {
-    await input.runtime.enqueuePluginJob({
-      jobName: EVENTS_JOBS.cleanup,
-      scopeId: input.event.scopeId,
-      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
-      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
-      ...(!completionRequested ? { runAt: cleanupAt } : {}),
-      payload: { eventId: input.event.id, attempt: 0 },
-      dedupeKey: completionRequested
-        ? `${EVENTS_JOBS.cleanup}:${input.event.id}:past-update:${updatedAt}`
-        : `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${cleanupAt.toISOString()}`
-    });
-    completionQueued = completionRequested;
+    const cleanupDue = cleanupAt.getTime() <= input.now.getTime();
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.cleanup,
+        scopeId: input.event.scopeId,
+        ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+        ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+        ...(!cleanupDue ? { runAt: cleanupAt } : {}),
+        payload: { eventId: input.event.id, attempt: 0 },
+        dedupeKey: cleanupDue
+          ? `${EVENTS_JOBS.cleanup}:${input.event.id}:past-update:${updatedAt}`
+          : `${EVENTS_JOBS.cleanup}:${input.event.id}:updated:${cleanupAt.toISOString()}`
+      });
+    } catch (error) {
+      repairFailures.push(`cleanup_job: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   if (
-    !completionRequested &&
-    input.event.subgroupChatId &&
     input.event.eventStatus === 'active' &&
-    (input.event.groupLifecycleStatus === 'poll_closed' || input.event.groupLifecycleStatus === 'cleanup_failed')
+    !completionRequested &&
+    liveSubgroupChatId
   ) {
     const weatherRequest = eventWeatherForecastJobRequest({
       event: {
         ...input.event,
         startsAt: input.materialized.startsAt.toISOString(),
         startsAtUtc: input.materialized.startsAt.toISOString(),
-        timezone: input.event.timezone || input.config.timezone,
+        timezone,
         ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
         localDate: input.materialized.localDate,
         ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
@@ -988,7 +1250,11 @@ async function updateEventLifecycle(input: {
       profile: input.profile
     });
     if (weatherRequest) {
-      await input.runtime.enqueuePluginJob(weatherRequest);
+      try {
+        await input.runtime.enqueuePluginJob(weatherRequest);
+      } catch (error) {
+        repairFailures.push(`weather_job: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
 
@@ -1008,8 +1274,7 @@ async function updateEventLifecycle(input: {
       completionRequested,
       cleanupAt: cleanupAt.toISOString(),
       calendarId: input.profile.calendar.calendarId,
-      repairFailures,
-      publication
+      repairFailures
     }
   });
   await appendEventJsonLog(input.context, {
@@ -1031,42 +1296,87 @@ async function updateEventLifecycle(input: {
       localTime: input.materialized.localTime,
       completionRequested,
       cleanupAt: cleanupAt.toISOString(),
-      repairFailures,
-      ...(publication ? { publication } : {})
+      repairFailures
     }
   });
-  return { completionQueued, repairPending: repairFailures.length > 0 };
+  return { changed: true, completedNow, repairPending: repairFailures.length > 0, cleanupAt };
+}
+
+function eventStructuredDataChanged(
+  event: StoredEventRecord,
+  input: {
+    materialized: MaterializedEventLifecycle;
+    cleanupAt: Date;
+    timezone: string;
+  }
+): boolean {
+  const materialized = input.materialized;
+  return event.pollQuestion !== materialized.pollQuestion ||
+    stableJson(event.pollOptions) !== stableJson(materialized.pollOptions) ||
+    stableJson(event.responseClasses) !== stableJson(materialized.responseClasses) ||
+    stableJson(event.answers) !== stableJson(materialized.answers) ||
+    stableJson(event.eventLocation) !== stableJson(materialized.eventLocation) ||
+    new Date(event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
+    new Date(event.startsAtUtc ?? event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
+    event.timezone !== input.timezone ||
+    event.localDate !== materialized.localDate ||
+    normalizedOptional(event.localTime) !== normalizedOptional(materialized.localTime) ||
+    normalizedOptional(event.place) !== normalizedOptional(materialized.place) ||
+    new Date(event.closeAt).toISOString() !== materialized.closeAt.toISOString() ||
+    new Date(event.cleanupAt).toISOString() !== input.cleanupAt.toISOString() ||
+    event.groupTitle !== materialized.groupTitle ||
+    (event.subgroupChatId !== undefined && event.subgroupTitle !== materialized.groupTitle) ||
+    event.calendarDurationMinutes !== materialized.calendarDurationMinutes ||
+    normalizedOptional(event.calendarLocation) !== normalizedOptional(materialized.calendarLocation) ||
+    normalizedOptional(event.calendarDescription) !== normalizedOptional(materialized.calendarDescription);
+}
+
+function eventIsEditable(event: StoredEventRecord): boolean {
+  return event.eventStatus === 'active' || event.eventStatus === 'completed';
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+function normalizedOptional(value: string | undefined): string {
+  return value?.trim() ?? '';
 }
 
 async function eventUpdateAllowed(
   context: PluginCommandContext,
   input: {
     event: StoredEventRecord;
-    actorWids: string[];
+    actor: EventAuthorizationPrincipal;
+    creatorIdentityId?: string | undefined;
   }
 ): Promise<boolean> {
-  const actorWids = uniqueEventWids(input.actorWids);
-  if (actorWids.includes(input.event.actorWid)) {
+  if (input.creatorIdentityId && input.actor.identityId === input.creatorIdentityId) {
     return true;
   }
   if (!context.explainPermission) {
     return false;
   }
-  for (const actorWid of actorWids) {
-    const decision = await context.explainPermission({
-      actorWid,
-      action: EVENTS_PERMISSIONS.manage,
-      scopeId: input.event.scopeId,
-      pluginId: EVENTS_PLUGIN_ID,
-      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
-      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
-      requiresCurrentManagedGroupMembership: false
-    });
-    if (decision.allowed) {
-      return true;
-    }
-  }
-  return false;
+  const decision = await context.explainPermission({
+    actorIdentityId: input.actor.identityId,
+    action: EVENTS_PERMISSIONS.manage,
+    scopeId: input.event.scopeId,
+    pluginId: EVENTS_PLUGIN_ID,
+    ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+    ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+    requiresCurrentManagedGroupMembership: false
+  });
+  return decision.allowed;
 }
 
 function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfile): EventFlowPrefill {
@@ -1121,7 +1431,11 @@ function registerEventCancelFlowCompletionHandler(
       await activeTransport.sendText(responseChatId, t('official.community-events.cancel.invalid'));
       return true;
     }
-    if (!await eventCancellationAllowed(context, { event, actorWids: draft.actorAliases })) {
+    if (!await eventCancellationAllowed(context, {
+      event,
+      actor: { identityId: draft.actorIdentityId, canonicalWid: draft.actorWid },
+      creatorIdentityId: draft.creatorIdentityIds[event.id]
+    })) {
       await activeTransport.sendText(responseChatId, t('official.community-events.cancel.permissionDenied'));
       return true;
     }
@@ -1218,10 +1532,14 @@ async function resolveEventCancelCandidates(
     chatId: string;
     query: string;
     locale: string;
-    actorWids: string[];
+    actor: EventAuthorizationPrincipal;
   }
 ): Promise<
-  | { status: 'candidates'; candidates: StoredEventRecord[] }
+  | {
+      status: 'candidates';
+      candidates: StoredEventRecord[];
+      creatorIdentityIds: Record<string, string>;
+    }
   | { status: 'none' }
   | { status: 'permission_denied' }
 > {
@@ -1233,16 +1551,25 @@ async function resolveEventCancelCandidates(
   const matched = subgroupCandidates.length > 0
     ? subgroupCandidates
     : input.query
-      ? findEventCancelMatches(allCandidates, input.query, input.locale)
+      ? findEventMatches(allCandidates, input.query, input.locale)
       : allCandidates;
   if (matched.length === 0) {
     return { status: 'none' };
   }
 
   const authorized: StoredEventRecord[] = [];
+  const creatorIdentityIds: Record<string, string> = {};
   for (const event of matched) {
-    if (await eventCancellationAllowed(context, { event, actorWids: input.actorWids })) {
+    const creatorIdentityId = event.actorIdentityId;
+    if (await eventCancellationAllowed(context, {
+      event,
+      actor: input.actor,
+      creatorIdentityId
+    })) {
       authorized.push(event);
+      if (creatorIdentityId) {
+        creatorIdentityIds[event.id] = creatorIdentityId;
+      }
     }
   }
   if (authorized.length === 0) {
@@ -1250,41 +1577,36 @@ async function resolveEventCancelCandidates(
       ? { status: 'permission_denied' }
       : { status: 'none' };
   }
-  return { status: 'candidates', candidates: uniqueEvents(authorized) };
+  return { status: 'candidates', candidates: uniqueEvents(authorized), creatorIdentityIds };
 }
 
 async function eventCancellationAllowed(
   context: PluginCommandContext,
   input: {
     event: StoredEventRecord;
-    actorWids: string[];
+    actor: EventAuthorizationPrincipal;
+    creatorIdentityId?: string | undefined;
   }
 ): Promise<boolean> {
-  const actorWids = uniqueEventWids(input.actorWids);
-  if (actorWids.includes(input.event.actorWid)) {
+  if (input.creatorIdentityId && input.actor.identityId === input.creatorIdentityId) {
     return true;
   }
   if (!context.explainPermission) {
     return false;
   }
-  for (const actorWid of actorWids) {
-    const decision = await context.explainPermission({
-      actorWid,
-      action: EVENTS_PERMISSIONS.manage,
-      scopeId: input.event.scopeId,
-      pluginId: EVENTS_PLUGIN_ID,
-      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
-      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
-      requiresCurrentManagedGroupMembership: false
-    });
-    if (decision.allowed) {
-      return true;
-    }
-  }
-  return false;
+  const decision = await context.explainPermission({
+    actorIdentityId: input.actor.identityId,
+    action: EVENTS_PERMISSIONS.manage,
+    scopeId: input.event.scopeId,
+    pluginId: EVENTS_PLUGIN_ID,
+    ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+    ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+    requiresCurrentManagedGroupMembership: false
+  });
+  return decision.allowed;
 }
 
-function findEventCancelMatches(events: StoredEventRecord[], query: string, locale = 'en'): StoredEventRecord[] {
+function findEventMatches(events: StoredEventRecord[], query: string, locale = 'en'): StoredEventRecord[] {
   const normalizedQuery = normalizeEventSearchText(query);
   if (!normalizedQuery) {
     return events;
@@ -1434,9 +1756,14 @@ function registerEventFlowCompletionHandlers(
         await activeTransport.sendText(responseChatId, t('official.community-events.invalid'));
         return true;
       }
+      const actor = await resolveEventDraftAuthorizationActor(context, draft);
+      if (!actor) {
+        await activeTransport.sendText(responseChatId, t('official.community-events.permissionDenied'));
+        return true;
+      }
       const permission = eventProfilePermission(profile);
       const permissionAllowed = await eventActorPermissionAllowed(context, {
-        actorWids: draft.actorAliases ?? [draft.actorWid],
+        actor,
         action: permission,
         scopeId: draft.scopeId,
         allowCurrentManagedGroupMember: profile.allowScopeMemberCreation === true,
@@ -1457,7 +1784,7 @@ function registerEventFlowCompletionHandlers(
         runtime,
         activeTransport,
         responseChatId,
-        draft,
+        draft: { ...draft, actorWid: actor.canonicalWid },
         profile,
         answers,
         announcementGroupWid,
@@ -1477,7 +1804,10 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
     if (!pending) {
       return false;
     }
-    const t = await context.i18n.translatorForIdentity(pending.draft.actorWid, pending.draft.scopeId);
+    const t = await context.i18n.translatorForIdentity(
+      pending.draft.actorIdentityId,
+      pending.draft.scopeId
+    );
     const answers = eventFlowAnswersFromPending(pending.answers);
     if (!answers) {
       await clearActiveEventLocationSelection(runtime, pending);
@@ -1487,8 +1817,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
       );
       return true;
     }
-    const actorAliases = pending.draft.actorAliases ?? [pending.draft.actorWid];
-    if (!actorAliases.includes(lock.voterWid)) {
+    if (!eventLocationSelectionRequestedByActor(pending, lock.voterIdentityId)) {
       await activeTransport.sendText(
         pending.responseChatId,
         t('official.community-events.location.wrongRequester')
@@ -1611,7 +1940,7 @@ async function promptEventLocationConfirmation(input: {
         label: input.t('official.community-events.location.freeText')
       },
       recipientWids: [input.pending.responseChatId],
-      eligibleVoterWids: input.pending.draft.actorAliases ?? [input.pending.draft.actorWid],
+      eligibleVoterIdentityIds: [requirePendingEventActorIdentityId(input.pending)],
       selectionRule: PollSelectionRule.SINGLE,
       minSelections: 1,
       maxSelections: 1,
@@ -1648,7 +1977,7 @@ async function requeryEventLocationSelection(input: {
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.pending.draft.scopeId,
-      actorWid: input.pending.draft.actorWid,
+      actorIdentityId: input.pending.draft.actorIdentityId,
       ...(input.pending.draft.groupId ? { groupId: input.pending.draft.groupId } : {}),
       ...(input.pending.draft.groupWid ? { groupWid: input.pending.draft.groupWid } : {}),
       input: {
@@ -1748,7 +2077,7 @@ async function beginEventLocationSelection(input: {
       serviceId: GEOCODER_SERVICE_ID,
       method: GEOCODER_GEOCODE_METHOD,
       scopeId: input.draft.scopeId,
-      actorWid: input.draft.actorWid,
+      actorIdentityId: input.draft.actorIdentityId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       input: {
@@ -1818,6 +2147,19 @@ async function publishConfirmedEvent(input: {
   const eventId = newEventId();
   let creationMode: 'poll' | 'unplanned' = 'poll';
   try {
+    if (!await eventProfileSnapshotIsCurrent({
+      runtime: input.runtime,
+      scopeId: input.draft.scopeId,
+      actorIdentityId: input.draft.actorIdentityId,
+      snapshot: input.profile,
+      t: input.t
+    })) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.invalid')
+      );
+      return;
+    }
     const db = eventsDatabase(input.runtime.databases);
     const materialized = materializeEventLifecycle({
       profile: input.profile,
@@ -1855,13 +2197,10 @@ async function publishConfirmedEvent(input: {
       serviceId: DOAS_POLL_SERVICE_ID,
       method: DOAS_POLL_PUBLISH_METHOD,
       scopeId: input.draft.scopeId,
-      actorWid: input.draft.actorWid,
+      actorIdentityId: input.draft.actorIdentityId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       input: {
-        actorWid: input.draft.actorWid,
-        scopeId: input.draft.scopeId,
-        ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
         groupWid: input.announcementGroupWid,
         question: materialized.pollQuestion,
         options: selectedOptionLabels(input.profile),
@@ -1874,17 +2213,19 @@ async function publishConfirmedEvent(input: {
       throw new Error('doas poll service did not return a message id');
     }
     const nowIso = now.toISOString();
-    const event: StoredEventRecord = {
+    const event: NewStoredEventRecord = {
       id: eventId,
       scopeId: input.draft.scopeId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       profileId: input.profile.id,
+      profileRevision: eventProfileQuestionSchemaRevision(input.profile),
       profileLabel: input.profile.label,
       origin: 'created',
       eventStatus: 'active',
       groupLifecycleStatus: 'poll_open',
       calendarStatus: 'included',
+      actorIdentityId: input.draft.actorIdentityId,
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
       announcementGroupWid: input.announcementGroupWid,
@@ -1900,7 +2241,6 @@ async function publishConfirmedEvent(input: {
       localDate: materialized.localDate,
       ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
       ...(materialized.place ? { place: materialized.place } : {}),
-      ...(materialized.style ? { style: materialized.style } : {}),
       closeAt: materialized.closeAt.toISOString(),
       cleanupAt: materialized.cleanupAt.toISOString(),
       groupTitle: materialized.groupTitle,
@@ -1915,6 +2255,7 @@ async function publishConfirmedEvent(input: {
       eventId: event.id,
       scopeId: event.scopeId,
       kind: 'poll',
+      deliveryKey: 'initial',
       chatId: input.announcementGroupWid,
       messageId: sent.messageId,
       createdAt: nowIso
@@ -2024,6 +2365,23 @@ async function publishConfirmedEvent(input: {
   }
 }
 
+async function eventProfileSnapshotIsCurrent(input: {
+  runtime: OfficialPluginCommandRuntime;
+  scopeId: string;
+  actorIdentityId: string;
+  snapshot: EventProfile;
+  t: CommandContext['t'];
+}): Promise<boolean> {
+  try {
+    const config = parseEventsConfig(await input.runtime.configFor(input.scopeId, input.actorIdentityId));
+    const current = localizeDefaultEventProfiles(config.eventProfiles, input.t)
+      .find((profile) => profile.id === input.snapshot.id);
+    return Boolean(current && stableJson(current) === stableJson(input.snapshot));
+  } catch {
+    return false;
+  }
+}
+
 async function createUnplannedEventLifecycle(input: {
   context: PluginCommandContext;
   runtime: OfficialPluginCommandRuntime;
@@ -2038,17 +2396,19 @@ async function createUnplannedEventLifecycle(input: {
 }): Promise<void> {
   const creatorParticipantWid = eventCreatorParticipantWid(input.draft);
   const nowIso = input.now.toISOString();
-  const intent: StoredEventRecord = {
+  const intent: NewStoredEventRecord = {
     id: input.eventId,
     scopeId: input.draft.scopeId,
     ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
     ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
     profileId: input.profile.id,
+    profileRevision: eventProfileQuestionSchemaRevision(input.profile),
     profileLabel: input.profile.label,
     origin: 'unplanned',
     eventStatus: 'failed',
     groupLifecycleStatus: 'none',
     calendarStatus: 'hidden',
+    actorIdentityId: input.draft.actorIdentityId,
     actorWid: input.draft.actorWid,
     actorLabel: input.draft.actorLabel,
     announcementGroupWid: input.announcementGroupWid,
@@ -2062,7 +2422,6 @@ async function createUnplannedEventLifecycle(input: {
     localDate: input.materialized.localDate,
     ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
     ...(input.materialized.place ? { place: input.materialized.place } : {}),
-    ...(input.materialized.style ? { style: input.materialized.style } : {}),
     closeAt: input.materialized.closeAt.toISOString(),
     cleanupAt: input.materialized.cleanupAt.toISOString(),
     groupTitle: input.materialized.groupTitle,
@@ -2211,6 +2570,7 @@ async function createUnplannedEventLifecycle(input: {
       eventId: event.id,
       scopeId: event.scopeId,
       kind: 'event_group_hint',
+      deliveryKey: 'initial',
       chatId: input.announcementGroupWid,
       text: announcementText,
       sender: input.activeTransport
@@ -2259,6 +2619,7 @@ async function provisionUnplannedEventSubgroup(input: {
     return await createEventCommunitySubgroup({
       context: input.context,
       scopeId: input.event.scopeId,
+      actorIdentityId: requireStoredEventActorIdentityId(input.event),
       actorWid: input.event.actorWid,
       title: input.event.groupTitle,
       participantWids: [input.creatorParticipantWid]
@@ -2272,6 +2633,7 @@ async function provisionUnplannedEventSubgroup(input: {
       const resumed = await resumeEventCommunitySubgroup({
         context: input.context,
         scopeId: input.event.scopeId,
+        actorIdentityId: requireStoredEventActorIdentityId(input.event),
         actorWid: input.event.actorWid,
         subgroupChatId: error.created.chatId,
         subgroupTitle: error.created.title,
@@ -2349,31 +2711,36 @@ function eventCommand(input: {
   auditAction: string;
   permission?: string | undefined;
   usage: string;
-  topicId: 'create-events' | 'inspect-events' | 'cancel-events';
+  topicId: 'overview-events' | 'create-events' | 'inspect-events' | 'cancel-events' | 'edit-events' | 'list-events';
   descriptionKey: string;
-  exampleKey: string;
+  exampleKey?: string | undefined;
   requiresCurrentManagedGroupMembership?: boolean | undefined;
+  requiresManagedGroup?: boolean | undefined;
   privateManagedTargetArgPosition?: number | false | undefined;
+  targeting?: boolean | undefined;
   assistant?: CommandMetadata['assistant'] | undefined;
 }): CommandMetadata {
   return {
     plane: 'group_operation',
     interaction: 'either_same_chat',
     pluginId: EVENTS_PLUGIN_ID,
+    currentManagedGroupMembershipMode: 'effective_scope',
     ...(input.permission ? { permission: input.permission } : {}),
-    requiresManagedGroup: true,
+    requiresManagedGroup: input.requiresManagedGroup ?? true,
     ...(input.requiresCurrentManagedGroupMembership !== undefined
       ? { requiresCurrentManagedGroupMembership: input.requiresCurrentManagedGroupMembership }
       : {}),
-    privateManagedTarget: {
-      mode: 'infer_group_or_community',
-      explicitTargetName: 'chat',
-      ...(input.privateManagedTargetArgPosition !== false
-        ? { explicitArgPosition: input.privateManagedTargetArgPosition ?? 0 }
-        : {}),
-      collapseCommunities: true
-    },
-    targets: [CHAT_TARGET, SCOPE_TARGET],
+    ...(input.targeting === false ? {} : {
+      privateManagedTarget: {
+        mode: 'infer_group_or_community' as const,
+        explicitTargetName: 'chat',
+        ...(input.privateManagedTargetArgPosition !== false
+          ? { explicitArgPosition: input.privateManagedTargetArgPosition ?? 0 }
+          : {}),
+        collapseCommunities: true
+      },
+      targets: [input.privateManagedTargetArgPosition === false ? CHAT_FLAG_TARGET : CHAT_TARGET, SCOPE_TARGET]
+    }),
     mutation: input.mutation ?? 'durable',
     auditAction: input.auditAction,
     assistant: input.assistant ?? {
@@ -2382,10 +2749,10 @@ function eventCommand(input: {
         '--profile <profileId>',
         '--answer <questionKey=value>',
         '--<questionKey> <value>',
-        'Example: /event --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
+        'Example: /event new --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
       ],
       examples: [
-        '/event --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
+        '/event new --profile climbing --place "Sintra" --startDate "tomorrow" --startTime "09:30" --style "Bouldering"'
       ],
       executable: true,
       requiresConfirmation: true
@@ -2396,7 +2763,7 @@ function eventCommand(input: {
       topicId: input.topicId,
       descriptionKey: input.descriptionKey,
       usage: input.usage,
-      exampleKeys: [input.exampleKey],
+      ...(input.exampleKey ? { exampleKeys: [input.exampleKey] } : {}),
       keywords: ['event', input.topicId]
     }
   };
@@ -2405,7 +2772,7 @@ function eventCommand(input: {
 async function eventActorPermissionAllowed(
   context: PluginCommandContext,
   input: {
-    actorWids: string[];
+    actor: EventAuthorizationPrincipal;
     action: string;
     scopeId: string;
     groupId?: string | undefined;
@@ -2416,39 +2783,29 @@ async function eventActorPermissionAllowed(
   if (!context.explainPermission) {
     return false;
   }
-  for (const actorWid of uniqueEventWids(input.actorWids)) {
-    const decision = await context.explainPermission({
-      actorWid,
-      action: input.action,
-      scopeId: input.scopeId,
-      pluginId: EVENTS_PLUGIN_ID,
-      ...(input.groupId ? { groupId: input.groupId } : {}),
-      ...(input.groupWid ? { groupWid: input.groupWid } : {}),
-      requiresCurrentManagedGroupMembership: true,
-      ...(input.allowCurrentManagedGroupMember ? { allowCurrentManagedGroupMember: true } : {})
-    });
-    if (decision.allowed) {
-      return true;
-    }
-  }
-  return false;
+  const decision = await context.explainPermission({
+    actorIdentityId: input.actor.identityId,
+    action: input.action,
+    scopeId: input.scopeId,
+    pluginId: EVENTS_PLUGIN_ID,
+    ...(input.groupId ? { groupId: input.groupId } : {}),
+    ...(input.groupWid ? { groupWid: input.groupWid } : {}),
+    requiresCurrentManagedGroupMembership: true,
+    currentManagedGroupMembershipMode: 'effective_scope',
+    ...(input.allowCurrentManagedGroupMember ? { allowCurrentManagedGroupMember: true } : {})
+  });
+  return decision.allowed;
 }
 
-function eventActorWids(ctx: CommandContext): string[] {
-  return uniqueEventWids([
-    ctx.actor?.wid,
-    ...(ctx.actor?.aliases ?? []),
-    ctx.message.senderWid,
-    ctx.message.authorWid
-  ]);
-}
-
-function privateFlowDeliveryFallback(ctx: CommandContext): PrivateDeliveryFallback | undefined {
+function privateFlowDeliveryFallback(
+  ctx: CommandContext,
+  actor: Pick<EventAuthorizationActor, 'mentionWid'>
+): PrivateDeliveryFallback | undefined {
   const groupWid = ctx.groupWid?.trim() || (ctx.message.context === 'group' ? ctx.message.chatId : '');
   if (!groupWid.endsWith('@g.us')) {
     return undefined;
   }
-  const mentionWid = requireIdentityAddress(requireEventActor(ctx)).mentionWid;
+  const mentionWid = actor.mentionWid;
   return mentionWid
     ? {
         chatId: groupWid,
@@ -2458,8 +2815,38 @@ function privateFlowDeliveryFallback(ctx: CommandContext): PrivateDeliveryFallba
     : undefined;
 }
 
-function eventPrivateChatWid(ctx: CommandContext): string {
-  return requireIdentityAddress(requireEventActor(ctx)).deliveryChatId;
+function eventAuthorizationActor(ctx: CommandContext): EventAuthorizationActor | undefined {
+  const address = requireIdentityAddress(requireEventActor(ctx));
+  const identityId = address.identityId?.trim();
+  return identityId
+    ? {
+        identityId,
+        canonicalWid: address.canonicalWid,
+        deliveryChatId: address.deliveryChatId,
+        mentionWid: address.mentionWid
+      }
+    : undefined;
+}
+
+async function resolveEventDraftAuthorizationActor(
+  context: PluginCommandContext,
+  draft: Pick<EventDraft, 'actorIdentityId' | 'actorWid'>
+): Promise<EventAuthorizationActor | undefined> {
+  const expectedIdentityId = draft.actorIdentityId?.trim();
+  if (!expectedIdentityId || !context.resolveStableIdentityById) {
+    return undefined;
+  }
+  try {
+    const address = await context.resolveStableIdentityById(expectedIdentityId);
+    return {
+      identityId: expectedIdentityId,
+      canonicalWid: address.canonicalWid,
+      deliveryChatId: address.deliveryChatId,
+      mentionWid: address.mentionWid
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function requireEventActor(ctx: CommandContext): NonNullable<CommandContext['actor']> {
@@ -2467,10 +2854,6 @@ function requireEventActor(ctx: CommandContext): NonNullable<CommandContext['act
     throw new Error('Authoritative identity address is required for the community-events command.');
   }
   return ctx.actor;
-}
-
-function uniqueEventWids(values: Array<string | undefined>): string[] {
-  return [...new Set(values.map((value) => value?.trim() ?? '').filter(Boolean))];
 }
 
 function parseEventPrefillArgs(args: string[], profiles: EventProfile[]): EventFlowPrefill {
@@ -2601,26 +2984,25 @@ function eventLocationSelectionKey(id: string): string {
   return `event-location-selection:${id}`;
 }
 
-function eventLocationSelectionActiveKey(wid: string): string {
-  return `event-location-selection-active:${wid}`;
+function eventLocationSelectionActiveIdentityKey(identityId: string): string {
+  return `event-location-selection-active-identity:${identityId}`;
 }
 
 async function rememberActiveEventLocationSelection(
   runtime: OfficialPluginCommandRuntime,
   pending: PendingEventLocationSelection
 ): Promise<void> {
+  const actorIdentityId = requirePendingEventActorIdentityId(pending);
   await Promise.all([
     runtime.ephemeralStore.set(
       eventLocationSelectionKey(pending.id),
       pending,
       EVENT_LOCATION_SELECTION_TTL_SECONDS
     ),
-    ...eventLocationSelectionActorWids(pending).map((wid) =>
-      runtime.ephemeralStore.set(
-        eventLocationSelectionActiveKey(wid),
-        pending.id,
-        EVENT_LOCATION_SELECTION_TTL_SECONDS
-      )
+    runtime.ephemeralStore.set(
+      eventLocationSelectionActiveIdentityKey(actorIdentityId),
+      pending.id,
+      EVENT_LOCATION_SELECTION_TTL_SECONDS
     )
   ]);
 }
@@ -2629,30 +3011,36 @@ async function clearActiveEventLocationSelection(
   runtime: OfficialPluginCommandRuntime,
   pending: PendingEventLocationSelection
 ): Promise<void> {
+  const actorIdentityId = requirePendingEventActorIdentityId(pending);
   await Promise.all([
     runtime.ephemeralStore.delete(eventLocationSelectionKey(pending.id)),
-    ...eventLocationSelectionActorWids(pending).map((wid) =>
-      runtime.ephemeralStore.delete(eventLocationSelectionActiveKey(wid))
-    )
+    runtime.ephemeralStore.delete(eventLocationSelectionActiveIdentityKey(actorIdentityId))
   ]);
 }
 
 async function findActiveEventLocationSelection(
   runtime: OfficialPluginCommandRuntime,
-  actorWids: Array<string | undefined>
+  actorIdentityId: string
 ): Promise<PendingEventLocationSelection | undefined> {
-  for (const wid of uniqueEventWids(actorWids)) {
-    const activeKey = eventLocationSelectionActiveKey(wid);
-    const pendingId = await runtime.ephemeralStore.get<string>(activeKey);
-    if (!pendingId) {
-      continue;
-    }
-    const pending = await runtime.ephemeralStore.get<PendingEventLocationSelection>(eventLocationSelectionKey(pendingId));
-    if (pending) {
-      return pending;
-    }
-    await runtime.ephemeralStore.delete(activeKey);
+  const normalizedIdentityId = actorIdentityId.trim();
+  if (!normalizedIdentityId) {
+    return undefined;
   }
+  const activeKey = eventLocationSelectionActiveIdentityKey(normalizedIdentityId);
+  const pendingId = await runtime.ephemeralStore.get<string>(activeKey);
+  if (!pendingId) {
+    return undefined;
+  }
+  const pending = await runtime.ephemeralStore.get<PendingEventLocationSelection>(
+    eventLocationSelectionKey(pendingId)
+  );
+  if (
+    pending
+    && pending.draft.actorIdentityId?.trim() === normalizedIdentityId
+  ) {
+    return pending;
+  }
+  await runtime.ephemeralStore.delete(activeKey);
   return undefined;
 }
 
@@ -2660,14 +3048,10 @@ async function cancelActiveEventLocationSelectionsForActor(
   context: PluginCommandContext,
   runtime: OfficialPluginCommandRuntime,
   input: {
-    actorWids: string[];
-    chatId?: string | undefined;
+    actorIdentityId: string;
   }
 ): Promise<{ cancelled: number; scopeId?: string | undefined }> {
-  const pending = await findActiveEventLocationSelection(runtime, [
-    ...input.actorWids,
-    input.chatId
-  ]);
+  const pending = await findActiveEventLocationSelection(runtime, input.actorIdentityId);
   if (!pending) {
     return { cancelled: 0 };
   }
@@ -2685,12 +3069,31 @@ async function cancelActiveEventLocationSelectionsForActor(
   };
 }
 
-function eventLocationSelectionActorWids(pending: PendingEventLocationSelection): string[] {
-  return uniqueEventWids([
-    pending.responseChatId,
-    pending.draft.actorWid,
-    ...(pending.draft.actorAliases ?? [])
-  ]);
+function requirePendingEventActorIdentityId(pending: PendingEventLocationSelection): string {
+  const actorIdentityId = pending.draft.actorIdentityId?.trim();
+  if (!actorIdentityId) {
+    throw new Error('Event location selection requires an authoritative actor identity ID.');
+  }
+  return actorIdentityId;
+}
+
+function requireStoredEventActorIdentityId(event: StoredEventRecord): string {
+  const actorIdentityId = event.actorIdentityId?.trim();
+  if (!actorIdentityId) {
+    throw new Error(`Event ${event.id} has no authoritative creator identity.`);
+  }
+  return actorIdentityId;
+}
+
+function eventLocationSelectionRequestedByActor(
+  pending: PendingEventLocationSelection,
+  voterIdentityId: string
+): boolean {
+  const authoritativeIdentityId = voterIdentityId.trim();
+  return Boolean(
+    authoritativeIdentityId
+    && authoritativeIdentityId === requirePendingEventActorIdentityId(pending)
+  );
 }
 
 function isCommandLikeLocationReply(value: string): boolean {

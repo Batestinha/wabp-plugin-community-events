@@ -9,6 +9,13 @@ export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
+export const EVENT_EDIT_ANNOUNCEMENT_TEMPLATE_TOKENS = [
+  'eventId',
+  'groupDisplayName',
+  'previousGroupDisplayName',
+  'subgroupChatId',
+  'editorDisplayName'
+] as const;
 export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
 export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'eventId',
@@ -26,9 +33,20 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'windDirection',
   'weatherCode'
 ] as const;
+export const EVENT_SYSTEM_TEMPLATE_TOKENS = [...new Set<string>([
+  ...EVENT_DATE_TEMPLATE_TOKENS,
+  ...EVENT_PROFILE_TEMPLATE_TOKENS,
+  ...EVENT_GROUP_HINT_TEMPLATE_TOKENS,
+  ...EVENT_EDIT_ANNOUNCEMENT_TEMPLATE_TOKENS,
+  ...EVENT_CALENDAR_HINT_TEMPLATE_TOKENS,
+  ...EVENT_WEATHER_TEMPLATE_TOKENS
+])];
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_GROUP_HINT_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.eventGroupHint.template'
+]!;
+export const DEFAULT_EVENT_EDIT_ANNOUNCEMENT_TEMPLATE = eventsMessages[
+  'official.community-events.profile.climbing.eventEditAnnouncement.template'
 ]!;
 export const DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE = eventsMessages[
   'official.community-events.profile.climbing.calendar.titleTemplate'
@@ -167,6 +185,10 @@ const eventProfileObjectSchema = z.object({
     sendForPlannedEvents: z.boolean().default(false),
     sendForAdoptedEvents: z.boolean().default(false)
   }).strict().default({}),
+  eventEditAnnouncement: z.object({
+    enabled: z.boolean().default(false),
+    template: authoredTextSchema.default(DEFAULT_EVENT_EDIT_ANNOUNCEMENT_TEMPLATE)
+  }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
     durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
@@ -181,7 +203,15 @@ const eventProfileObjectSchema = z.object({
   weather: eventWeatherConfigSchema
 }).strict().superRefine((profile, ctx) => {
   const questionKeys = new Set(profile.questions.map((question) => question.key));
-  for (const question of profile.questions) {
+  const systemTemplateTokens = new Set(EVENT_SYSTEM_TEMPLATE_TOKENS);
+  for (const [index, question] of profile.questions.entries()) {
+    if (systemTemplateTokens.has(question.key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `question key ${question.key} is reserved for system template data`,
+        path: ['questions', index, 'key']
+      });
+    }
     if (profile.questions.filter((candidate) => candidate.key === question.key).length > 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -285,6 +315,10 @@ const eventProfileObjectSchema = z.object({
     ...templateTokens,
     ...EVENT_GROUP_HINT_TEMPLATE_TOKENS
   ]);
+  const editAnnouncementTemplateTokens = new Set([
+    ...templateTokens,
+    ...EVENT_EDIT_ANNOUNCEMENT_TEMPLATE_TOKENS
+  ]);
   const calendarHintTemplateTokens = new Set([
     ...templateTokens,
     ...EVENT_CALENDAR_HINT_TEMPLATE_TOKENS
@@ -296,6 +330,12 @@ const eventProfileObjectSchema = z.object({
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
   validateEventTemplate(profile.eventGroupHint.template, groupHintTemplateTokens, ['eventGroupHint', 'template'], ctx);
+  validateEventTemplate(
+    profile.eventEditAnnouncement.template,
+    editAnnouncementTemplateTokens,
+    ['eventEditAnnouncement', 'template'],
+    ctx
+  );
   if (profile.calendar.titleTemplate) {
     validateEventTemplate(profile.calendar.titleTemplate, templateTokens, ['calendar', 'titleTemplate'], ctx);
   }
@@ -353,6 +393,10 @@ export const defaultClimbingEventProfile: EventProfile = {
     sendForUnplannedEvents: true,
     sendForPlannedEvents: false,
     sendForAdoptedEvents: false
+  },
+  eventEditAnnouncement: {
+    enabled: false,
+    template: DEFAULT_EVENT_EDIT_ANNOUNCEMENT_TEMPLATE
   },
   calendar: {
     calendarId: DEFAULT_EVENT_CALENDAR_ID,
@@ -501,6 +545,14 @@ function localizedDefaultClimbingEventProfile(profile: EventProfile, t: Translat
         profile.eventGroupHint.template,
         defaultClimbingEventProfile.eventGroupHint.template,
         () => t('official.community-events.profile.climbing.eventGroupHint.template')
+      )
+    },
+    eventEditAnnouncement: {
+      ...profile.eventEditAnnouncement,
+      template: localizeIfDefault(
+        profile.eventEditAnnouncement.template,
+        defaultClimbingEventProfile.eventEditAnnouncement.template,
+        () => t('official.community-events.profile.climbing.eventEditAnnouncement.template')
       )
     },
     calendar: {

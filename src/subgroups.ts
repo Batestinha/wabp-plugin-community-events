@@ -17,6 +17,7 @@ export interface EventSubgroupContext {
 export async function createEventCommunitySubgroup(input: {
   context: EventSubgroupContext;
   scopeId: string;
+  actorIdentityId: string;
   actorWid: string;
   title: string;
   participantWids: string[];
@@ -34,7 +35,7 @@ export async function createEventCommunitySubgroup(input: {
     serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
     method: COMMUNITY_SUBGROUPS_CREATE_METHOD,
     scopeId: input.scopeId,
-    actorWid: input.actorWid,
+    actorIdentityId: input.actorIdentityId,
     groupWid: parentCommunityWid,
     input: {
       title: input.title,
@@ -47,6 +48,7 @@ export async function createEventCommunitySubgroup(input: {
 export async function resumeEventCommunitySubgroup(input: {
   context: EventSubgroupContext;
   scopeId: string;
+  actorIdentityId: string;
   actorWid: string;
   subgroupChatId: string;
   subgroupTitle: string;
@@ -62,7 +64,7 @@ export async function resumeEventCommunitySubgroup(input: {
     serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
     method: COMMUNITY_SUBGROUPS_RESUME_METHOD,
     scopeId: input.scopeId,
-    actorWid: input.actorWid,
+    actorIdentityId: input.actorIdentityId,
     groupWid: input.parentCommunityWid,
     input: {
       chatId: input.subgroupChatId,

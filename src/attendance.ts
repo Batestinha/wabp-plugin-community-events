@@ -3,6 +3,7 @@ import type { CreatedGroupParticipantResult } from '../../../platform/transport/
 import type { StoredEventRecord } from './store';
 
 export interface EventVoteSelection {
+  voterIdentityId: string;
   voterWid: string;
   selectedOptionIds: string[];
   selectedOptionNames: string[];
@@ -19,7 +20,7 @@ export function voterWidsForResponseBehavior(
     responseClass
   ]));
   const optionsById = new Map(record.pollOptions.map((option) => [option.id, option]));
-  const voters = new Set<string>();
+  const votersByIdentityId = new Map<string, string>();
   for (const vote of votes) {
     const selected = selectedEventOptionIds(record, vote);
     if (selected.some((optionId) => {
@@ -27,10 +28,15 @@ export function voterWidsForResponseBehavior(
       const responseClass = option ? responseClassesById.get(option.responseClassId) : undefined;
       return responseClass?.[behavior] === true;
     })) {
-      voters.add(vote.voterWid);
+      const voterIdentityId = vote.voterIdentityId.trim();
+      const voterWid = vote.voterWid.trim();
+      if (!voterIdentityId || !voterWid) {
+        throw new Error('Event attendance requires an authoritative voter identity and delivery address.');
+      }
+      votersByIdentityId.set(voterIdentityId, voterWid);
     }
   }
-  return [...voters].sort();
+  return [...votersByIdentityId.values()].sort();
 }
 
 export async function missingEventSubgroupAttendeeWids(
@@ -64,25 +70,61 @@ export async function eventSubgroupAttendeeCoverage(
   if (!context.getGroupParticipants) {
     throw new Error('Plugin runtime does not expose group participant reads.');
   }
-  const participantWids = new Set(
-    (await context.getGroupParticipants(subgroupChatId))
-      .map((participant) => participant.wid.trim())
+  const resolveIdentityAddress = context.resolveIdentityAddress;
+  if (!resolveIdentityAddress) {
+    throw new Error('Authoritative identity address service is unavailable.');
+  }
+
+  const identityIdsByWid = new Map<string, Promise<string>>();
+  const identityIdFor = (rawWid: string): Promise<string> => {
+    const wid = rawWid.trim();
+    if (!wid) {
+      return Promise.reject(new Error('Cannot resolve an empty attendee address.'));
+    }
+    const existing = identityIdsByWid.get(wid);
+    if (existing) {
+      return existing;
+    }
+    const resolution = resolveIdentityAddress(wid).then((address) => {
+      const identityId = address.identityId?.trim();
+      if (!identityId) {
+        throw new Error(`Authoritative identity resolution did not return an identity ID for ${wid}.`);
+      }
+      return identityId;
+    });
+    identityIdsByWid.set(wid, resolution);
+    return resolution;
+  };
+
+  const participantWids = (await context.getGroupParticipants(subgroupChatId))
+    .map((participant) => participant.wid.trim())
+    .filter(Boolean);
+  const participantIdentityIds = new Set(await Promise.all(
+    [...new Set(participantWids)].map(identityIdFor)
+  ));
+  const pendingInviteOutcomeWids = [...new Set(
+    Object.entries(participantOutcomes)
+      .filter(([, outcome]) => outcome.isInviteV4Sent === true)
+      .map(([wid]) => wid.trim())
       .filter(Boolean)
-  );
+  )];
+  const pendingInviteIdentityIds = new Set(await Promise.all(
+    pendingInviteOutcomeWids.map(identityIdFor)
+  ));
   const presentAttendeeWids: string[] = [];
   const pendingInviteWids: string[] = [];
   const missingAttendeeWids: string[] = [];
-  for (const attendeeWid of attendeeWids) {
-    if (!context.resolveIdentityAddress) {
-      throw new Error('Authoritative identity address service is unavailable.');
+  const seenAttendeeIdentityIds = new Set<string>();
+  const uniqueAttendeeWids = [...new Set(attendeeWids.map((wid) => wid.trim()).filter(Boolean))];
+  for (const attendeeWid of uniqueAttendeeWids) {
+    const attendeeIdentityId = await identityIdFor(attendeeWid);
+    if (seenAttendeeIdentityIds.has(attendeeIdentityId)) {
+      continue;
     }
-    const aliases = (await context.resolveIdentityAddress(attendeeWid)).aliases;
-    const candidateWids = [...new Set(
-      [attendeeWid, ...aliases].map((wid) => wid.trim()).filter(Boolean)
-    )];
-    if (candidateWids.some((alias) => participantWids.has(alias))) {
+    seenAttendeeIdentityIds.add(attendeeIdentityId);
+    if (participantIdentityIds.has(attendeeIdentityId)) {
       presentAttendeeWids.push(attendeeWid);
-    } else if (candidateWids.some((alias) => participantOutcomes[alias]?.isInviteV4Sent === true)) {
+    } else if (pendingInviteIdentityIds.has(attendeeIdentityId)) {
       pendingInviteWids.push(attendeeWid);
     } else {
       missingAttendeeWids.push(attendeeWid);

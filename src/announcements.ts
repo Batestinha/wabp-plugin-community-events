@@ -69,6 +69,32 @@ export function renderEventGroupAnnouncement(input: {
   }).trim();
 }
 
+export function renderEventEditAnnouncement(input: {
+  template: string;
+  profile: EventProfile;
+  event: StoredEventRecord;
+  previousGroupDisplayName: string;
+  editorDisplayName: string;
+  locale?: string | undefined;
+}): string {
+  return renderEventTemplate({
+    template: input.template,
+    profile: input.profile,
+    answers: input.event.answers,
+    startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
+    timezone: input.event.timezone,
+    locale: input.locale,
+    creatorDisplayName: input.event.actorLabel || input.event.actorWid,
+    extraTokens: {
+      eventId: input.event.id,
+      groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
+      previousGroupDisplayName: input.previousGroupDisplayName,
+      subgroupChatId: input.event.subgroupChatId,
+      editorDisplayName: input.editorDisplayName
+    }
+  }).trim();
+}
+
 export function templateUsesToken(template: string, token: string): boolean {
   return new RegExp(`\\{${token}\\}`).test(template);
 }

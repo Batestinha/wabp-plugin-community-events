@@ -265,9 +265,10 @@ export async function handleEventWeatherForecastJob(
         ...nextDailyWeatherForecastActions(event, profile, schedule, now)
       ];
     }
-    const t = await context.i18n.translatorForIdentity(event.subgroupChatId ?? event.scopeId, event.scopeId);
+    const eventActorIdentityId = requireWeatherEventActorIdentityId(event);
+    const t = await context.i18n.translatorForIdentity(eventActorIdentityId, event.scopeId);
     const resolvedLocale = await context.i18n.resolveIdentityLocale(
-      event.subgroupChatId ?? event.scopeId,
+      eventActorIdentityId,
       event.scopeId
     );
     const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
@@ -412,7 +413,7 @@ function weatherForecastServiceInput(event: StoredEventRecord, now: Date): Plugi
     serviceId: WEATHER_SERVICE_ID,
     method: WEATHER_QUERY_METHOD,
     scopeId: event.scopeId,
-    actorWid: event.actorWid,
+    actorIdentityId: requireWeatherEventActorIdentityId(event),
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
     input: {
@@ -429,6 +430,14 @@ function weatherForecastServiceInput(event: StoredEventRecord, now: Date): Plugi
       }
     }
   };
+}
+
+function requireWeatherEventActorIdentityId(event: StoredEventRecord): string {
+  const actorIdentityId = event.actorIdentityId?.trim();
+  if (!actorIdentityId) {
+    throw new Error(`Event ${event.id} has no authoritative creator identity for weather delivery.`);
+  }
+  return actorIdentityId;
 }
 
 function selectForecastDay(report: WeatherForecastOutput, event: StoredEventRecord): WeatherForecastDay | undefined {

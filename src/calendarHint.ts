@@ -25,6 +25,7 @@ export type EventCalendarHintResult =
   | 'disabled'
   | 'already_sent'
   | 'already_claimed'
+  | 'superseded'
   | 'sent'
   | 'skipped'
   | 'failed';
@@ -54,7 +55,7 @@ export async function sendEventCalendarHint(input: {
   }
   const runtime = input.runtime ?? requireOfficialCommandRuntime(input.context);
   const db = eventsDatabase(runtime.databases);
-  const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint');
+  const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', 'initial');
   if (persistedDelivery) {
     return persistedDelivery;
   }
@@ -127,6 +128,7 @@ export async function sendEventCalendarHint(input: {
       eventId: input.event.id,
       scopeId: input.scopeId,
       kind: 'calendar_hint',
+      deliveryKey: 'initial',
       chatId: input.announcementGroupWid,
       text,
       sender: input.activeTransport

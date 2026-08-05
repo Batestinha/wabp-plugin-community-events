@@ -27,7 +27,7 @@ function control(
     dangerous: false,
     sensitivity: { sensitive: false, redact: 'none' },
     auditAction: 'operator_console.plugin_config.update',
-    relatedCommandIds: ['/event'],
+    relatedCommandIds: ['/event new', '/event edit', '/event status'],
     relatedActionIds: []
   });
 }
@@ -58,7 +58,7 @@ const eventsPanelControl = defineControl({
   dangerous: false,
   sensitivity: { sensitive: false, redact: 'none' },
   auditExemptReason: 'Panel rendering is read-only; manual termination is audited by the terminate endpoint.',
-  relatedCommandIds: ['/event', '/event cancel'],
+  relatedCommandIds: ['/event list', '/event edit', '/event cancel'],
   relatedActionIds: []
 });
 
@@ -70,6 +70,7 @@ export const eventsControls: ControlDescriptor[] = [
     builderId: 'official.community-events.event-profiles.v1',
     builderEndpoints: {
       options: '/api/v1/plugins/official.community-events/profiles/:scopeId/options',
+      renameQuestion: '/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename',
       calendarState: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId',
       setFunnel: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/funnel',
       publish: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish',

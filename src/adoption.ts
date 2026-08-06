@@ -99,7 +99,7 @@ export interface EventAdoptionReconcileEffects {
   calendarPublication: 'published' | 'unavailable';
   eventGroupHint: AdoptedEventGroupHintResult;
   calendarHint: Awaited<ReturnType<typeof sendEventCalendarHint>>;
-  weather: 'queued' | 'already_queued' | 'skipped' | 'not_scheduled';
+  weather: 'pending' | 'already_pending' | 'already_sent' | 'skipped' | 'not_scheduled';
   cleanup: 'ensured';
 }
 
@@ -505,21 +505,24 @@ async function reconcileAdoptedGroupLifecycle(input: {
   const existingWeather = getEventWeatherDelivery(
     input.db,
     event.id,
-    EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND
+    EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND,
+    event.updatedAt
   );
-  let weather: EventAdoptionReconcileEffects['weather'] = existingWeather?.status === 'queued'
-    ? 'already_queued'
+  let weather: EventAdoptionReconcileEffects['weather'] = existingWeather?.status === 'sent'
+    ? 'already_sent'
     : existingWeather?.status === 'skipped'
       ? 'skipped'
+      : existingWeather
+        ? 'already_pending'
       : 'not_scheduled';
-  if (!existingWeather || existingWeather.status === 'failed') {
+  if (!existingWeather) {
     const request = eventWeatherForecastJobRequest({ event, profile: input.profile, now: new Date() });
     if (request) {
       await input.runtime.enqueuePluginJob({
         ...request,
         dedupeKey: `${request.dedupeKey}:lifecycle-recovery:${event.updatedAt}`
       });
-      weather = 'queued';
+      weather = 'pending';
     }
   }
   await input.runtime.enqueuePluginJob({

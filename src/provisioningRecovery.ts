@@ -1,24 +1,83 @@
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { isManagedCommunitySubgroupProvisioningError } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import type { CreatedGroupParticipantResult, OutboundSendResult } from '../../../platform/transport/transportTypes';
+import type { OfficialPluginCommandRuntime } from '../shared';
 import { voterWidsForResponseBehavior } from './attendance';
-import { parseEventsConfig } from './config';
+import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { resumeEventCommunitySubgroup } from './subgroups';
+import { writePublishAndRecordScopeCalendar } from './calendarStatus';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import { sendClaimedEventAnnouncement } from './announcementDelivery';
+import { sendEventCalendarHint } from './calendarHint';
+import { eventWeatherForecastJobRequest } from './weather';
 import {
   appendEventLog,
+  advanceUnplannedEventFinalization,
   checkpointEventProvisioningCandidate,
+  completeUnplannedEventFinalization,
+  completeUnplannedEventProvisioning,
   eventsDatabase,
   getLiveEventBySubgroup,
   getEvent,
+  getUnplannedEventFinalization,
+  listCalendarEvents,
   listCreatedGroupParticipants,
   listVotes,
   markEventProvisioningResumed,
   saveCreatedGroupParticipants,
-  type StoredEventRecord
+  type StoredEventRecord,
+  type StoredUnplannedEventFinalization
 } from './store';
+
+export const EVENT_PROVISIONING_RECOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
+export const UNPLANNED_EVENT_FINALIZATION_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
+
+export interface EventProvisioningRecoveryPayload {
+  eventId: string;
+  subgroupChatId: string;
+  generation: string;
+  attempt: number;
+}
+
+export interface EventProvisioningRecoveryCursor {
+  generation: string;
+  attempt: number;
+  nextRunAt?: string | undefined;
+}
+
+export interface UnplannedEventFinalizationPayload {
+  eventId: string;
+  generation: string;
+  attempt: number;
+}
+
+class UnplannedEventFinalizationSupersededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnplannedEventFinalizationSupersededError';
+  }
+}
+
+interface UnplannedEventFinalizationContext {
+  config: PluginRuntimeContext['config'];
+  getGroupInviteCode?(groupWid: string): Promise<string | null>;
+}
+
+interface UnplannedEventFinalizationTransport {
+  sendText(
+    chatId: string,
+    text: string,
+    options?: { idempotencyKey?: string | undefined }
+  ): Promise<OutboundSendResult>;
+}
+
+type UnplannedEventFinalizationRuntime = Pick<
+  OfficialPluginCommandRuntime,
+  'config' | 'databases' | 'enqueuePluginJob'
+>;
 
 export interface ResumeEventProvisioningInput {
   context: PluginRuntimeContext;
@@ -41,6 +100,13 @@ export type ResumeEventProvisioningResult =
       parentCommunityChatId: string;
     }
   | {
+      status: 'completed';
+      event: StoredEventRecord;
+      resumed: true;
+      attendeeCount: number;
+      parentCommunityChatId: string;
+    }
+  | {
       status: 'already_completed';
       event: StoredEventRecord;
     }
@@ -53,6 +119,474 @@ export type ResumeEventProvisioningResult =
       reason: string;
       event: StoredEventRecord;
     };
+
+export async function finalizeUnplannedEventLifecycle(input: {
+  context: UnplannedEventFinalizationContext;
+  runtime: UnplannedEventFinalizationRuntime;
+  activeTransport: UnplannedEventFinalizationTransport;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  locale: string;
+  creatorDisplayName: string;
+  trigger: 'unplanned_created' | 'unplanned_recovery';
+  expectedEventUpdatedAt: string;
+  now?: Date | undefined;
+}): Promise<void> {
+  const db = eventsDatabase(input.runtime.databases);
+  const event = input.event;
+  assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+  const subgroupChatId = event.subgroupChatId;
+  if (!subgroupChatId) {
+    throw new Error(`Unplanned event ${event.id} cannot finalize without its exact subgroup.`);
+  }
+  const announcementGroupWid = event.announcementGroupWid?.trim();
+  if (!announcementGroupWid) {
+    throw new Error(`Unplanned event ${event.id} cannot finalize without its announcement group.`);
+  }
+  const failures: string[] = [];
+
+  try {
+    const calendar = calendarResourceForProfile(input.config, input.profile);
+    const calendarEvents = listCalendarEvents(db, event.scopeId);
+    const publication = await writePublishAndRecordScopeCalendar({
+      appConfig: input.runtime.config,
+      db,
+      config: input.config,
+      scopeId: event.scopeId,
+      calendarId: input.profile.calendar.calendarId,
+      events: calendarEvents
+    });
+    await appendFinalizationJsonLog(input.context, {
+      action: 'calendar.exported',
+      scopeId: event.scopeId,
+      eventId: event.id,
+      actorWid: event.actorWid,
+      profileId: event.profileId,
+      subgroupChatId,
+      metadata: {
+        calendarEnabled: calendar?.enabled === true,
+        calendarId: input.profile.calendar.calendarId,
+        ...(publication ? { publication } : {})
+      }
+    });
+    if (publication && !publication.ok) {
+      failures.push(`calendar: ${publication.error || 'publication failed'}`);
+    }
+  } catch (error) {
+    if (error instanceof UnplannedEventFinalizationSupersededError) {
+      throw error;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    failures.push(`calendar: ${reason}`);
+    await appendFinalizationJsonLog(input.context, {
+      action: 'calendar.export_failed',
+      scopeId: event.scopeId,
+      eventId: event.id,
+      actorWid: event.actorWid,
+      profileId: event.profileId,
+      subgroupChatId,
+      metadata: { reason }
+    });
+  }
+
+  await appendFinalizationJsonLog(input.context, {
+    action: 'event.created',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: event.actorWid,
+    profileId: event.profileId,
+    subgroupChatId,
+    metadata: {
+      origin: 'unplanned',
+      recovery: input.trigger === 'unplanned_recovery',
+      announcementGroupWid: event.announcementGroupWid,
+      groupTitle: event.groupTitle,
+      answers: event.answers,
+      startsAt: event.startsAtUtc || event.startsAt,
+      closeAt: event.closeAt,
+      cleanupAt: event.cleanupAt
+    }
+  });
+
+  try {
+    assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.cleanup,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: new Date(event.cleanupAt),
+      payload: { eventId: event.id, attempt: 0 },
+      dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:unplanned`
+    });
+  } catch (error) {
+    if (error instanceof UnplannedEventFinalizationSupersededError) {
+      throw error;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    failures.push(`cleanup job: ${reason}`);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.unplanned.cleanup_enqueue_failed',
+      metadata: { reason }
+    });
+  }
+
+  const weatherRequest = eventWeatherForecastJobRequest({
+    event,
+    profile: input.profile,
+    now: input.now
+  });
+  if (weatherRequest) {
+    try {
+      assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+      await input.runtime.enqueuePluginJob(weatherRequest);
+    } catch (error) {
+      if (error instanceof UnplannedEventFinalizationSupersededError) {
+        throw error;
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      failures.push(`weather job: ${reason}`);
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.unplanned.weather_enqueue_failed',
+        metadata: { reason }
+      });
+    }
+  }
+
+  let groupJoinUrl = '';
+  if (eventGroupHintEnabled(input.profile, 'unplanned')) {
+    try {
+      assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+      groupJoinUrl = await eventGroupJoinUrl(
+        input.context,
+        input.profile.eventGroupHint.template,
+        subgroupChatId
+      );
+      const announcementText = renderEventGroupAnnouncement({
+        template: input.profile.eventGroupHint.template,
+        profile: input.profile,
+        event,
+        groupDisplayName: event.subgroupTitle || event.groupTitle,
+        groupJoinUrl,
+        subgroupChatId,
+        locale: input.locale,
+        creatorDisplayName: input.creatorDisplayName
+      });
+      const delivery = await sendClaimedEventAnnouncement({
+        db,
+        eventId: event.id,
+        scopeId: event.scopeId,
+        kind: 'event_group_hint',
+        deliveryKey: 'initial',
+        chatId: announcementGroupWid,
+        text: announcementText,
+        expectedEventUpdatedAt: input.expectedEventUpdatedAt,
+        sender: input.activeTransport
+      });
+      if (delivery.status === 'sent') {
+        await appendFinalizationJsonLog(input.context, {
+          action: 'event.unplanned_announcement_sent',
+          scopeId: event.scopeId,
+          eventId: event.id,
+          actorWid: event.actorWid,
+          profileId: event.profileId,
+          subgroupChatId,
+          metadata: {
+            announcementGroupWid: event.announcementGroupWid,
+            messageId: delivery.messageId,
+            groupJoinUrl,
+            trigger: input.trigger
+          }
+        });
+      } else if (delivery.status === 'already_claimed') {
+        failures.push('event group announcement: delivery already claimed');
+      } else if (delivery.status === 'superseded') {
+        throw new UnplannedEventFinalizationSupersededError(
+          `Unplanned event ${event.id} changed before its event-group announcement could be sent.`
+        );
+      }
+    } catch (error) {
+      if (error instanceof UnplannedEventFinalizationSupersededError) {
+        throw error;
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      failures.push(`event group announcement: ${reason}`);
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.unplanned.announcement_failed',
+        metadata: {
+          trigger: input.trigger,
+          reason
+        }
+      });
+    }
+  }
+
+  assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+  const calendarHint = await sendEventCalendarHint({
+    context: input.context,
+    runtime: input.runtime,
+    activeTransport: input.activeTransport,
+    trigger: input.trigger,
+    scopeId: event.scopeId,
+    announcementGroupWid,
+    event,
+    profile: input.profile,
+    calendars: input.config.calendars,
+    timezone: input.config.timezone,
+    locale: input.locale,
+    creatorDisplayName: input.creatorDisplayName,
+    groupJoinUrl,
+    subgroupChatId,
+    expectedEventUpdatedAt: input.expectedEventUpdatedAt
+  });
+  if (calendarHint === 'failed' || calendarHint === 'already_claimed') {
+    failures.push('calendar hint: delivery failed');
+  } else if (calendarHint === 'superseded') {
+    throw new UnplannedEventFinalizationSupersededError(
+      `Unplanned event ${event.id} changed before its calendar hint could be sent.`
+    );
+  }
+  assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+  if (failures.length > 0) {
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.unplanned.finalization_pending',
+      metadata: {
+        trigger: input.trigger,
+        subgroupChatId,
+        failures
+      }
+    });
+    throw new Error(`Unplanned event finalization remains pending: ${failures.join('; ')}`);
+  }
+  appendEventLog(db, {
+    eventId: event.id,
+    action: 'events.unplanned.finalization_completed',
+    metadata: {
+      trigger: input.trigger,
+      subgroupChatId
+    }
+  });
+}
+
+export type AttemptUnplannedEventFinalizationResult =
+  | { status: 'completed'; finalization: StoredUnplannedEventFinalization }
+  | { status: 'superseded'; finalization: StoredUnplannedEventFinalization }
+  | { status: 'already_completed'; finalization: StoredUnplannedEventFinalization }
+  | { status: 'retry_scheduled'; finalization: StoredUnplannedEventFinalization; enqueued: boolean }
+  | { status: 'stale'; finalization?: StoredUnplannedEventFinalization | undefined };
+
+export async function attemptUnplannedEventFinalization(input: {
+  context: UnplannedEventFinalizationContext;
+  runtime: UnplannedEventFinalizationRuntime;
+  activeTransport: UnplannedEventFinalizationTransport;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  locale: string;
+  creatorDisplayName: string;
+  trigger: 'unplanned_created' | 'unplanned_recovery';
+  expected?: Pick<StoredUnplannedEventFinalization, 'generation' | 'attempt'> | undefined;
+  now?: Date | undefined;
+}): Promise<AttemptUnplannedEventFinalizationResult> {
+  const db = eventsDatabase(input.runtime.databases);
+  const current = getUnplannedEventFinalization(db, input.event.id);
+  if (!current) {
+    return { status: 'stale' };
+  }
+  if (current.status === 'completed') {
+    return { status: 'already_completed', finalization: current };
+  }
+  if (
+    input.expected &&
+    (current.generation !== input.expected.generation || current.attempt !== input.expected.attempt)
+  ) {
+    return { status: 'stale', finalization: current };
+  }
+
+  try {
+    await finalizeUnplannedEventLifecycle({
+      ...input,
+      expectedEventUpdatedAt: current.eventUpdatedAt
+    });
+    const completedAt = (input.now ?? new Date()).toISOString();
+    const completed = completeUnplannedEventFinalization(db, {
+      eventId: current.eventId,
+      scopeId: current.scopeId,
+      generation: current.generation,
+      attempt: current.attempt,
+      completedAt
+    });
+    const finalization = getUnplannedEventFinalization(db, current.eventId);
+    if (!completed || !finalization || finalization.status !== 'completed') {
+      return { status: 'stale', ...(finalization ? { finalization } : {}) };
+    }
+    return { status: 'completed', finalization };
+  } catch (error) {
+    if (error instanceof UnplannedEventFinalizationSupersededError) {
+      try {
+        await repairSupersededUnplannedCalendar(input);
+      } catch (repairError) {
+        return scheduleUnplannedEventFinalizationRetry({
+          runtime: input.runtime,
+          event: input.event,
+          expected: current,
+          reason: `Superseded event calendar repair failed: ${
+            repairError instanceof Error ? repairError.message : String(repairError)
+          }`,
+          now: input.now
+        });
+      }
+      const completedAt = (input.now ?? new Date()).toISOString();
+      const completed = completeUnplannedEventFinalization(db, {
+        eventId: current.eventId,
+        scopeId: current.scopeId,
+        generation: current.generation,
+        attempt: current.attempt,
+        completedAt
+      });
+      const finalization = getUnplannedEventFinalization(db, current.eventId);
+      if (!completed || !finalization || finalization.status !== 'completed') {
+        return { status: 'stale', ...(finalization ? { finalization } : {}) };
+      }
+      appendEventLog(db, {
+        eventId: input.event.id,
+        action: 'events.unplanned.finalization_superseded',
+        metadata: {
+          reason: error.message,
+          expectedEventUpdatedAt: current.eventUpdatedAt
+        }
+      });
+      return { status: 'superseded', finalization };
+    }
+    return scheduleUnplannedEventFinalizationRetry({
+      runtime: input.runtime,
+      event: input.event,
+      expected: current,
+      reason: error instanceof Error ? error.message : String(error),
+      now: input.now
+    });
+  }
+}
+
+async function repairSupersededUnplannedCalendar(input: {
+  runtime: UnplannedEventFinalizationRuntime;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+}): Promise<void> {
+  const db = eventsDatabase(input.runtime.databases);
+  const currentBeforeRepair = getEvent(db, input.event.id);
+  if (!currentBeforeRepair || currentBeforeRepair.scopeId !== input.event.scopeId) {
+    return;
+  }
+  const publication = await writePublishAndRecordScopeCalendar({
+    appConfig: input.runtime.config,
+    db,
+    config: input.config,
+    scopeId: input.event.scopeId,
+    calendarId: input.profile.calendar.calendarId,
+    events: listCalendarEvents(db, input.event.scopeId)
+  });
+  if (publication && !publication.ok) {
+    throw new Error(publication.error || 'calendar publication failed');
+  }
+  const currentAfterRepair = getEvent(db, input.event.id);
+  if (currentAfterRepair?.updatedAt !== currentBeforeRepair.updatedAt) {
+    throw new Error(`Event ${input.event.id} changed again during calendar repair.`);
+  }
+}
+
+export async function scheduleUnplannedEventFinalizationRetry(input: {
+  runtime: UnplannedEventFinalizationRuntime;
+  event: StoredEventRecord;
+  expected: Pick<StoredUnplannedEventFinalization, 'generation' | 'attempt'>;
+  reason: string;
+  now?: Date | undefined;
+}): Promise<AttemptUnplannedEventFinalizationResult> {
+  const db = eventsDatabase(input.runtime.databases);
+  const failedAt = input.now ?? new Date();
+  const current = getUnplannedEventFinalization(db, input.event.id);
+  if (
+    !current ||
+    current.status !== 'pending' ||
+    current.scopeId !== input.event.scopeId ||
+    current.generation !== input.expected.generation ||
+    current.attempt !== input.expected.attempt
+  ) {
+    return { status: 'stale', ...(current ? { finalization: current } : {}) };
+  }
+  const nextAttempt = input.expected.attempt + 1;
+  const runAt = unplannedEventFinalizationRunAt(nextAttempt, failedAt);
+  try {
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.unplannedFinalization,
+      scopeId: input.event.scopeId,
+      ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+      ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+      runAt,
+      payload: {
+        eventId: input.event.id,
+        generation: current.generation,
+        attempt: nextAttempt
+      } satisfies UnplannedEventFinalizationPayload,
+      dedupeKey: unplannedEventFinalizationDedupeKey({
+        eventId: current.eventId,
+        scopeId: current.scopeId,
+        generation: current.generation,
+        attempt: nextAttempt
+      })
+    });
+  } catch (enqueueError) {
+    appendEventLog(db, {
+      eventId: input.event.id,
+      action: 'events.unplanned.finalization_enqueue_failed',
+      metadata: {
+        reason: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
+        generation: current.generation,
+        attempt: nextAttempt,
+        runAt: runAt.toISOString()
+      }
+    });
+    throw enqueueError;
+  }
+  const advanced = advanceUnplannedEventFinalization(db, {
+    eventId: input.event.id,
+    scopeId: input.event.scopeId,
+    generation: input.expected.generation,
+    expectedAttempt: input.expected.attempt,
+    nextAttempt,
+    nextRunAt: runAt.toISOString(),
+    reason: input.reason,
+    updatedAt: failedAt.toISOString()
+  });
+  const finalization = getUnplannedEventFinalization(db, input.event.id);
+  if (
+    !advanced ||
+    !finalization ||
+    finalization.status !== 'pending' ||
+    finalization.generation !== input.expected.generation ||
+    finalization.attempt !== nextAttempt
+  ) {
+    return { status: 'stale', ...(finalization ? { finalization } : {}) };
+  }
+  appendEventLog(db, {
+    eventId: input.event.id,
+    action: 'events.unplanned.finalization_retry_scheduled',
+    metadata: {
+      reason: input.reason,
+      generation: finalization.generation,
+      attempt: finalization.attempt,
+      runAt: finalization.nextRunAt,
+      enqueued: true
+    }
+  });
+  return { status: 'retry_scheduled', finalization, enqueued: true };
+}
 
 export async function resumeEventProvisioning(
   input: ResumeEventProvisioningInput
@@ -88,8 +622,12 @@ export async function resumeEventProvisioning(
   }
 
   const config = parseEventsConfig(await input.context.configFor(scopeId));
-  if (!config.eventProfiles.some((profile) => profile.id === event.profileId)) {
+  const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+  if (!profile) {
     return rejected(event, `Event profile ${event.profileId} is no longer configured for scope ${scopeId}.`);
+  }
+  if (event.origin === 'unplanned' && !event.announcementGroupWid?.trim()) {
+    return rejected(event, `Unplanned event ${event.id} has no persisted announcement group.`);
   }
   if (!input.context.botCapabilitiesFor) {
     return rejected(event, 'Plugin runtime does not expose group capability checks.');
@@ -121,11 +659,22 @@ export async function resumeEventProvisioning(
     );
   }
 
-  const attendeeWids = voterWidsForResponseBehavior(
-    event,
-    listVotes(db, event.id),
-    'includeInEventGroup'
-  );
+  let attendeeWids: string[];
+  if (event.origin === 'unplanned') {
+    if (!input.context.resolveStableIdentityById) {
+      return rejected(event, 'Provisioning recovery requires authoritative identity resolution.');
+    }
+    const actorAddress = await input.context.resolveStableIdentityById(
+      requireRecoveryActorIdentityId(event)
+    );
+    attendeeWids = [actorAddress.canonicalWid];
+  } else {
+    attendeeWids = voterWidsForResponseBehavior(
+      event,
+      listVotes(db, event.id),
+      'includeInEventGroup'
+    );
+  }
   if (attendeeWids.length === 0) {
     return rejected(event, `Event ${event.id} has no persisted event-group attendees to verify.`);
   }
@@ -174,7 +723,6 @@ export async function resumeEventProvisioning(
       context: input.context,
       scopeId,
       actorIdentityId: requireRecoveryActorIdentityId(event),
-      actorWid: input.actorWid?.trim() || event.actorWid,
       subgroupChatId,
       subgroupTitle,
       participantWids: attendeeWids,
@@ -245,6 +793,112 @@ export async function resumeEventProvisioning(
       });
     }
     throw error;
+  }
+
+  if (event.origin === 'unplanned') {
+    const actorIdentityId = requireRecoveryActorIdentityId(event);
+    const resolvedLocale = await input.context.i18n.resolveIdentityLocale(
+      actorIdentityId,
+      event.scopeId
+    );
+    const completed = completeUnplannedEventProvisioning(db, {
+      eventId: event.id,
+      scopeId,
+      subgroupChatId,
+      subgroupTitle,
+      participants: participantOutcomes,
+      completedAt: resumedAt
+    });
+    if (!completed) {
+      const changedEvent = getEvent(db, event.id) ?? event;
+      return rejected(
+        changedEvent,
+        `Event ${event.id} changed state while its unplanned subgroup recovery was being completed.`
+      );
+    }
+    const completedEvent = getEvent(db, event.id);
+    if (
+      !completedEvent ||
+      completedEvent.eventStatus !== 'active' ||
+      completedEvent.groupLifecycleStatus !== 'poll_closed' ||
+      completedEvent.calendarStatus !== 'included' ||
+      completedEvent.subgroupChatId !== subgroupChatId
+    ) {
+      return rejected(
+        completedEvent ?? event,
+        `Event ${event.id} changed state after its unplanned subgroup recovery completed.`
+      );
+    }
+
+    await appendRecoveryJsonLog(input.context, {
+      action: 'subgroup.created',
+      scopeId: completedEvent.scopeId,
+      eventId: completedEvent.id,
+      actorWid: completedEvent.actorWid,
+      profileId: completedEvent.profileId,
+      subgroupChatId,
+      metadata: {
+        title: subgroupTitle,
+        attendeeWids,
+        participants: participantOutcomes,
+        unplanned: true,
+        recovery: true
+      }
+    });
+
+    const activeTransport: UnplannedEventFinalizationTransport = {
+      async sendText(chatId, text, options) {
+        if (!input.context.sendText) {
+          throw new Error('Plugin runtime does not expose durable text delivery.');
+        }
+        return input.context.sendText(chatId, text, options);
+      }
+    };
+    const finalization = await attemptUnplannedEventFinalization({
+      context: input.context,
+      runtime: {
+        config: input.context.config,
+        ...(input.context.databases ? { databases: input.context.databases } : {}),
+        enqueuePluginJob: (job) => enqueuePluginJob(input.context.queue, {
+          pluginId: EVENTS_PLUGIN_ID,
+          ...job
+        })
+      },
+      activeTransport,
+      event: completedEvent,
+      profile,
+      config,
+      locale: resolvedLocale.locale,
+      creatorDisplayName: completedEvent.actorLabel || completedEvent.actorWid,
+      trigger: 'unplanned_recovery',
+      now: input.now
+    });
+    await input.context.audit.record({
+      scopeId: completedEvent.scopeId,
+      ...(completedEvent.groupId ? { groupId: completedEvent.groupId } : {}),
+      action: 'official.community-events.provisioning.recovered',
+      targetJson: {
+        eventId: completedEvent.id,
+        subgroupChatId
+      },
+      metadataJson: {
+        attendeeCount: attendeeWids.length,
+        parentCommunityChatId,
+        provisioningMode: 'service',
+        origin: 'unplanned',
+        finalizationStatus: finalization.status,
+        actorWid: input.actorWid,
+        actorLabel: input.actorLabel
+      }
+    });
+
+    return {
+      status: 'completed',
+      event: completedEvent,
+      resumed: true,
+      attendeeCount: attendeeWids.length,
+      parentCommunityChatId
+    };
   }
 
   let resumed = false;
@@ -354,6 +1008,71 @@ export function eventProvisioningResumeDedupeKey(eventId: string, subgroupChatId
   return `${EVENTS_JOBS.close}:${eventId}:resume:${subgroupChatId}`;
 }
 
+export function eventProvisioningRecoveryRunAt(attempt: number, now: Date): Date {
+  const delay = EVENT_PROVISIONING_RECOVERY_DELAYS_MS[Math.min(
+    EVENT_PROVISIONING_RECOVERY_DELAYS_MS.length - 1,
+    Math.max(0, attempt - 1)
+  )]!;
+  return new Date(now.getTime() + delay);
+}
+
+export function eventProvisioningRecoveryCursor(
+  record: StoredEventRecord
+): EventProvisioningRecoveryCursor | undefined {
+  const generation = record.provisioningRecoveryGeneration?.trim();
+  const attempt = record.provisioningRecoveryAttempt;
+  if (!generation || !Number.isInteger(attempt) || Number(attempt) < 1) {
+    return undefined;
+  }
+  return {
+    generation,
+    attempt: Number(attempt),
+    ...(record.provisioningRecoveryNextRunAt
+      ? { nextRunAt: record.provisioningRecoveryNextRunAt }
+      : {})
+  };
+}
+
+export function eventProvisioningRecoveryDedupeKey(
+  record: StoredEventRecord,
+  cursor: Pick<EventProvisioningRecoveryCursor, 'generation' | 'attempt'>
+): string {
+  return `${EVENTS_JOBS.provisioningRecovery}:${record.scopeId}:${record.id}:${record.subgroupChatId}:${cursor.generation}:${cursor.attempt}`;
+}
+
+export function unplannedEventFinalizationRunAt(attempt: number, now: Date): Date {
+  const delay = UNPLANNED_EVENT_FINALIZATION_DELAYS_MS[Math.min(
+    UNPLANNED_EVENT_FINALIZATION_DELAYS_MS.length - 1,
+    Math.max(0, attempt - 1)
+  )]!;
+  return new Date(now.getTime() + delay);
+}
+
+export function unplannedEventFinalizationDedupeKey(
+  finalization: Pick<StoredUnplannedEventFinalization, 'eventId' | 'scopeId' | 'generation' | 'attempt'>
+): string {
+  return `${EVENTS_JOBS.unplannedFinalization}:${finalization.scopeId}:${finalization.eventId}:${finalization.generation}:${finalization.attempt}`;
+}
+
+function assertUnplannedEventFinalizationFence(
+  db: ReturnType<typeof eventsDatabase>,
+  expected: StoredEventRecord,
+  expectedEventUpdatedAt: string
+): void {
+  const current = getEvent(db, expected.id);
+  const remainsCreationLifecycle = current?.scopeId === expected.scopeId &&
+    current.origin === 'unplanned' &&
+    current.eventStatus === 'active' &&
+    current.groupLifecycleStatus === 'poll_closed' &&
+    current.calendarStatus === 'included' &&
+    current.subgroupChatId === expected.subgroupChatId;
+  if (!remainsCreationLifecycle || current?.updatedAt !== expectedEventUpdatedAt) {
+    throw new UnplannedEventFinalizationSupersededError(
+      `Unplanned event ${expected.id} changed from creation version ${expectedEventUpdatedAt}.`
+    );
+  }
+}
+
 function mergedParticipantOutcomes(
   stored: ReturnType<typeof listCreatedGroupParticipants>,
   supplied: Record<string, CreatedGroupParticipantResult> | undefined
@@ -444,5 +1163,16 @@ async function appendRecoveryJsonLog(
       { error, action: entry.action, scopeId: entry.scopeId },
       'Unable to append official.community-events provisioning recovery JSONL log'
     );
+  }
+}
+
+async function appendFinalizationJsonLog(
+  context: UnplannedEventFinalizationContext,
+  entry: Parameters<typeof appendScopeEventJsonLog>[0]['entry']
+): Promise<void> {
+  try {
+    await appendScopeEventJsonLog({ appConfig: context.config, entry });
+  } catch {
+    // Durable event state and delivery claims remain authoritative when the operator JSONL is unavailable.
   }
 }

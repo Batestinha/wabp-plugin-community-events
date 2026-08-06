@@ -12,6 +12,7 @@ import {
   requireCompletePollVotes
 } from '../../../platform/transport/pollVoteReadback';
 import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import type { OfficialPluginCommandRuntime } from '../shared';
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
@@ -28,7 +29,8 @@ import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import {
   eventWeatherForecastJobAction,
-  eventWeatherForecastJobRequest,
+  eventWeatherForecastJobRequests,
+  eventWeatherForecastRecoveryJobRequest,
   handleEventWeatherForecastJob
 } from './weather';
 import {
@@ -36,18 +38,23 @@ import {
   EVENT_CLEANUP_CLAIM_LEASE_MS,
   eventsDatabase,
   getEvent,
+  getUnplannedEventFinalization,
   getEventByEquivalentPoll,
   getLiveEventBySubgroup,
   getEventCleanupClaim,
+  getEventWeatherDelivery,
   listCreatedGroupParticipants,
   listOpenPollEvents,
   listFailedProvisioningEvents,
+  listPendingUnplannedEventFinalizations,
   listPendingCleanupEvents,
   listPendingEventEditRepairs,
+  listRecoverableEventWeatherDeliveries,
   listCalendarEvents,
   listWeatherForecastCandidateEvents,
   advanceEventProvisioningRecovery,
   claimEventCleanup,
+  completeUnplannedEventFinalization,
   initializeEventProvisioningRecovery,
   markEventCleanupFailed,
   markClaimedEventCleaned,
@@ -61,14 +68,24 @@ import {
   releaseExpiredEventCleanupClaims,
   renewEventCleanupClaim,
   saveCreatedGroupParticipants,
+  supersedeEventWeatherDelivery,
   updateEventCloseAt,
   upsertVote,
   type EventCleanupClaim,
   type StoredEventRecord
 } from './store';
 import {
+  attemptUnplannedEventFinalization,
+  eventProvisioningRecoveryCursor,
+  eventProvisioningRecoveryDedupeKey,
+  eventProvisioningRecoveryRunAt,
   eventProvisioningResumeDedupeKey,
-  resumeEventProvisioning
+  resumeEventProvisioning,
+  scheduleUnplannedEventFinalizationRetry,
+  unplannedEventFinalizationDedupeKey,
+  type EventProvisioningRecoveryCursor,
+  type EventProvisioningRecoveryPayload,
+  type UnplannedEventFinalizationPayload
 } from './provisioningRecovery';
 import { recoverEventQuestionKeyRenames } from './questionKeyRenameRecovery';
 import {
@@ -80,15 +97,7 @@ import { registerEventCreationFlowDefinitionResolver } from './eventCreationFlow
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
-const EVENT_PROVISIONING_RECOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
 const EVENT_EDIT_REPAIR_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
-
-interface EventProvisioningRecoveryPayload {
-  eventId: string;
-  subgroupChatId: string;
-  generation: string;
-  attempt: number;
-}
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
@@ -136,13 +145,47 @@ export async function recoverEventJobs(
   const cleanupJobs = await recoverEventCleanupJobs(context);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
+  const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + suggestionReconcileJobs;
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (enqueued > 0 || questionKeyRenames.settled > 0 || questionKeyRenames.unresolved > 0) {
     context.logger.info(
-      { enqueued, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, suggestionReconcileJobs },
+      { enqueued, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
+  }
+  return enqueued;
+}
+
+export async function recoverUnplannedEventFinalizationJobs(
+  context: PluginRuntimeContext
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  let enqueued = 0;
+  for (const finalization of listPendingUnplannedEventFinalizations(db)) {
+    const event = getEvent(db, finalization.eventId);
+    if (!event || event.scopeId !== finalization.scopeId || !finalization.nextRunAt) {
+      continue;
+    }
+    const runAt = new Date(finalization.nextRunAt);
+    if (!Number.isFinite(runAt.getTime())) {
+      continue;
+    }
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.unplannedFinalization,
+      scopeId: finalization.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt,
+      payload: {
+        eventId: finalization.eventId,
+        generation: finalization.generation,
+        attempt: finalization.attempt
+      } satisfies UnplannedEventFinalizationPayload,
+      dedupeKey: unplannedEventFinalizationDedupeKey(finalization)
+    });
+    enqueued += 1;
   }
   return enqueued;
 }
@@ -286,15 +329,25 @@ export async function recoverEventEditRepairJobs(context: PluginRuntimeContext):
 export async function recoverEventWeatherForecastJobs(context: PluginRuntimeContext): Promise<number> {
   const db = eventsDatabase(context.databases);
   const records = listWeatherForecastCandidateEvents(db);
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const scheduled = new Set<string>();
   let enqueued = 0;
   const now = new Date();
-  for (const record of records) {
-    const config = parseEventsConfig(await context.configFor(record.scopeId));
-    const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
-    const request = eventWeatherForecastJobRequest({ event: record, profile, now });
-    if (!request) {
+  for (const delivery of listRecoverableEventWeatherDeliveries(db)) {
+    const record = recordsById.get(delivery.eventId) ?? getEvent(db, delivery.eventId);
+    if (!record) {
       continue;
     }
+    if (record.updatedAt !== delivery.eventUpdatedAt) {
+      supersedeEventWeatherDelivery(db, {
+        eventId: delivery.eventId,
+        eventUpdatedAt: delivery.eventUpdatedAt,
+        kind: delivery.kind,
+        reason: 'event_version_changed'
+      });
+      continue;
+    }
+    const request = eventWeatherForecastRecoveryJobRequest({ event: record, delivery, now });
     await enqueuePluginJob(context.queue, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: request.jobName,
@@ -303,9 +356,34 @@ export async function recoverEventWeatherForecastJobs(context: PluginRuntimeCont
       ...(request.groupWid ? { groupWid: request.groupWid } : {}),
       ...(request.runAt ? { runAt: request.runAt } : {}),
       payload: request.payload,
-      dedupeKey: `${request.dedupeKey}:startup:${record.updatedAt}`
+      dedupeKey: `${request.dedupeKey}:startup-recovery:${delivery.updatedAt}`
     });
+    scheduled.add(`${delivery.eventId}\u0000${delivery.kind}\u0000${delivery.eventUpdatedAt}`);
     enqueued += 1;
+  }
+  for (const record of records) {
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
+    for (const request of eventWeatherForecastJobRequests({ event: record, profile, now })) {
+      const deliveryKind = request.payload.deliveryKind;
+      if (
+        scheduled.has(`${record.id}\u0000${deliveryKind}\u0000${record.updatedAt}`) ||
+        getEventWeatherDelivery(db, record.id, deliveryKind, record.updatedAt)
+      ) {
+        continue;
+      }
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: request.jobName,
+        scopeId: request.scopeId,
+        ...(request.groupId ? { groupId: request.groupId } : {}),
+        ...(request.groupWid ? { groupWid: request.groupWid } : {}),
+        ...(request.runAt ? { runAt: request.runAt } : {}),
+        payload: request.payload,
+        dedupeKey: `${request.dedupeKey}:startup:${record.updatedAt}`
+      });
+      enqueued += 1;
+    }
   }
   return enqueued;
 }
@@ -354,6 +432,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.provisioningRecovery) {
     return recoverFailedEventProvisioning(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.unplannedFinalization) {
+    return finalizeUnplannedEventJob(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
   }
@@ -361,7 +442,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
     const db = eventsDatabase(context.databases);
     const eventId = jobPayloadEventId(event.payload);
     const record = eventId ? getEvent(db, eventId) : undefined;
-    const config = record ? parseEventsConfig(await context.configFor(record.scopeId)) : undefined;
+    const config = record && record.scopeId === event.scopeId
+      ? parseEventsConfig(await context.configFor(record.scopeId))
+      : undefined;
     const profile = record && config
       ? config.eventProfiles.find((candidate) => candidate.id === record.profileId)
       : undefined;
@@ -599,7 +682,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         context,
         scopeId: record.scopeId,
         actorIdentityId: requireHookEventActorIdentityId(record),
-        actorWid: record.actorWid,
         title: record.groupTitle,
         participantWids: attendeeWids
       });
@@ -623,22 +705,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     }
 
     const calendarProfile = config.eventProfiles.find((profile) => profile.id === record.profileId);
-    const plannedAnnouncementActions = await plannedEventAnnouncementActions(context, {
-      record,
-      profile: calendarProfile,
-      subgroupChatId,
-      subgroupTitle
-    });
-    const closedEvent: StoredEventRecord = {
-      ...record,
-      groupLifecycleStatus: 'poll_closed',
-      ...(subgroupChatId ? { subgroupChatId } : {}),
-      ...(subgroupTitle ? { subgroupTitle } : {})
-    };
-    const weatherForecastAction = eventWeatherForecastJobAction({
-      event: closedEvent,
-      profile: calendarProfile
-    });
     const closedAt = new Date().toISOString();
     markEventClosed(db, {
       eventId: record.id,
@@ -647,6 +713,25 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       closedAt
     });
     closePersisted = true;
+    const closedEvent = getEvent(db, record.id);
+    if (
+      !closedEvent ||
+      closedEvent.groupLifecycleStatus !== 'poll_closed' ||
+      closedEvent.updatedAt !== closedAt ||
+      closedEvent.subgroupChatId !== subgroupChatId
+    ) {
+      throw new Error(`Event ${record.id} changed while its poll closure was being persisted.`);
+    }
+    const plannedAnnouncementActions = await plannedEventAnnouncementActions(context, {
+      record: closedEvent,
+      profile: calendarProfile,
+      subgroupChatId,
+      subgroupTitle
+    });
+    const weatherForecastAction = eventWeatherForecastJobAction({
+      event: closedEvent,
+      profile: calendarProfile
+    });
     appendEventLog(db, {
       eventId: record.id,
       action: 'events.closed',
@@ -668,7 +753,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     const calendarFailureAudit = await publishClosedEventCalendar(context, {
       db,
       config,
-      record,
+      record: closedEvent,
       calendarId: calendarProfile?.calendar.calendarId ?? '',
       calendarEnabled: calendar?.enabled === true,
       events: calendarEvents
@@ -676,7 +761,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     return [
       ...plannedAnnouncementActions,
       ...(weatherForecastAction ? [weatherForecastAction] : []),
-      closeCleanupAction(record),
+      closeCleanupAction(closedEvent),
       ...(calendarFailureAudit ? [calendarFailureAudit] : []),
       audit('events.closed', { eventId: record.id, attendeeCount: attendeeWids.length, subgroupChatId })
     ];
@@ -850,6 +935,131 @@ function requirePollVoteIdentityResolver(
   return context.resolveIdentityAddress;
 }
 
+async function finalizeUnplannedEventJob(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const payload = unplannedEventFinalizationPayload(job.payload);
+  if (!payload) {
+    return [audit('events.unplanned.finalization_skipped', { reason: 'invalid payload' })];
+  }
+  const db = eventsDatabase(context.databases);
+  const event = getEvent(db, payload.eventId);
+  const finalization = getUnplannedEventFinalization(db, payload.eventId);
+  if (
+    !event ||
+    event.scopeId !== job.scopeId ||
+    event.origin !== 'unplanned' ||
+    !finalization ||
+    finalization.scopeId !== job.scopeId ||
+    finalization.status !== 'pending' ||
+    finalization.generation !== payload.generation ||
+    finalization.attempt !== payload.attempt
+  ) {
+    return [audit('events.unplanned.finalization_skipped', {
+      eventId: payload.eventId,
+      generation: payload.generation,
+      attempt: payload.attempt,
+      reason: 'event missing, completed, or stale finalization cursor'
+    })];
+  }
+  const runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases' | 'enqueuePluginJob'> = {
+    config: context.config,
+    ...(context.databases ? { databases: context.databases } : {}),
+    enqueuePluginJob: (request) => enqueuePluginJob(
+      context.queue,
+      { pluginId: EVENTS_PLUGIN_ID, ...request }
+    )
+  };
+  try {
+    const config = parseEventsConfig(await context.configFor(event.scopeId));
+    const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+    if (!profile) {
+      const resolvedAt = new Date().toISOString();
+      const resolved = completeUnplannedEventFinalization(db, {
+        eventId: finalization.eventId,
+        scopeId: finalization.scopeId,
+        generation: finalization.generation,
+        attempt: finalization.attempt,
+        completedAt: resolvedAt
+      });
+      appendEventLog(db, {
+        eventId: event.id,
+        action: resolved
+          ? 'events.unplanned.finalization_resolved'
+          : 'events.unplanned.finalization_resolution_stale',
+        metadata: {
+          reason: 'profile_removed',
+          profileId: event.profileId,
+          generation: payload.generation,
+          attempt: payload.attempt
+        }
+      });
+      return [audit(
+        resolved
+          ? 'events.unplanned.finalization_completed'
+          : 'events.unplanned.finalization_skipped',
+        {
+          eventId: event.id,
+          generation: payload.generation,
+          attempt: payload.attempt,
+          status: resolved ? 'resolved_profile_removed' : 'stale'
+        }
+      )];
+    }
+    const actorIdentityId = requireHookEventActorIdentityId(event);
+    const locale = await context.i18n.resolveIdentityLocale(actorIdentityId, event.scopeId);
+    const result = await attemptUnplannedEventFinalization({
+      context,
+      runtime,
+      activeTransport: {
+        async sendText(chatId, text, options) {
+          if (!context.sendText) {
+            throw new Error('Plugin runtime does not expose durable text delivery.');
+          }
+          return context.sendText(chatId, text, options);
+        }
+      },
+      event,
+      profile,
+      config,
+      locale: locale.locale,
+      creatorDisplayName: event.actorLabel || event.actorWid,
+      trigger: 'unplanned_recovery',
+      expected: payload
+    });
+    return [audit(
+      result.status === 'completed' ||
+        result.status === 'superseded' ||
+        result.status === 'already_completed'
+        ? 'events.unplanned.finalization_completed'
+        : result.status === 'retry_scheduled'
+          ? 'events.unplanned.finalization_retry_scheduled'
+          : 'events.unplanned.finalization_skipped',
+      {
+        eventId: event.id,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        status: result.status
+      }
+    )];
+  } catch (error) {
+    const result = await scheduleUnplannedEventFinalizationRetry({
+      runtime,
+      event,
+      expected: payload,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return [audit('events.unplanned.finalization_retry_scheduled', {
+      eventId: event.id,
+      generation: payload.generation,
+      attempt: payload.attempt,
+      status: result.status,
+      reason: error instanceof Error ? error.message : String(error)
+    })];
+  }
+}
+
 async function recoverFailedEventProvisioning(
   context: PluginRuntimeContext,
   job: PluginJobEvent
@@ -869,6 +1079,27 @@ async function recoverFailedEventProvisioning(
       generation: payload.generation,
       attempt: payload.attempt,
       reason: 'event missing or scope mismatch'
+    })];
+  }
+  const pendingFinalization = getUnplannedEventFinalization(db, record.id);
+  if (
+    record.origin === 'unplanned' &&
+    record.eventStatus === 'active' &&
+    record.groupLifecycleStatus === 'poll_closed' &&
+    pendingFinalization?.status === 'pending' &&
+    pendingFinalization.scopeId === record.scopeId
+  ) {
+    const runAt = await enqueuePendingUnplannedEventFinalization(
+      context,
+      record,
+      pendingFinalization
+    );
+    return [audit('events.provisioning.recovery_finalization_forwarded', {
+      eventId: record.id,
+      subgroupChatId: record.subgroupChatId,
+      generation: pendingFinalization.generation,
+      attempt: pendingFinalization.attempt,
+      runAt: runAt.toISOString()
     })];
   }
   if (record.subgroupChatId !== payload.subgroupChatId) {
@@ -906,7 +1137,13 @@ async function recoverFailedEventProvisioning(
       actorLabel: 'Plugin provisioning recovery'
     });
     if (result.status === 'rejected' || result.status === 'not_found') {
-      const retry = advanceEventProvisioningRecoveryCursor(db, record, payload, new Date());
+      const retry = await enqueueAndAdvanceEventProvisioningRecoveryCursor(
+        context,
+        db,
+        record,
+        payload,
+        new Date()
+      );
       appendEventLog(db, {
         eventId: record.id,
         action: retry
@@ -925,7 +1162,6 @@ async function recoverFailedEventProvisioning(
       });
       if (retry) {
         return [
-          eventProvisioningRecoveryAction(retry.record, retry.cursor),
           audit('events.provisioning.recovery_retry_scheduled', {
             eventId: record.id,
             subgroupChatId: payload.subgroupChatId,
@@ -941,6 +1177,8 @@ async function recoverFailedEventProvisioning(
     return [audit(
       result.status === 'queued'
         ? 'events.provisioning.recovery_queued'
+        : result.status === 'completed'
+          ? 'events.provisioning.recovery_completed'
         : result.status === 'already_completed'
           ? 'events.provisioning.recovery_already_completed'
           : 'events.provisioning.recovery_rejected',
@@ -955,7 +1193,13 @@ async function recoverFailedEventProvisioning(
     )];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const retry = advanceEventProvisioningRecoveryCursor(db, record, payload, new Date());
+    const retry = await enqueueAndAdvanceEventProvisioningRecoveryCursor(
+      context,
+      db,
+      record,
+      payload,
+      new Date()
+    );
     if (retry) {
       const stage = isManagedCommunitySubgroupProvisioningError(error)
         ? error.stage
@@ -974,7 +1218,6 @@ async function recoverFailedEventProvisioning(
         }
       });
       return [
-        eventProvisioningRecoveryAction(retry.record, retry.cursor),
         audit('events.provisioning.recovery_retry_scheduled', {
           eventId: record.id,
           subgroupChatId: payload.subgroupChatId,
@@ -986,6 +1229,42 @@ async function recoverFailedEventProvisioning(
           ...(stage ? { stage } : {})
         })
       ];
+    }
+    const latest = getEvent(db, record.id);
+    const latestFinalization = latest
+      ? getUnplannedEventFinalization(db, latest.id)
+      : undefined;
+    if (
+      latest?.origin === 'unplanned' &&
+      latest.eventStatus === 'active' &&
+      latest.groupLifecycleStatus === 'poll_closed' &&
+      latestFinalization?.status === 'pending' &&
+      latestFinalization.scopeId === latest.scopeId
+    ) {
+      const runAt = await enqueuePendingUnplannedEventFinalization(
+        context,
+        latest,
+        latestFinalization
+      );
+      appendEventLog(db, {
+        eventId: latest.id,
+        action: 'events.provisioning.recovery_finalization_forwarded',
+        metadata: {
+          subgroupChatId: latest.subgroupChatId,
+          generation: latestFinalization.generation,
+          attempt: latestFinalization.attempt,
+          runAt: runAt.toISOString(),
+          recoveryReason: reason
+        }
+      });
+      return [audit('events.provisioning.recovery_finalization_forwarded', {
+        eventId: latest.id,
+        subgroupChatId: latest.subgroupChatId,
+        generation: latestFinalization.generation,
+        attempt: latestFinalization.attempt,
+        runAt: runAt.toISOString(),
+        recoveryReason: reason
+      })];
     }
     appendEventLog(db, {
       eventId: record.id,
@@ -1008,16 +1287,45 @@ async function recoverFailedEventProvisioning(
   }
 }
 
-function advanceEventProvisioningRecoveryCursor(
+async function enqueuePendingUnplannedEventFinalization(
+  context: PluginRuntimeContext,
+  record: StoredEventRecord,
+  finalization: NonNullable<ReturnType<typeof getUnplannedEventFinalization>>
+): Promise<Date> {
+  const persistedRunAt = finalization.nextRunAt
+    ? new Date(finalization.nextRunAt)
+    : undefined;
+  const runAt = persistedRunAt && Number.isFinite(persistedRunAt.getTime())
+    ? persistedRunAt
+    : new Date();
+  await enqueuePluginJob(context.queue, {
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.unplannedFinalization,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: finalization.eventId,
+      generation: finalization.generation,
+      attempt: finalization.attempt
+    } satisfies UnplannedEventFinalizationPayload,
+    dedupeKey: unplannedEventFinalizationDedupeKey(finalization)
+  });
+  return runAt;
+}
+
+async function enqueueAndAdvanceEventProvisioningRecoveryCursor(
+  context: PluginRuntimeContext,
   db: ReturnType<typeof eventsDatabase>,
   record: StoredEventRecord,
   payload: EventProvisioningRecoveryPayload,
   now: Date
-): {
+): Promise<{
   record: StoredEventRecord;
   cursor: EventProvisioningRecoveryCursor & { nextRunAt: string };
   runAt: Date;
-} | undefined {
+} | undefined> {
   const latest = getEvent(db, record.id) ?? record;
   if (
     latest.eventStatus !== 'failed' ||
@@ -1036,6 +1344,26 @@ function advanceEventProvisioningRecoveryCursor(
   }
   const nextAttempt = payload.attempt + 1;
   const runAt = eventProvisioningRecoveryRunAt(nextAttempt, now);
+  const nextCursor = {
+    generation: payload.generation,
+    attempt: nextAttempt,
+    nextRunAt: runAt.toISOString()
+  };
+  await enqueuePluginJob(context.queue, {
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.provisioningRecovery,
+    scopeId: latest.scopeId,
+    ...(latest.groupId ? { groupId: latest.groupId } : {}),
+    ...(latest.groupWid ? { groupWid: latest.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: latest.id,
+      subgroupChatId: payload.subgroupChatId,
+      generation: payload.generation,
+      attempt: nextAttempt
+    } satisfies EventProvisioningRecoveryPayload,
+    dedupeKey: eventProvisioningRecoveryDedupeKey(latest, nextCursor)
+  });
   const advanced = advanceEventProvisioningRecovery(db, {
     eventId: latest.id,
     scopeId: latest.scopeId,
@@ -1094,12 +1422,20 @@ function eventProvisioningRecoveryPayload(payload: unknown): EventProvisioningRe
   return { eventId, subgroupChatId, generation, attempt: Number(attempt) };
 }
 
-function eventProvisioningRecoveryRunAt(attempt: number, now: Date): Date {
-  const delay = EVENT_PROVISIONING_RECOVERY_DELAYS_MS[Math.min(
-    EVENT_PROVISIONING_RECOVERY_DELAYS_MS.length - 1,
-    Math.max(0, attempt - 1)
-  )]!;
-  return new Date(now.getTime() + delay);
+function unplannedEventFinalizationPayload(
+  payload: unknown
+): UnplannedEventFinalizationPayload | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  const candidate = payload as Record<string, unknown>;
+  const eventId = typeof candidate.eventId === 'string' ? candidate.eventId.trim() : '';
+  const generation = typeof candidate.generation === 'string' ? candidate.generation.trim() : '';
+  const attempt = candidate.attempt;
+  if (!eventId || !generation || !Number.isInteger(attempt) || Number(attempt) < 1) {
+    return undefined;
+  }
+  return { eventId, generation, attempt: Number(attempt) };
 }
 
 function eventProvisioningRecoveryAction(
@@ -1124,36 +1460,6 @@ function eventProvisioningRecoveryAction(
     } satisfies EventProvisioningRecoveryPayload,
     dedupeKey: eventProvisioningRecoveryDedupeKey(record, cursor)
   };
-}
-
-interface EventProvisioningRecoveryCursor {
-  generation: string;
-  attempt: number;
-  nextRunAt?: string | undefined;
-}
-
-function eventProvisioningRecoveryCursor(
-  record: StoredEventRecord
-): EventProvisioningRecoveryCursor | undefined {
-  const generation = record.provisioningRecoveryGeneration?.trim();
-  const attempt = record.provisioningRecoveryAttempt;
-  if (!generation || !Number.isInteger(attempt) || Number(attempt) < 1) {
-    return undefined;
-  }
-  return {
-    generation,
-    attempt: Number(attempt),
-    ...(record.provisioningRecoveryNextRunAt
-      ? { nextRunAt: record.provisioningRecoveryNextRunAt }
-      : {})
-  };
-}
-
-function eventProvisioningRecoveryDedupeKey(
-  record: StoredEventRecord,
-  cursor: Pick<EventProvisioningRecoveryCursor, 'generation' | 'attempt'>
-): string {
-  return `${EVENTS_JOBS.provisioningRecovery}:${record.scopeId}:${record.id}:${record.subgroupChatId}:${cursor.generation}:${cursor.attempt}`;
 }
 
 async function publishClosedEventCalendar(

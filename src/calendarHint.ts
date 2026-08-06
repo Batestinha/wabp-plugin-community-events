@@ -11,6 +11,7 @@ import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import {
   eventsDatabase,
+  getEventAnnouncementDeliveryClaim,
   getCalendarPublicationStatus,
   type StoredEventRecord
 } from './store';
@@ -37,7 +38,7 @@ export interface EventCalendarHintContext {
 
 export async function sendEventCalendarHint(input: {
   context: EventCalendarHintContext;
-  runtime: OfficialPluginCommandRuntime;
+  runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases'>;
   activeTransport: CalendarHintTextTransport;
   trigger: CalendarHintTrigger;
   scopeId: string;
@@ -50,6 +51,7 @@ export async function sendEventCalendarHint(input: {
   creatorDisplayName: string;
   groupJoinUrl?: string | undefined;
   subgroupChatId?: string | undefined;
+  expectedEventUpdatedAt?: string | undefined;
 }): Promise<EventCalendarHintResult> {
   const hint = input.profile.calendar.hint;
   const enabled = input.trigger === 'poll_published'
@@ -61,8 +63,23 @@ export async function sendEventCalendarHint(input: {
   const runtime = input.runtime;
   const db = eventsDatabase(runtime.databases);
   const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', 'initial');
-  if (persistedDelivery) {
+  if (persistedDelivery === 'already_sent') {
     return persistedDelivery;
+  }
+  if (persistedDelivery === 'already_claimed') {
+    const claim = getEventAnnouncementDeliveryClaim(db, input.event.id, 'calendar_hint', 'initial');
+    if (claim?.status === 'superseded') {
+      return 'superseded';
+    }
+    const leaseExpiresAt = claim?.leaseExpiresAt
+      ? new Date(claim.leaseExpiresAt).getTime()
+      : Number.NaN;
+    const canReacquireExpiredLease = claim?.status === 'sending' &&
+      (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.now());
+    const canAcquirePersistedIntent = claim?.status === 'pending' || claim?.status === 'uncertain';
+    if (!canReacquireExpiredLease && !canAcquirePersistedIntent) {
+      return 'already_claimed';
+    }
   }
   const template = hint.template.trim() ? hint.template : '';
   const calendarId = input.profile.calendar.calendarId.trim();
@@ -136,6 +153,9 @@ export async function sendEventCalendarHint(input: {
       deliveryKey: 'initial',
       chatId: input.announcementGroupWid,
       text,
+      ...(input.expectedEventUpdatedAt
+        ? { expectedEventUpdatedAt: input.expectedEventUpdatedAt }
+        : {}),
       sender: input.activeTransport
     });
     if (delivery.status !== 'sent') {

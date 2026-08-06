@@ -11,17 +11,20 @@ export type EventStatus = 'active' | 'completed' | 'cancelled' | 'failed';
 export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
-export type EventWeatherDeliveryStatus = 'queued' | 'skipped' | 'failed';
+export type EventWeatherDeliveryScheduleKind = 'poll-close' | 'daily';
+export type EventWeatherDeliveryStatus = 'pending' | 'sending' | 'sent' | 'skipped';
 export type EventAnnouncementMessageKind = 'poll' | 'calendar_hint' | 'event_group_hint' | 'event_edit';
 export type EventAnnouncementDeliveryKind = Exclude<EventAnnouncementMessageKind, 'poll'>;
 export type EventAnnouncementDeliveryClaimStatus = 'pending' | 'sending' | 'sent' | 'uncertain' | 'superseded';
 export type EventAnnouncementDeliveryClaimResult = 'claimed' | 'already_sent' | 'already_claimed' | 'superseded';
 export type EventEditRepairStatus = 'pending' | 'completed';
 export type EventQuestionKeyRenameStatus = 'expanded' | 'completed' | 'rolled_back';
+export type UnplannedEventFinalizationStatus = 'pending' | 'completed';
 
 export const EVENT_CLEANUP_CLAIM_LEASE_MS = 15 * 60 * 1000;
 export const EVENT_ANNOUNCEMENT_DELIVERY_LEASE_MS = 2 * 60 * 1000;
 export const EVENT_CALENDAR_REPAIR_LEASE_MS = 2 * 60 * 1000;
+export const EVENT_WEATHER_DELIVERY_LEASE_MS = 5 * 60 * 1000;
 
 export class EventQuestionKeyRenameConflictError extends Error {
   constructor(message: string) {
@@ -151,6 +154,20 @@ export interface StoredEventRecord {
   provisioningRecoveryNextRunAt?: string | undefined;
 }
 
+export interface StoredUnplannedEventFinalization {
+  eventId: string;
+  scopeId: string;
+  eventUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  status: UnplannedEventFinalizationStatus;
+  nextRunAt?: string | undefined;
+  lastError?: string | undefined;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | undefined;
+}
+
 export type NewStoredEventRecord = StoredEventRecord & {
   actorIdentityId: string;
 };
@@ -198,14 +215,31 @@ export interface StoredCalendarPublicationStatus {
 
 export interface StoredEventWeatherDelivery {
   eventId: string;
+  eventUpdatedAt: string;
   kind: string;
+  scheduleKind: EventWeatherDeliveryScheduleKind;
   scheduledAt: string;
   status: EventWeatherDeliveryStatus;
-  queuedAt?: string | undefined;
+  chatId?: string | undefined;
+  meteorologicalText?: string | undefined;
+  marineText?: string | undefined;
+  meteorologicalIdempotencyKey?: string | undefined;
+  marineIdempotencyKey?: string | undefined;
+  meteorologicalMessageId?: string | undefined;
+  marineMessageId?: string | undefined;
+  claimId?: string | undefined;
+  leaseExpiresAt?: string | undefined;
+  attempt: number;
+  nextRunAt?: string | undefined;
+  sentAt?: string | undefined;
   skippedAt?: string | undefined;
-  failedAt?: string | undefined;
   error?: string | undefined;
   updatedAt: string;
+}
+
+export interface ClaimedEventWeatherDelivery {
+  claimId: string;
+  delivery: StoredEventWeatherDelivery;
 }
 
 export interface StoredEventAnnouncementMessage {
@@ -337,12 +371,24 @@ interface CalendarPublicationStatusRow extends PluginDatabaseRow {
 
 interface EventWeatherDeliveryRow extends PluginDatabaseRow {
   event_id: string;
+  event_updated_at: string;
   kind: string;
+  schedule_kind: EventWeatherDeliveryScheduleKind;
   scheduled_at: string;
   status: EventWeatherDeliveryStatus;
-  queued_at: string | null;
+  chat_id: string | null;
+  meteorological_text: string | null;
+  marine_text: string | null;
+  meteorological_idempotency_key: string | null;
+  marine_idempotency_key: string | null;
+  meteorological_message_id: string | null;
+  marine_message_id: string | null;
+  claim_id: string | null;
+  lease_expires_at: string | null;
+  attempt: number;
+  next_run_at: string | null;
+  sent_at: string | null;
   skipped_at: string | null;
-  failed_at: string | null;
   error: string | null;
   updated_at: string;
 }
@@ -374,6 +420,20 @@ interface EventAnnouncementDeliveryClaimRow extends PluginDatabaseRow {
   error: string | null;
   claimed_at: string;
   updated_at: string;
+}
+
+interface UnplannedEventFinalizationRow extends PluginDatabaseRow {
+  event_id: string;
+  scope_id: string;
+  event_updated_at: string;
+  generation: string;
+  attempt: number;
+  next_run_at: string | null;
+  status: UnplannedEventFinalizationStatus;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 interface EventEditRepairRow extends PluginDatabaseRow {
@@ -1057,7 +1117,6 @@ export function listFailedProvisioningEvents(db: PluginDatabase): StoredEventRec
     `SELECT * FROM event_records
       WHERE event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND poll_wa_msg_id IS NOT NULL
         AND subgroup_chat_id IS NOT NULL
       ORDER BY updated_at ASC, id ASC`
   ).map(eventFromRow);
@@ -1191,6 +1250,9 @@ export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, 
   progress: UnplannedEventProvisioningProgress;
   reason: string;
   failedAt: string;
+  recoveryGeneration: string;
+  recoveryAttempt: number;
+  recoveryNextRunAt: string;
 }): boolean {
   return db.transaction(() => {
     const current = db.get<{ id: string }>(
@@ -1218,6 +1280,9 @@ export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, 
           SET subgroup_chat_id = ?,
               subgroup_title = ?,
               error = ?,
+              provisioning_recovery_generation = ?,
+              provisioning_recovery_attempt = ?,
+              provisioning_recovery_next_run_at = ?,
               updated_at = ?
         WHERE id = ?
           AND scope_id = ?
@@ -1229,6 +1294,9 @@ export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, 
       input.subgroupChatId,
       input.subgroupTitle,
       input.reason,
+      input.recoveryGeneration,
+      input.recoveryAttempt,
+      input.recoveryNextRunAt,
       input.failedAt,
       input.eventId,
       input.scopeId,
@@ -1247,7 +1315,10 @@ export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, 
         parentCommunityWid: input.parentCommunityWid,
         stage: input.stage,
         progress: input.progress,
-        participants: input.participants
+        participants: input.participants,
+        recoveryGeneration: input.recoveryGeneration,
+        recoveryAttempt: input.recoveryAttempt,
+        recoveryNextRunAt: input.recoveryNextRunAt
       }
     });
     return true;
@@ -1292,6 +1363,9 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
               subgroup_title = ?,
               closed_at = ?,
               error = NULL,
+              provisioning_recovery_generation = NULL,
+              provisioning_recovery_attempt = NULL,
+              provisioning_recovery_next_run_at = NULL,
               updated_at = ?
         WHERE id = ?
           AND scope_id = ?
@@ -1311,6 +1385,19 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
     if (result.changes !== 1) {
       throw new Error(`Event ${input.eventId} changed while completing unplanned subgroup provisioning.`);
     }
+    db.run(
+      `INSERT INTO unplanned_event_finalizations (
+         event_id, scope_id, event_updated_at, generation, attempt, next_run_at, status,
+         last_error, created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, 1, ?, 'pending', NULL, ?, ?, NULL)`,
+      input.eventId,
+      input.scopeId,
+      input.completedAt,
+      randomUUID(),
+      input.completedAt,
+      input.completedAt,
+      input.completedAt
+    );
     appendEventLog(db, {
       eventId: input.eventId,
       action: 'events.unplanned.provisioning_completed',
@@ -1322,6 +1409,90 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
     });
     return true;
   });
+}
+
+export function getUnplannedEventFinalization(
+  db: PluginDatabase,
+  eventId: string
+): StoredUnplannedEventFinalization | undefined {
+  const row = db.get<UnplannedEventFinalizationRow>(
+    'SELECT * FROM unplanned_event_finalizations WHERE event_id = ?',
+    eventId
+  );
+  return row ? unplannedEventFinalizationFromRow(row) : undefined;
+}
+
+export function listPendingUnplannedEventFinalizations(
+  db: PluginDatabase
+): StoredUnplannedEventFinalization[] {
+  return db.all<UnplannedEventFinalizationRow>(
+    `SELECT *
+       FROM unplanned_event_finalizations
+      WHERE status = 'pending'
+      ORDER BY next_run_at ASC, created_at ASC, event_id ASC`
+  ).map(unplannedEventFinalizationFromRow);
+}
+
+export function completeUnplannedEventFinalization(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  attempt: number;
+  completedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE unplanned_event_finalizations
+        SET status = 'completed',
+            next_run_at = NULL,
+            last_error = NULL,
+            completed_at = ?,
+            updated_at = ?
+      WHERE event_id = ?
+        AND scope_id = ?
+        AND generation = ?
+        AND attempt = ?
+        AND status = 'pending'`,
+    input.completedAt,
+    input.completedAt,
+    input.eventId,
+    input.scopeId,
+    input.generation,
+    input.attempt
+  );
+  return result.changes === 1;
+}
+
+export function advanceUnplannedEventFinalization(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  nextAttempt: number;
+  nextRunAt: string;
+  reason: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE unplanned_event_finalizations
+        SET attempt = ?,
+            next_run_at = ?,
+            last_error = ?,
+            updated_at = ?
+      WHERE event_id = ?
+        AND scope_id = ?
+        AND generation = ?
+        AND attempt = ?
+        AND status = 'pending'`,
+    input.nextAttempt,
+    input.nextRunAt,
+    input.reason,
+    input.updatedAt,
+    input.eventId,
+    input.scopeId,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
 }
 
 export function markEventClosed(db: PluginDatabase, input: {
@@ -2400,46 +2571,388 @@ export function appendEventLog(db: PluginDatabase, input: {
 export function getEventWeatherDelivery(
   db: PluginDatabase,
   eventId: string,
-  kind: string
+  kind: string,
+  eventUpdatedAt: string
 ): StoredEventWeatherDelivery | undefined {
   const row = db.get<EventWeatherDeliveryRow>(
-    'SELECT * FROM event_weather_deliveries WHERE event_id = ? AND kind = ?',
+    `SELECT * FROM event_weather_deliveries
+      WHERE event_id = ? AND kind = ? AND event_updated_at = ?`,
     eventId,
-    kind
+    kind,
+    eventUpdatedAt
   );
   return row ? eventWeatherDeliveryFromRow(row) : undefined;
 }
 
-export function recordEventWeatherDelivery(db: PluginDatabase, input: {
+export function listRecoverableEventWeatherDeliveries(
+  db: PluginDatabase
+): StoredEventWeatherDelivery[] {
+  return db.all<EventWeatherDeliveryRow>(
+    `SELECT *
+       FROM event_weather_deliveries
+      WHERE status IN ('pending', 'sending')
+      ORDER BY COALESCE(next_run_at, lease_expires_at, scheduled_at) ASC, event_id ASC, kind ASC`
+  ).map(eventWeatherDeliveryFromRow);
+}
+
+export function prepareEventWeatherDelivery(db: PluginDatabase, input: {
   eventId: string;
+  eventUpdatedAt: string;
   kind: string;
+  scheduleKind: EventWeatherDeliveryScheduleKind;
   scheduledAt: string;
-  status: EventWeatherDeliveryStatus;
-  at: string;
-  error?: string | undefined;
-}): void {
-  db.run(
-    `INSERT INTO event_weather_deliveries (
-       event_id, kind, scheduled_at, status, queued_at, skipped_at, failed_at, error, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(event_id, kind) DO UPDATE SET
-       scheduled_at = excluded.scheduled_at,
-       status = excluded.status,
-       queued_at = excluded.queued_at,
-       skipped_at = excluded.skipped_at,
-       failed_at = excluded.failed_at,
-       error = excluded.error,
-       updated_at = excluded.updated_at`,
+  chatId: string;
+  meteorologicalText?: string | undefined;
+  marineText?: string | undefined;
+  meteorologicalIdempotencyKey?: string | undefined;
+  marineIdempotencyKey?: string | undefined;
+  preparedAt?: string | undefined;
+}): StoredEventWeatherDelivery {
+  const meteorologicalText = input.meteorologicalText?.trim() || undefined;
+  const marineText = input.marineText?.trim() || undefined;
+  if (!meteorologicalText && !marineText) {
+    throw new Error(`Cannot prepare empty weather delivery ${input.eventId}/${input.kind}.`);
+  }
+  if (meteorologicalText && !input.meteorologicalIdempotencyKey?.trim()) {
+    throw new Error(`Weather delivery ${input.eventId}/${input.kind} has no meteorological idempotency key.`);
+  }
+  if (marineText && !input.marineIdempotencyKey?.trim()) {
+    throw new Error(`Weather delivery ${input.eventId}/${input.kind} has no marine idempotency key.`);
+  }
+  return db.transaction(() => {
+    if (!eventRecordVersionMatches(db, input.eventId, input.eventUpdatedAt)) {
+      throw new Error(
+        `Event ${input.eventId} changed before weather delivery ${input.kind} could be prepared.`
+      );
+    }
+    const existing = getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+    if (existing?.status === 'sent' || existing?.status === 'skipped') {
+      return existing;
+    }
+    if (
+      existing?.chatId &&
+      (existing.meteorologicalText || existing.marineText) &&
+      (!existing.meteorologicalText || existing.meteorologicalIdempotencyKey) &&
+      (!existing.marineText || existing.marineIdempotencyKey)
+    ) {
+      return existing;
+    }
+    const preparedAt = input.preparedAt ?? new Date().toISOString();
+    const persisted = db.run(
+      `INSERT INTO event_weather_deliveries (
+         event_id, event_updated_at, kind, schedule_kind, scheduled_at, status, chat_id,
+         meteorological_text, marine_text,
+         meteorological_idempotency_key, marine_idempotency_key,
+         meteorological_message_id, marine_message_id,
+         claim_id, lease_expires_at, attempt, next_run_at,
+         sent_at, skipped_at, error, updated_at
+       )
+       SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, NULL, NULL, NULL, ?
+         FROM event_records
+        WHERE id = ? AND updated_at = ?
+       ON CONFLICT(event_id, kind, event_updated_at) DO UPDATE SET
+         schedule_kind = excluded.schedule_kind,
+         scheduled_at = excluded.scheduled_at,
+         status = 'pending',
+         chat_id = excluded.chat_id,
+         meteorological_text = excluded.meteorological_text,
+         marine_text = excluded.marine_text,
+         meteorological_idempotency_key = excluded.meteorological_idempotency_key,
+         marine_idempotency_key = excluded.marine_idempotency_key,
+         claim_id = NULL,
+         lease_expires_at = NULL,
+         next_run_at = excluded.next_run_at,
+         error = NULL,
+         updated_at = excluded.updated_at
+      WHERE event_weather_deliveries.status IN ('pending', 'sending')`,
+      input.eventId,
+      input.eventUpdatedAt,
+      input.kind,
+      input.scheduleKind,
+      input.scheduledAt,
+      input.chatId,
+      meteorologicalText ?? null,
+      marineText ?? null,
+      input.meteorologicalIdempotencyKey?.trim() ?? null,
+      input.marineIdempotencyKey?.trim() ?? null,
+      preparedAt,
+      preparedAt,
+      input.eventId,
+      input.eventUpdatedAt
+    );
+    if (persisted.changes !== 1) {
+      throw new Error(
+        `Event ${input.eventId} changed before weather delivery ${input.kind} could be prepared.`
+      );
+    }
+    const prepared = getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+    if (!prepared) {
+      throw new Error(`Could not read prepared weather delivery ${input.eventId}/${input.kind}.`);
+    }
+    return prepared;
+  });
+}
+
+export function claimEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  eventUpdatedAt: string;
+  kind: string;
+  claimedAt?: string | undefined;
+  leaseExpiresAt?: string | undefined;
+}): ClaimedEventWeatherDelivery | undefined {
+  return db.transaction(() => {
+    const claimedAt = input.claimedAt ?? new Date().toISOString();
+    const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
+      new Date(claimedAt).getTime() + EVENT_WEATHER_DELIVERY_LEASE_MS
+    ).toISOString();
+    const claimId = randomUUID();
+    const result = db.run(
+      `UPDATE event_weather_deliveries
+          SET status = 'sending',
+              claim_id = ?,
+              lease_expires_at = ?,
+              next_run_at = NULL,
+              updated_at = ?
+        WHERE event_id = ?
+          AND kind = ?
+          AND event_updated_at = ?
+          AND EXISTS (
+            SELECT 1 FROM event_records
+             WHERE event_records.id = event_weather_deliveries.event_id
+               AND event_records.updated_at = event_weather_deliveries.event_updated_at
+          )
+          AND chat_id IS NOT NULL
+          AND (meteorological_text IS NOT NULL OR marine_text IS NOT NULL)
+          AND (
+            (status = 'pending' AND (next_run_at IS NULL OR next_run_at <= ?))
+            OR (status = 'sending' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+          )`,
+      claimId,
+      leaseExpiresAt,
+      claimedAt,
+      input.eventId,
+      input.kind,
+      input.eventUpdatedAt,
+      claimedAt,
+      claimedAt
+    );
+    if (result.changes !== 1) {
+      return undefined;
+    }
+    const delivery = getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+    if (!delivery || delivery.status !== 'sending' || delivery.claimId !== claimId) {
+      throw new Error(`Could not read claimed weather delivery ${input.eventId}/${input.kind}.`);
+    }
+    return { claimId, delivery };
+  });
+}
+
+export function completeEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  eventUpdatedAt: string;
+  kind: string;
+  claimId: string;
+  meteorologicalMessageId?: string | undefined;
+  marineMessageId?: string | undefined;
+  completedAt?: string | undefined;
+}): boolean {
+  const completedAt = input.completedAt ?? new Date().toISOString();
+  const result = db.run(
+    `UPDATE event_weather_deliveries
+        SET status = 'sent',
+            meteorological_message_id = ?,
+            marine_message_id = ?,
+            claim_id = NULL,
+            lease_expires_at = NULL,
+            next_run_at = NULL,
+            sent_at = ?,
+            error = NULL,
+            updated_at = ?
+      WHERE event_id = ?
+        AND kind = ?
+        AND event_updated_at = ?
+        AND status = 'sending'
+        AND claim_id = ?
+        AND EXISTS (
+          SELECT 1 FROM event_records
+           WHERE event_records.id = event_weather_deliveries.event_id
+             AND event_records.updated_at = event_weather_deliveries.event_updated_at
+        )`,
+    input.meteorologicalMessageId?.trim() ?? null,
+    input.marineMessageId?.trim() ?? null,
+    completedAt,
+    completedAt,
     input.eventId,
     input.kind,
-    input.scheduledAt,
-    input.status,
-    input.status === 'queued' ? input.at : null,
-    input.status === 'skipped' ? input.at : null,
-    input.status === 'failed' ? input.at : null,
-    input.error ?? null,
-    input.at
+    input.eventUpdatedAt,
+    input.claimId
   );
+  return result.changes === 1;
+}
+
+export function deferEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  eventUpdatedAt: string;
+  kind: string;
+  scheduleKind: EventWeatherDeliveryScheduleKind;
+  scheduledAt: string;
+  nextRunAt: string;
+  reason: string;
+  claimId?: string | undefined;
+  updatedAt?: string | undefined;
+}): StoredEventWeatherDelivery | undefined {
+  return db.transaction(() => {
+    const updatedAt = input.updatedAt ?? new Date().toISOString();
+    const existing = getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+    if (existing?.status === 'sent' || existing?.status === 'skipped') {
+      return existing;
+    }
+    if (!eventRecordVersionMatches(db, input.eventId, input.eventUpdatedAt)) {
+      return existing;
+    }
+    if (input.claimId && existing?.claimId !== input.claimId) {
+      return existing;
+    }
+    if (!existing) {
+      db.run(
+        `INSERT INTO event_weather_deliveries (
+           event_id, event_updated_at, kind, schedule_kind, scheduled_at, status, attempt,
+           next_run_at, error, updated_at
+         )
+         SELECT ?, ?, ?, ?, ?, 'pending', 1, ?, ?, ?
+           FROM event_records
+          WHERE id = ? AND updated_at = ?`,
+        input.eventId,
+        input.eventUpdatedAt,
+        input.kind,
+        input.scheduleKind,
+        input.scheduledAt,
+        input.nextRunAt,
+        input.reason,
+        updatedAt,
+        input.eventId,
+        input.eventUpdatedAt
+      );
+    } else {
+      db.run(
+        `UPDATE event_weather_deliveries
+            SET schedule_kind = ?,
+                scheduled_at = ?,
+                status = 'pending',
+                claim_id = NULL,
+                lease_expires_at = NULL,
+                attempt = attempt + 1,
+                next_run_at = ?,
+                error = ?,
+                updated_at = ?
+          WHERE event_id = ? AND kind = ? AND event_updated_at = ?`,
+        input.scheduleKind,
+        input.scheduledAt,
+        input.nextRunAt,
+        input.reason,
+        updatedAt,
+        input.eventId,
+        input.kind,
+        input.eventUpdatedAt
+      );
+    }
+    return getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+  });
+}
+
+export function skipEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  eventUpdatedAt: string;
+  kind: string;
+  scheduleKind: EventWeatherDeliveryScheduleKind;
+  scheduledAt: string;
+  reason: string;
+  skippedAt?: string | undefined;
+}): StoredEventWeatherDelivery | undefined {
+  return db.transaction(() => {
+    const skippedAt = input.skippedAt ?? new Date().toISOString();
+    db.run(
+    `INSERT INTO event_weather_deliveries (
+       event_id, event_updated_at, kind, schedule_kind, scheduled_at, status, attempt,
+       skipped_at, error, updated_at
+     )
+     SELECT ?, ?, ?, ?, ?, 'skipped', 0, ?, ?, ?
+       FROM event_records
+      WHERE id = ? AND updated_at = ?
+     ON CONFLICT(event_id, kind, event_updated_at) DO UPDATE SET
+       schedule_kind = excluded.schedule_kind,
+       scheduled_at = excluded.scheduled_at,
+       status = 'skipped',
+       claim_id = NULL,
+       lease_expires_at = NULL,
+       next_run_at = NULL,
+       sent_at = NULL,
+       skipped_at = excluded.skipped_at,
+       error = excluded.error,
+       updated_at = excluded.updated_at
+     WHERE event_weather_deliveries.status <> 'sent'
+       AND EXISTS (
+         SELECT 1 FROM event_records
+          WHERE event_records.id = event_weather_deliveries.event_id
+            AND event_records.updated_at = event_weather_deliveries.event_updated_at
+       )`,
+    input.eventId,
+    input.eventUpdatedAt,
+    input.kind,
+    input.scheduleKind,
+    input.scheduledAt,
+    skippedAt,
+    input.reason,
+    skippedAt,
+    input.eventId,
+    input.eventUpdatedAt
+    );
+    return getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+  });
+}
+
+export function supersedeEventWeatherDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  eventUpdatedAt: string;
+  kind: string;
+  reason: string;
+  supersededAt?: string | undefined;
+}): StoredEventWeatherDelivery | undefined {
+  const supersededAt = input.supersededAt ?? new Date().toISOString();
+  db.run(
+    `UPDATE event_weather_deliveries
+        SET status = 'skipped',
+            claim_id = NULL,
+            lease_expires_at = NULL,
+            next_run_at = NULL,
+            sent_at = NULL,
+            skipped_at = ?,
+            error = ?,
+            updated_at = ?
+      WHERE event_id = ?
+        AND event_updated_at = ?
+        AND kind = ?
+        AND status IN ('pending', 'sending')`,
+    supersededAt,
+    input.reason,
+    supersededAt,
+    input.eventId,
+    input.eventUpdatedAt,
+    input.kind
+  );
+  return getEventWeatherDelivery(db, input.eventId, input.kind, input.eventUpdatedAt);
+}
+
+function eventRecordVersionMatches(
+  db: PluginDatabase,
+  eventId: string,
+  eventUpdatedAt: string
+): boolean {
+  return Boolean(db.get<{ id: string }>(
+    'SELECT id FROM event_records WHERE id = ? AND updated_at = ?',
+    eventId,
+    eventUpdatedAt
+  ));
 }
 
 export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
@@ -2789,14 +3302,46 @@ function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): St
 function eventWeatherDeliveryFromRow(row: EventWeatherDeliveryRow): StoredEventWeatherDelivery {
   return {
     eventId: row.event_id,
+    eventUpdatedAt: row.event_updated_at,
     kind: row.kind,
+    scheduleKind: row.schedule_kind,
     scheduledAt: row.scheduled_at,
     status: row.status,
-    ...(row.queued_at ? { queuedAt: row.queued_at } : {}),
+    ...(row.chat_id ? { chatId: row.chat_id } : {}),
+    ...(row.meteorological_text ? { meteorologicalText: row.meteorological_text } : {}),
+    ...(row.marine_text ? { marineText: row.marine_text } : {}),
+    ...(row.meteorological_idempotency_key
+      ? { meteorologicalIdempotencyKey: row.meteorological_idempotency_key }
+      : {}),
+    ...(row.marine_idempotency_key ? { marineIdempotencyKey: row.marine_idempotency_key } : {}),
+    ...(row.meteorological_message_id ? { meteorologicalMessageId: row.meteorological_message_id } : {}),
+    ...(row.marine_message_id ? { marineMessageId: row.marine_message_id } : {}),
+    ...(row.claim_id ? { claimId: row.claim_id } : {}),
+    ...(row.lease_expires_at ? { leaseExpiresAt: row.lease_expires_at } : {}),
+    attempt: Number(row.attempt),
+    ...(row.next_run_at ? { nextRunAt: row.next_run_at } : {}),
+    ...(row.sent_at ? { sentAt: row.sent_at } : {}),
     ...(row.skipped_at ? { skippedAt: row.skipped_at } : {}),
-    ...(row.failed_at ? { failedAt: row.failed_at } : {}),
     ...(row.error ? { error: row.error } : {}),
     updatedAt: row.updated_at
+  };
+}
+
+function unplannedEventFinalizationFromRow(
+  row: UnplannedEventFinalizationRow
+): StoredUnplannedEventFinalization {
+  return {
+    eventId: row.event_id,
+    scopeId: row.scope_id,
+    eventUpdatedAt: row.event_updated_at,
+    generation: row.generation,
+    attempt: Number(row.attempt),
+    status: row.status,
+    ...(row.next_run_at ? { nextRunAt: row.next_run_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.completed_at ? { completedAt: row.completed_at } : {})
   };
 }
 

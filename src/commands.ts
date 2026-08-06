@@ -56,7 +56,12 @@ import {
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
-import { createEventCommunitySubgroup, resumeEventCommunitySubgroup } from './subgroups';
+import { createEventCommunitySubgroup } from './subgroups';
+import {
+  attemptUnplannedEventFinalization,
+  eventProvisioningRecoveryDedupeKey,
+  eventProvisioningRecoveryRunAt
+} from './provisioningRecovery';
 import { eventWeatherForecastJobRequest } from './weather';
 import {
   GEOCODER_GEOCODE_METHOD,
@@ -1191,6 +1196,7 @@ async function updateEventLifecycle(input: {
     const weatherRequest = eventWeatherForecastJobRequest({
       event: {
         ...input.event,
+        updatedAt,
         startsAt: input.materialized.startsAt.toISOString(),
         startsAtUtc: input.materialized.startsAt.toISOString(),
         timezone,
@@ -2399,6 +2405,7 @@ async function createUnplannedEventLifecycle(input: {
   });
   const result = await provisionUnplannedEventSubgroup({
     context: input.context,
+    runtime: input.runtime,
     db: input.db,
     event: intent,
     creatorParticipantWid
@@ -2438,135 +2445,23 @@ async function createUnplannedEventLifecycle(input: {
     }
   });
 
-  try {
-    const config = draftEventsConfig(input.draft);
-    const calendar = calendarResourceForProfile(config, input.profile);
-    const calendarEvents = listCalendarEvents(input.db, input.draft.scopeId);
-    const publication = await writePublishAndRecordScopeCalendar({
-      appConfig: input.runtime.config,
-      db: input.db,
-      config,
-      scopeId: input.draft.scopeId,
-      calendarId: input.profile.calendar.calendarId,
-      events: calendarEvents
-    });
-    await appendEventJsonLog(input.context, {
-      action: 'calendar.exported',
-      scopeId: input.draft.scopeId,
-      eventId: event.id,
-      actorWid: input.draft.actorWid,
-      profileId: input.profile.id,
-      subgroupChatId: created.chatId,
-      metadata: {
-        calendarEnabled: calendar?.enabled === true,
-        calendarId: input.profile.calendar.calendarId,
-        ...(publication ? { publication } : {})
-      }
-    });
-  } catch (error) {
-    await appendEventJsonLog(input.context, {
-      action: 'calendar.export_failed',
-      scopeId: input.draft.scopeId,
-      eventId: event.id,
-      actorWid: input.draft.actorWid,
-      profileId: input.profile.id,
-      subgroupChatId: created.chatId,
-      metadata: { reason: error instanceof Error ? error.message : String(error) }
-    });
-  }
-
-  await appendEventJsonLog(input.context, {
-    action: 'event.created',
-    scopeId: input.draft.scopeId,
-    eventId: event.id,
-    actorWid: input.draft.actorWid,
-    profileId: input.profile.id,
-    subgroupChatId: created.chatId,
-    metadata: {
-      origin: 'unplanned',
-      announcementGroupWid: input.announcementGroupWid,
-      groupTitle: input.materialized.groupTitle,
-      answers: input.materialized.answers,
-      startsAt: input.materialized.startsAt.toISOString(),
-      closeAt: input.materialized.closeAt.toISOString(),
-      cleanupAt: input.materialized.cleanupAt.toISOString(),
-      prefill: input.draft.prefill
-    }
-  });
-  await input.runtime.enqueuePluginJob({
-    jobName: EVENTS_JOBS.cleanup,
-    scopeId: input.draft.scopeId,
-    ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
-    ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
-    runAt: input.materialized.cleanupAt,
-    payload: { eventId: event.id, attempt: 0 },
-    dedupeKey: `${EVENTS_JOBS.cleanup}:${event.id}:unplanned`
-  });
-  const weatherRequest = eventWeatherForecastJobRequest({ event, profile: input.profile, now: input.now });
-  if (weatherRequest) {
-    await input.runtime.enqueuePluginJob(weatherRequest);
-  }
-
-  const groupJoinUrl = eventGroupHintEnabled(input.profile, 'unplanned')
-    ? await eventGroupJoinUrl(input.context, input.profile.eventGroupHint.template, created.chatId)
-    : '';
-  if (eventGroupHintEnabled(input.profile, 'unplanned')) {
-    const announcementText = renderEventGroupAnnouncement({
-      template: input.profile.eventGroupHint.template,
-      profile: input.profile,
-      event,
-      groupDisplayName: created.title || input.materialized.groupTitle,
-      groupJoinUrl,
-      subgroupChatId: created.chatId,
-      locale: input.draft.locale,
-      creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
-    });
-    const delivery = await sendClaimedEventAnnouncement({
-      db: input.db,
-      eventId: event.id,
-      scopeId: event.scopeId,
-      kind: 'event_group_hint',
-      deliveryKey: 'initial',
-      chatId: input.announcementGroupWid,
-      text: announcementText,
-      sender: input.activeTransport
-    });
-    if (delivery.status === 'sent') {
-      await appendEventJsonLog(input.context, {
-        action: 'event.unplanned_announcement_sent',
-        scopeId: input.draft.scopeId,
-        eventId: event.id,
-        actorWid: input.draft.actorWid,
-        profileId: input.profile.id,
-        subgroupChatId: created.chatId,
-        metadata: {
-          announcementGroupWid: input.announcementGroupWid,
-          messageId: delivery.messageId,
-          groupJoinUrl
-        }
-      });
-    }
-  }
-  await sendEventCalendarHint({
+  await attemptUnplannedEventFinalization({
     context: input.context,
     runtime: input.runtime,
     activeTransport: input.activeTransport,
-    trigger: 'unplanned_created',
-    scopeId: input.draft.scopeId,
-    announcementGroupWid: input.announcementGroupWid,
     event,
     profile: input.profile,
-    calendars: input.draft.calendars,
-    timezone: input.draft.timezone,
+    config: draftEventsConfig(input.draft),
     locale: input.draft.locale,
     creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
-    groupJoinUrl,
-    subgroupChatId: created.chatId
+    trigger: 'unplanned_created',
+    now: input.now
   });
 }
 
 async function provisionUnplannedEventSubgroup(input: {
   context: EventFlowCompletionContext;
+  runtime: OfficialPluginCommandRuntime;
   db: ReturnType<typeof eventsDatabase>;
   event: StoredEventRecord;
   creatorParticipantWid: string;
@@ -2576,7 +2471,6 @@ async function provisionUnplannedEventSubgroup(input: {
       context: input.context,
       scopeId: input.event.scopeId,
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
-      actorWid: input.event.actorWid,
       title: input.event.groupTitle,
       participantWids: [input.creatorParticipantWid]
     });
@@ -2584,32 +2478,60 @@ async function provisionUnplannedEventSubgroup(input: {
     if (!isManagedCommunitySubgroupProvisioningError(error)) {
       throw error;
     }
-    checkpointManagedUnplannedProvisioningFailure(input.db, input.event, error);
-    try {
-      const resumed = await resumeEventCommunitySubgroup({
-        context: input.context,
-        scopeId: input.event.scopeId,
-        actorIdentityId: requireStoredEventActorIdentityId(input.event),
-        actorWid: input.event.actorWid,
-        subgroupChatId: error.created.chatId,
-        subgroupTitle: error.created.title,
-        participantWids: [input.creatorParticipantWid],
-        participants: error.created.participants,
-        parentCommunityWid: error.provisioning.parentCommunityWid
-      });
-      if (resumed.created.chatId !== error.created.chatId) {
-        throw new Error(
-          `Unplanned subgroup resume returned ${resumed.created.chatId}; ` +
-          `expected the checkpointed subgroup ${error.created.chatId}.`
-        );
-      }
-      return resumed;
-    } catch (resumeError) {
-      if (isManagedCommunitySubgroupProvisioningError(resumeError)) {
-        checkpointManagedUnplannedProvisioningFailure(input.db, input.event, resumeError);
-      }
-      throw resumeError;
+    const cursor = checkpointManagedUnplannedProvisioningFailure(input.db, input.event, error);
+    const failedEvent = getEvent(input.db, input.event.id);
+    if (!failedEvent || failedEvent.subgroupChatId !== error.created.chatId) {
+      throw new Error(
+        `Unplanned event ${input.event.id} lost its exact subgroup recovery checkpoint ${error.created.chatId}.`
+      );
     }
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.provisioningRecovery,
+        scopeId: failedEvent.scopeId,
+        ...(failedEvent.groupId ? { groupId: failedEvent.groupId } : {}),
+        ...(failedEvent.groupWid ? { groupWid: failedEvent.groupWid } : {}),
+        runAt: cursor.runAt,
+        payload: {
+          eventId: failedEvent.id,
+          subgroupChatId: error.created.chatId,
+          generation: cursor.generation,
+          attempt: cursor.attempt
+        },
+        dedupeKey: eventProvisioningRecoveryDedupeKey(failedEvent, cursor)
+      });
+      appendEventLog(input.db, {
+        eventId: failedEvent.id,
+        action: 'events.provisioning.recovery_scheduled',
+        metadata: {
+          subgroupChatId: error.created.chatId,
+          generation: cursor.generation,
+          attempt: cursor.attempt,
+          runAt: cursor.runAt.toISOString(),
+          stage: error.stage,
+          origin: 'unplanned'
+        }
+      });
+    } catch (enqueueError) {
+      appendEventLog(input.db, {
+        eventId: failedEvent.id,
+        action: 'events.provisioning.recovery_enqueue_failed',
+        metadata: {
+          subgroupChatId: error.created.chatId,
+          generation: cursor.generation,
+          attempt: cursor.attempt,
+          runAt: cursor.runAt.toISOString(),
+          reason: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
+          origin: 'unplanned'
+        }
+      });
+      throw new Error(
+        `Unplanned event ${failedEvent.id} preserved exact subgroup ${error.created.chatId}, ` +
+        'but its durable provisioning recovery job could not be enqueued.',
+        { cause: enqueueError }
+      );
+    }
+    throw error;
   }
 }
 
@@ -2617,7 +2539,11 @@ function checkpointManagedUnplannedProvisioningFailure(
   db: ReturnType<typeof eventsDatabase>,
   event: StoredEventRecord,
   error: ManagedCommunitySubgroupProvisioningError
-): void {
+): { generation: string; attempt: number; runAt: Date } {
+  const generation = randomUUID();
+  const attempt = 1;
+  const failedAt = new Date();
+  const runAt = eventProvisioningRecoveryRunAt(attempt, failedAt);
   const checkpointed = checkpointUnplannedEventProvisioningFailure(db, {
     eventId: event.id,
     scopeId: event.scopeId,
@@ -2633,7 +2559,10 @@ function checkpointManagedUnplannedProvisioningFailure(
       linkedChildRegistered: error.provisioning.linkedChildRegistered
     },
     reason: error.message,
-    failedAt: new Date().toISOString()
+    failedAt: failedAt.toISOString(),
+    recoveryGeneration: generation,
+    recoveryAttempt: attempt,
+    recoveryNextRunAt: runAt.toISOString()
   });
   if (!checkpointed) {
     throw new Error(
@@ -2641,6 +2570,7 @@ function checkpointManagedUnplannedProvisioningFailure(
       'the event is already bound to another subgroup or left its recoverable state.'
     );
   }
+  return { generation, attempt, runAt };
 }
 
 function draftEventsConfig(draft: {

@@ -18,7 +18,6 @@ export async function createEventCommunitySubgroup(input: {
   context: EventSubgroupContext;
   scopeId: string;
   actorIdentityId: string;
-  actorWid: string;
   title: string;
   participantWids: string[];
 }): Promise<CommunitySubgroupCreateOutput> {
@@ -49,7 +48,6 @@ export async function resumeEventCommunitySubgroup(input: {
   context: EventSubgroupContext;
   scopeId: string;
   actorIdentityId: string;
-  actorWid: string;
   subgroupChatId: string;
   subgroupTitle: string;
   participantWids: string[];

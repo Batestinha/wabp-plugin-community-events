@@ -3,6 +3,7 @@ import type { PluginServiceCallInput } from '../../../platform/pluginRuntime/plu
 import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { PluginJobEvent } from '../../../platform/pluginRuntime/types';
+import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import type {
   WeatherForecastOutput,
   WeatherMetricValue,
@@ -21,10 +22,17 @@ import { localizeDefaultEventProfiles, type EventProfile } from './config';
 import type { StoredEventRecord } from './store';
 import {
   appendEventLog,
+  claimEventWeatherDelivery,
+  completeEventWeatherDelivery,
+  deferEventWeatherDelivery,
   eventsDatabase,
   getEvent,
   getEventWeatherDelivery,
-  recordEventWeatherDelivery
+  prepareEventWeatherDelivery,
+  skipEventWeatherDelivery,
+  supersedeEventWeatherDelivery,
+  type EventWeatherDeliveryScheduleKind,
+  type StoredEventWeatherDelivery
 } from './store';
 
 export const EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND = 'forecast.poll-close';
@@ -32,11 +40,10 @@ export const EVENT_WEATHER_FORECAST_DAILY_KIND_PREFIX = 'forecast.daily';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 type WeatherForecastDay = WeatherForecastOutput['days'][number];
-type EventWeatherForecastScheduleKind = 'poll-close' | 'daily';
 
 interface EventWeatherForecastSchedule {
   deliveryKind: string;
-  scheduleKind: EventWeatherForecastScheduleKind;
+  scheduleKind: EventWeatherDeliveryScheduleKind;
   scheduledAt: Date;
 }
 
@@ -47,8 +54,9 @@ export interface EventWeatherForecastJobRequest {
   groupWid?: string | undefined;
   payload: {
     eventId: string;
+    eventUpdatedAt: string;
     deliveryKind: string;
-    scheduleKind: EventWeatherForecastScheduleKind;
+    scheduleKind: EventWeatherDeliveryScheduleKind;
     scheduledAt: string;
   };
   runAt?: Date | undefined;
@@ -76,6 +84,45 @@ export function eventWeatherForecastJobRequest(input: {
   now?: Date | undefined;
 }): EventWeatherForecastJobRequest | undefined {
   return eventWeatherForecastJobRequests(input)[0];
+}
+
+export function eventWeatherForecastRecoveryJobRequest(input: {
+  event: StoredEventRecord;
+  delivery: StoredEventWeatherDelivery;
+  now?: Date | undefined;
+}): EventWeatherForecastJobRequest {
+  const now = input.now ?? new Date();
+  const scheduledAt = new Date(input.delivery.scheduledAt);
+  if (!Number.isFinite(scheduledAt.getTime())) {
+    throw new Error(
+      `Weather delivery ${input.delivery.eventId}/${input.delivery.kind} has an invalid schedule.`
+    );
+  }
+  const retryAt = laterDate(
+    scheduledAt.getTime() > now.getTime() ? scheduledAt : undefined,
+    weatherDeliveryRecoveryAt(input.delivery, now)
+  ) ?? now;
+  const schedule = {
+    deliveryKind: input.delivery.kind,
+    scheduleKind: input.delivery.scheduleKind,
+    scheduledAt
+  } satisfies EventWeatherForecastSchedule;
+  return {
+    ...eventWeatherForecastJobRequestForSchedule(
+      input.event,
+      schedule,
+      now,
+      retryAt,
+      input.delivery.eventUpdatedAt
+    ),
+    dedupeKey: eventWeatherForecastRetryDedupeKey(
+      input.event.id,
+      input.delivery.eventUpdatedAt,
+      schedule,
+      input.delivery.attempt,
+      retryAt
+    )
+  };
 }
 
 export function eventWeatherForecastJobActions(input: {
@@ -144,21 +191,25 @@ export function eventWeatherForecastScheduledAt(
 function eventWeatherForecastJobRequestForSchedule(
   event: StoredEventRecord,
   schedule: EventWeatherForecastSchedule,
-  now: Date
+  now: Date,
+  requestedRunAt?: Date | undefined,
+  expectedEventUpdatedAt: string = event.updatedAt
 ): EventWeatherForecastJobRequest {
+  const runAt = requestedRunAt ?? schedule.scheduledAt;
   return {
     jobName: EVENTS_JOBS.weatherForecast,
     scopeId: event.scopeId,
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
-    ...(schedule.scheduledAt.getTime() > now.getTime() ? { runAt: schedule.scheduledAt } : {}),
+    ...(runAt.getTime() > now.getTime() ? { runAt } : {}),
     payload: {
       eventId: event.id,
+      eventUpdatedAt: expectedEventUpdatedAt,
       deliveryKind: schedule.deliveryKind,
       scheduleKind: schedule.scheduleKind,
       scheduledAt: schedule.scheduledAt.toISOString()
     },
-    dedupeKey: eventWeatherForecastDedupeKey(event.id, schedule)
+    dedupeKey: eventWeatherForecastDedupeKey(event.id, expectedEventUpdatedAt, schedule)
   };
 }
 
@@ -176,37 +227,99 @@ export async function handleEventWeatherForecastJob(
   if (!event) {
     return [audit('events.weather_forecast.skipped', { jobName: job.jobName, eventId, reason: 'event missing' })];
   }
-  const payloadDeliveryKind = jobPayloadDeliveryKind(job.payload) ?? EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND;
+  if (event.scopeId !== job.scopeId) {
+    return [audit('events.weather_forecast.skipped', {
+      jobName: job.jobName,
+      eventId,
+      eventScopeId: event.scopeId,
+      jobScopeId: job.scopeId,
+      reason: 'scope_mismatch'
+    })];
+  }
+  const expectedEventUpdatedAt = jobPayloadEventUpdatedAt(job.payload);
+  if (!expectedEventUpdatedAt) {
+    return [audit('events.weather_forecast.skipped', {
+      jobName: job.jobName,
+      eventId,
+      reason: 'missing eventUpdatedAt'
+    })];
+  }
+  const payloadDeliveryKind = jobPayloadDeliveryKind(job.payload);
+  if (!payloadDeliveryKind) {
+    return [audit('events.weather_forecast.skipped', {
+      jobName: job.jobName,
+      eventId,
+      reason: 'missing deliveryKind'
+    })];
+  }
+  if (event.updatedAt !== expectedEventUpdatedAt) {
+    supersedeEventWeatherDelivery(db, {
+      eventId,
+      eventUpdatedAt: expectedEventUpdatedAt,
+      kind: payloadDeliveryKind,
+      reason: 'event_version_changed'
+    });
+    return [audit('events.weather_forecast.skipped', {
+      jobName: job.jobName,
+      eventId,
+      deliveryKind: payloadDeliveryKind,
+      expectedEventUpdatedAt,
+      currentEventUpdatedAt: event.updatedAt,
+      reason: 'event_version_changed'
+    })];
+  }
   if (!profile?.weather.enabled) {
-    await markWeatherSkipped(context, db, event, profile, payloadDeliveryKind, 'profile_weather_disabled');
+    await markWeatherSkipped(context, db, event, payloadDeliveryKind, 'profile_weather_disabled');
     return [audit('events.weather_forecast.skipped', { eventId, reason: 'profile_weather_disabled' })];
   }
   const schedule = eventWeatherForecastScheduleForJob(job.payload, event, profile);
   if (!schedule) {
-    await markWeatherSkipped(context, db, event, profile, payloadDeliveryKind, 'invalid_schedule');
+    await markWeatherSkipped(context, db, event, payloadDeliveryKind, 'invalid_schedule');
     return [audit('events.weather_forecast.skipped', { eventId, reason: 'invalid_schedule' })];
   }
 
   const now = new Date();
-  const existing = getEventWeatherDelivery(db, event.id, schedule.deliveryKind);
-  if (existing?.status === 'queued' || existing?.status === 'skipped') {
+  const existing = getEventWeatherDelivery(
+    db,
+    event.id,
+    schedule.deliveryKind,
+    expectedEventUpdatedAt
+  );
+  if (existing?.status === 'sent' || existing?.status === 'skipped') {
     return [
       audit('events.weather_forecast.skipped', { eventId, deliveryKind: schedule.deliveryKind, reason: `already_${existing.status}` }),
       ...nextDailyWeatherForecastActions(event, profile, schedule, now)
     ];
   }
 
-  if (schedule.scheduledAt.getTime() > now.getTime()) {
-    const request = eventWeatherForecastJobRequestForSchedule(event, schedule, now);
+  const deferredUntil = laterDate(
+    schedule.scheduledAt.getTime() > now.getTime() ? schedule.scheduledAt : undefined,
+    existing ? weatherDeliveryRecoveryAt(existing, now) : undefined
+  );
+  if (deferredUntil && deferredUntil.getTime() > now.getTime()) {
+    const request = existing
+      ? eventWeatherForecastRecoveryJobRequest({ event, delivery: existing, now })
+      : eventWeatherForecastJobRequestForSchedule(event, schedule, now, deferredUntil);
     return [
-      audit('events.weather_forecast.deferred', { eventId, deliveryKind: schedule.deliveryKind, scheduledAt: schedule.scheduledAt.toISOString() }),
-      { type: 'plugin.enqueueJob', pluginId: EVENTS_PLUGIN_ID, ...request, runAt: request.runAt ?? schedule.scheduledAt }
+      audit('events.weather_forecast.deferred', {
+        eventId,
+        deliveryKind: schedule.deliveryKind,
+        scheduledAt: schedule.scheduledAt.toISOString(),
+        retryAt: deferredUntil.toISOString()
+      }),
+      {
+        type: 'plugin.enqueueJob',
+        pluginId: EVENTS_PLUGIN_ID,
+        ...request,
+        runAt: request.runAt ?? deferredUntil,
+        abortBatchOnFailure: true
+      }
     ];
   }
 
   const skipReason = weatherRuntimeSkipReason(event, schedule.scheduledAt, now);
   if (skipReason) {
-    await markWeatherSkipped(context, db, event, profile, schedule.deliveryKind, skipReason, schedule.scheduledAt);
+    await markWeatherSkipped(context, db, event, schedule.deliveryKind, skipReason, schedule.scheduledAt, schedule.scheduleKind);
     return [audit('events.weather_forecast.skipped', { eventId, deliveryKind: schedule.deliveryKind, reason: skipReason })];
   }
 
@@ -215,10 +328,10 @@ export async function handleEventWeatherForecastJob(
       context,
       db,
       event,
-      profile,
       schedule.deliveryKind,
       'event_location_unresolved',
-      schedule.scheduledAt
+      schedule.scheduledAt,
+      schedule.scheduleKind
     );
     return [audit('events.weather_forecast.skipped', {
       eventId,
@@ -226,88 +339,290 @@ export async function handleEventWeatherForecastJob(
       reason: 'event_location_unresolved'
     })];
   }
-  if (!context.services) {
-    await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, 'plugin_services_unavailable');
-    return [audit('events.weather_forecast.failed', { eventId, deliveryKind: schedule.deliveryKind, reason: 'plugin_services_unavailable' })];
-  }
 
+  let prepared: StoredEventWeatherDelivery;
   try {
-    const result = await context.services.call<WeatherQueryOutput>(weatherForecastServiceInput(event, now));
-    if (result.kind !== 'forecast') {
-      throw new Error('weather query returned current conditions for a forecast request');
-    }
-    const currentEvent = getEvent(db, event.id);
-    const postQuerySkipReason = currentEvent
-      ? weatherRuntimeSkipReason(currentEvent, schedule.scheduledAt, new Date())
-      : 'event_missing_after_query';
-    if (postQuerySkipReason) {
-      await markWeatherSkipped(
+    prepared = hasCompleteWeatherDeliveryIntent(existing)
+      ? existing
+      : await prepareWeatherDeliveryIntent(context, db, event, profile, schedule, now);
+  } catch (error) {
+    const fenceReason = error instanceof WeatherDeliveryFenceError
+      ? error.reason
+      : weatherEventSnapshotFenceReason(db, event, schedule);
+    if (fenceReason) {
+      await terminateFencedWeatherSnapshot(
         context,
         db,
-        currentEvent ?? event,
-        profile,
-        schedule.deliveryKind,
-        postQuerySkipReason,
-        schedule.scheduledAt
+        event,
+        schedule,
+        fenceReason
       );
       return [audit('events.weather_forecast.skipped', {
-        eventId,
+        eventId: event.id,
         deliveryKind: schedule.deliveryKind,
-        reason: postQuerySkipReason
+        reason: fenceReason
       })];
     }
-    const report = result.report;
-    const forecastDay = selectForecastDay(report, event);
-    if (!forecastDay) {
-      await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, 'event_day_forecast_unavailable');
+    const reason = error instanceof Error ? error.message : String(error);
+    await deferWeatherDeliveryAfterFailure(context, db, event, schedule, reason);
+    return [audit('events.weather_forecast.failed', {
+      eventId: event.id,
+      deliveryKind: schedule.deliveryKind,
+      reason
+    })];
+  }
+  if (prepared.status === 'skipped' || prepared.status === 'sent') {
+    return [audit('events.weather_forecast.skipped', {
+      eventId,
+      deliveryKind: schedule.deliveryKind,
+      reason: prepared.status === 'skipped' && prepared.error
+        ? prepared.error
+        : `already_${prepared.status}`
+    })];
+  }
+  return deliverPreparedWeatherForecast(context, db, event, profile, schedule, prepared, now);
+}
+
+async function prepareWeatherDeliveryIntent(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  profile: EventProfile,
+  schedule: EventWeatherForecastSchedule,
+  now: Date
+): Promise<StoredEventWeatherDelivery> {
+  if (!context.services) {
+    throw new Error('plugin_services_unavailable');
+  }
+  const result = await context.services.call<WeatherQueryOutput>(weatherForecastServiceInput(event, now));
+  if (result.kind !== 'forecast') {
+    throw new Error('weather query returned current conditions for a forecast request');
+  }
+  const postQueryFenceReason = weatherEventSnapshotFenceReason(db, event, schedule);
+  if (postQueryFenceReason) {
+    throw new WeatherDeliveryFenceError(postQueryFenceReason);
+  }
+  const report = result.report;
+  const forecastDay = selectForecastDay(report, event);
+  if (!forecastDay) {
+    throw new Error('event_day_forecast_unavailable');
+  }
+  const eventActorIdentityId = requireWeatherEventActorIdentityId(event);
+  const t = await context.i18n.translatorForIdentity(eventActorIdentityId, event.scopeId);
+  const resolvedLocale = await context.i18n.resolveIdentityLocale(eventActorIdentityId, event.scopeId);
+  const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
+  const messages = renderEventWeatherForecast({
+    event,
+    profile: localizedProfile,
+    report,
+    forecastDay,
+    t,
+    locale: resolvedLocale.locale
+  });
+  if (!messages.meteorologicalText.trim() && !messages.marineText?.trim()) {
+    await markWeatherSkipped(
+      context,
+      db,
+      event,
+      schedule.deliveryKind,
+      'empty_rendered_text',
+      schedule.scheduledAt,
+      schedule.scheduleKind
+    );
+    const skipped = getEventWeatherDelivery(
+      db,
+      event.id,
+      schedule.deliveryKind,
+      event.updatedAt
+    );
+    if (!skipped) {
+      throw new Error(`Could not persist skipped weather delivery ${event.id}/${schedule.deliveryKind}.`);
+    }
+    return skipped;
+  }
+  const prepared = prepareEventWeatherDelivery(db, {
+    eventId: event.id,
+    eventUpdatedAt: event.updatedAt,
+    kind: schedule.deliveryKind,
+    scheduleKind: schedule.scheduleKind,
+    scheduledAt: schedule.scheduledAt.toISOString(),
+    chatId: event.subgroupChatId!,
+    ...(messages.meteorologicalText.trim()
+      ? {
+          meteorologicalText: messages.meteorologicalText,
+          meteorologicalIdempotencyKey: eventWeatherTransportIdempotencyKey(
+            event.id,
+            event.updatedAt,
+            schedule.deliveryKind,
+            'meteorological'
+          )
+        }
+      : {}),
+    ...(messages.marineText?.trim()
+      ? {
+          marineText: messages.marineText,
+          marineIdempotencyKey: eventWeatherTransportIdempotencyKey(
+            event.id,
+            event.updatedAt,
+            schedule.deliveryKind,
+            'marine'
+          )
+        }
+      : {})
+  });
+  appendEventLog(db, {
+    eventId: event.id,
+    action: 'events.weather_forecast.delivery_prepared',
+    metadata: {
+      deliveryKind: schedule.deliveryKind,
+      scheduleKind: schedule.scheduleKind,
+      scheduledAt: schedule.scheduledAt.toISOString(),
+      subgroupChatId: event.subgroupChatId,
+      provider: report.provider,
+      fetchedAt: report.fetchedAt,
+      forecastDate: forecastDay.date,
+      location: report.location
+    }
+  });
+  await appendWeatherJsonLog(context, {
+    action: 'event.weather_forecast_delivery_prepared',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: event.actorWid,
+    profileId: event.profileId,
+    ...(event.pollWaMsgId ? { pollWaMsgId: event.pollWaMsgId } : {}),
+    ...(event.subgroupChatId ? { subgroupChatId: event.subgroupChatId } : {}),
+    metadata: {
+      deliveryKind: schedule.deliveryKind,
+      scheduleKind: schedule.scheduleKind,
+      scheduledAt: schedule.scheduledAt.toISOString(),
+      forecastDate: forecastDay.date,
+      location: report.location
+    }
+  });
+  return prepared;
+}
+
+async function deliverPreparedWeatherForecast(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  profile: EventProfile,
+  schedule: EventWeatherForecastSchedule,
+  prepared: StoredEventWeatherDelivery,
+  now: Date
+): Promise<PluginAction[]> {
+  const claim = claimEventWeatherDelivery(db, {
+    eventId: event.id,
+    eventUpdatedAt: prepared.eventUpdatedAt,
+    kind: schedule.deliveryKind,
+    claimedAt: new Date().toISOString()
+  });
+  if (!claim) {
+    const current = getEventWeatherDelivery(
+      db,
+      event.id,
+      schedule.deliveryKind,
+      prepared.eventUpdatedAt
+    ) ?? prepared;
+    const fenceReason = weatherDeliveryFenceReason(db, event, current, schedule);
+    if (fenceReason) {
+      return terminateFencedWeatherDelivery(db, event, current, fenceReason);
+    }
+    if (current.status === 'sent' || current.status === 'skipped') {
       return [
-        audit('events.weather_forecast.failed', { eventId, deliveryKind: schedule.deliveryKind, reason: 'event_day_forecast_unavailable' }),
+        audit('events.weather_forecast.skipped', {
+          eventId: event.id,
+          deliveryKind: schedule.deliveryKind,
+          reason: `already_${current.status}`
+        }),
         ...nextDailyWeatherForecastActions(event, profile, schedule, now)
       ];
     }
-    const eventActorIdentityId = requireWeatherEventActorIdentityId(event);
-    const t = await context.i18n.translatorForIdentity(eventActorIdentityId, event.scopeId);
-    const resolvedLocale = await context.i18n.resolveIdentityLocale(
-      eventActorIdentityId,
-      event.scopeId
-    );
-    const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
-    const messages = renderEventWeatherForecast({
-      event,
-      profile: localizedProfile,
-      report,
-      forecastDay,
-      t,
-      locale: resolvedLocale.locale
-    });
-    if (!messages.meteorologicalText.trim() && !messages.marineText?.trim()) {
-      await markWeatherSkipped(context, db, event, profile, schedule.deliveryKind, 'empty_rendered_text', schedule.scheduledAt);
-      return [audit('events.weather_forecast.skipped', { eventId, deliveryKind: schedule.deliveryKind, reason: 'empty_rendered_text' })];
+    const retryAt = weatherDeliveryRecoveryAt(current, now);
+    const request = eventWeatherForecastRecoveryJobRequest({ event, delivery: current, now });
+    return [
+      audit('events.weather_forecast.deferred', {
+        eventId: event.id,
+        deliveryKind: schedule.deliveryKind,
+        retryAt: retryAt.toISOString(),
+        reason: 'delivery_claim_unavailable'
+      }),
+      {
+        type: 'plugin.enqueueJob',
+        pluginId: EVENTS_PLUGIN_ID,
+        ...request,
+        runAt: request.runAt ?? retryAt,
+        abortBatchOnFailure: true
+      }
+    ];
+  }
+
+  try {
+    if (!context.sendText) {
+      throw new Error('Plugin runtime does not expose durable text delivery.');
     }
-    const queuedAt = new Date().toISOString();
-    recordEventWeatherDelivery(db, {
+    let fenceReason = weatherDeliveryFenceReason(
+      db,
+      event,
+      claim.delivery,
+      schedule
+    );
+    if (fenceReason) {
+      return terminateFencedWeatherDelivery(db, event, claim.delivery, fenceReason);
+    }
+    const meteorologicalMessageId = claim.delivery.meteorologicalText
+      ? requireWeatherMessageId(await context.sendText(
+          claim.delivery.chatId!,
+          claim.delivery.meteorologicalText,
+          { idempotencyKey: claim.delivery.meteorologicalIdempotencyKey! }
+        ), 'meteorological')
+      : undefined;
+    fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);
+    if (fenceReason) {
+      return terminateFencedWeatherDelivery(db, event, claim.delivery, fenceReason);
+    }
+    const marineMessageId = claim.delivery.marineText
+      ? requireWeatherMessageId(await context.sendText(
+          claim.delivery.chatId!,
+          claim.delivery.marineText,
+          { idempotencyKey: claim.delivery.marineIdempotencyKey! }
+        ), 'marine')
+      : undefined;
+    fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);
+    if (fenceReason) {
+      return terminateFencedWeatherDelivery(db, event, claim.delivery, fenceReason);
+    }
+    const sentAt = new Date().toISOString();
+    if (!completeEventWeatherDelivery(db, {
       eventId: event.id,
+      eventUpdatedAt: claim.delivery.eventUpdatedAt,
       kind: schedule.deliveryKind,
-      scheduledAt: schedule.scheduledAt.toISOString(),
-      status: 'queued',
-      at: queuedAt
-    });
+      claimId: claim.claimId,
+      ...(meteorologicalMessageId ? { meteorologicalMessageId } : {}),
+      ...(marineMessageId ? { marineMessageId } : {}),
+      completedAt: sentAt
+    })) {
+      fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);
+      if (fenceReason) {
+        return terminateFencedWeatherDelivery(db, event, claim.delivery, fenceReason);
+      }
+      throw new Error(`Weather delivery ${event.id}/${schedule.deliveryKind} lost its send claim.`);
+    }
     appendEventLog(db, {
       eventId: event.id,
-      action: 'events.weather_forecast.queued',
+      action: 'events.weather_forecast.sent',
       metadata: {
         deliveryKind: schedule.deliveryKind,
         scheduleKind: schedule.scheduleKind,
         scheduledAt: schedule.scheduledAt.toISOString(),
-        subgroupChatId: event.subgroupChatId,
-        provider: report.provider,
-        fetchedAt: report.fetchedAt,
-        forecastDate: forecastDay.date,
-        location: report.location
+        subgroupChatId: claim.delivery.chatId,
+        meteorologicalMessageId,
+        marineMessageId
       }
     });
     await appendWeatherJsonLog(context, {
-      action: 'event.weather_forecast_queued',
+      action: 'event.weather_forecast_sent',
       scopeId: event.scopeId,
       eventId: event.id,
       actorWid: event.actorWid,
@@ -318,26 +633,12 @@ export async function handleEventWeatherForecastJob(
         deliveryKind: schedule.deliveryKind,
         scheduleKind: schedule.scheduleKind,
         scheduledAt: schedule.scheduledAt.toISOString(),
-        forecastDate: forecastDay.date,
-        location: report.location
+        meteorologicalMessageId,
+        marineMessageId
       }
     });
     return [
-      ...(messages.meteorologicalText.trim()
-        ? [{
-            type: 'message.sendText' as const,
-            chatId: event.subgroupChatId!,
-            text: messages.meteorologicalText
-          }]
-        : []),
-      ...(messages.marineText?.trim()
-        ? [{
-            type: 'message.sendText' as const,
-            chatId: event.subgroupChatId!,
-            text: messages.marineText
-          }]
-        : []),
-      audit('events.weather_forecast.queued', {
+      audit('events.weather_forecast.sent', {
         eventId: event.id,
         deliveryKind: schedule.deliveryKind,
         scheduledAt: schedule.scheduledAt.toISOString()
@@ -345,13 +646,120 @@ export async function handleEventWeatherForecastJob(
       ...nextDailyWeatherForecastActions(event, profile, schedule, now)
     ];
   } catch (error) {
+    const fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);
+    if (fenceReason) {
+      return terminateFencedWeatherDelivery(db, event, claim.delivery, fenceReason);
+    }
     const reason = error instanceof Error ? error.message : String(error);
-    await markWeatherFailed(context, db, event, profile, schedule.deliveryKind, schedule.scheduledAt, reason);
-    return [
-      audit('events.weather_forecast.failed', { eventId: event.id, deliveryKind: schedule.deliveryKind, reason }),
-      ...nextDailyWeatherForecastActions(event, profile, schedule, now)
-    ];
+    await deferWeatherDeliveryAfterFailure(context, db, event, schedule, reason, claim.claimId);
+    return [audit('events.weather_forecast.failed', {
+      eventId: event.id,
+      deliveryKind: schedule.deliveryKind,
+      reason
+    })];
   }
+}
+
+function weatherDeliveryFenceReason(
+  db: ReturnType<typeof eventsDatabase>,
+  expectedEvent: StoredEventRecord,
+  delivery: StoredEventWeatherDelivery,
+  schedule: EventWeatherForecastSchedule
+): string | undefined {
+  const currentEvent = getEvent(db, expectedEvent.id);
+  if (!currentEvent) {
+    return 'event_missing';
+  }
+  if (currentEvent.scopeId !== expectedEvent.scopeId) {
+    return 'event_scope_changed';
+  }
+  if (currentEvent.updatedAt !== delivery.eventUpdatedAt) {
+    return 'event_version_changed';
+  }
+  if (currentEvent.subgroupChatId !== delivery.chatId) {
+    return 'event_subgroup_changed';
+  }
+  return weatherRuntimeSkipReason(currentEvent, schedule.scheduledAt, new Date());
+}
+
+function weatherEventSnapshotFenceReason(
+  db: ReturnType<typeof eventsDatabase>,
+  expectedEvent: StoredEventRecord,
+  schedule: EventWeatherForecastSchedule
+): string | undefined {
+  const currentEvent = getEvent(db, expectedEvent.id);
+  if (!currentEvent) {
+    return 'event_missing';
+  }
+  if (currentEvent.scopeId !== expectedEvent.scopeId) {
+    return 'event_scope_changed';
+  }
+  if (currentEvent.updatedAt !== expectedEvent.updatedAt) {
+    return 'event_version_changed';
+  }
+  if (currentEvent.subgroupChatId !== expectedEvent.subgroupChatId) {
+    return 'event_subgroup_changed';
+  }
+  return weatherRuntimeSkipReason(currentEvent, schedule.scheduledAt, new Date());
+}
+
+async function terminateFencedWeatherSnapshot(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  schedule: EventWeatherForecastSchedule,
+  reason: string
+): Promise<void> {
+  const currentEvent = getEvent(db, event.id);
+  if (
+    currentEvent &&
+    currentEvent.scopeId === event.scopeId &&
+    currentEvent.updatedAt === event.updatedAt
+  ) {
+    await markWeatherSkipped(
+      context,
+      db,
+      currentEvent,
+      schedule.deliveryKind,
+      reason,
+      schedule.scheduledAt,
+      schedule.scheduleKind
+    );
+    return;
+  }
+  supersedeEventWeatherDelivery(db, {
+    eventId: event.id,
+    eventUpdatedAt: event.updatedAt,
+    kind: schedule.deliveryKind,
+    reason
+  });
+}
+
+class WeatherDeliveryFenceError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'WeatherDeliveryFenceError';
+  }
+}
+
+function terminateFencedWeatherDelivery(
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  delivery: StoredEventWeatherDelivery,
+  reason: string
+): PluginAction[] {
+  supersedeEventWeatherDelivery(db, {
+    eventId: event.id,
+    eventUpdatedAt: delivery.eventUpdatedAt,
+    kind: delivery.kind,
+    reason
+  });
+  return [audit('events.weather_forecast.skipped', {
+    eventId: event.id,
+    deliveryKind: delivery.kind,
+    eventUpdatedAt: delivery.eventUpdatedAt,
+    reason
+  })];
 }
 
 export function renderEventWeatherForecast(input: {
@@ -635,23 +1043,181 @@ function weatherRuntimeSkipReason(event: StoredEventRecord, scheduledAt: Date, n
   return undefined;
 }
 
+function hasCompleteWeatherDeliveryIntent(
+  delivery: StoredEventWeatherDelivery | undefined
+): delivery is StoredEventWeatherDelivery {
+  return Boolean(
+    delivery &&
+    (delivery.status === 'pending' || delivery.status === 'sending') &&
+    delivery.chatId &&
+    (delivery.meteorologicalText || delivery.marineText) &&
+    (!delivery.meteorologicalText || delivery.meteorologicalIdempotencyKey) &&
+    (!delivery.marineText || delivery.marineIdempotencyKey)
+  );
+}
+
+function eventWeatherTransportIdempotencyKey(
+  eventId: string,
+  eventUpdatedAt: string,
+  deliveryKind: string,
+  part: 'meteorological' | 'marine'
+): string {
+  return `community-events:weather:${eventId}:${eventUpdatedAt}:${deliveryKind}:${part}`;
+}
+
+function requireWeatherMessageId(
+  result: { messageId?: string | undefined },
+  part: 'meteorological' | 'marine'
+): string {
+  const messageId = result.messageId?.trim();
+  if (!messageId) {
+    throw new Error(`${part} weather transport send returned no WhatsApp message id.`);
+  }
+  return messageId;
+}
+
+function weatherDeliveryRecoveryAt(delivery: StoredEventWeatherDelivery, now: Date): Date {
+  const persisted = delivery.status === 'sending'
+    ? delivery.leaseExpiresAt
+    : delivery.nextRunAt;
+  const candidate = persisted ? new Date(persisted) : now;
+  return Number.isFinite(candidate.getTime()) && candidate.getTime() > now.getTime()
+    ? candidate
+    : now;
+}
+
+function laterDate(left: Date | undefined, right: Date | undefined): Date | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return left.getTime() >= right.getTime() ? left : right;
+}
+
+function weatherDeliveryRetryDelayMs(attempt: number): number {
+  return Math.min(30 * 60_000, 60_000 * (2 ** Math.min(Math.max(0, attempt), 4)));
+}
+
+async function deferWeatherDeliveryAfterFailure(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  schedule: EventWeatherForecastSchedule,
+  reason: string,
+  claimId?: string | undefined
+): Promise<void> {
+  const now = new Date();
+  const fenceReason = weatherEventSnapshotFenceReason(db, event, schedule);
+  if (fenceReason) {
+    supersedeEventWeatherDelivery(db, {
+      eventId: event.id,
+      eventUpdatedAt: event.updatedAt,
+      kind: schedule.deliveryKind,
+      reason: fenceReason,
+      supersededAt: now.toISOString()
+    });
+    return;
+  }
+  const existing = getEventWeatherDelivery(
+    db,
+    event.id,
+    schedule.deliveryKind,
+    event.updatedAt
+  );
+  const nextRunAt = new Date(now.getTime() + weatherDeliveryRetryDelayMs(existing?.attempt ?? 0));
+  const pending = deferEventWeatherDelivery(db, {
+    eventId: event.id,
+    eventUpdatedAt: event.updatedAt,
+    kind: schedule.deliveryKind,
+    scheduleKind: schedule.scheduleKind,
+    scheduledAt: schedule.scheduledAt.toISOString(),
+    nextRunAt: nextRunAt.toISOString(),
+    reason,
+    ...(claimId ? { claimId } : {}),
+    updatedAt: now.toISOString()
+  });
+  if (!pending || pending.status === 'sent' || pending.status === 'skipped') {
+    return;
+  }
+  appendEventLog(db, {
+    eventId: event.id,
+    action: 'events.weather_forecast.retry_pending',
+    metadata: {
+      deliveryKind: schedule.deliveryKind,
+      scheduleKind: schedule.scheduleKind,
+      scheduledAt: schedule.scheduledAt.toISOString(),
+      attempt: pending.attempt,
+      nextRunAt: pending.nextRunAt,
+      reason
+    }
+  });
+  await appendWeatherJsonLog(context, {
+    action: 'event.weather_forecast_retry_pending',
+    scopeId: event.scopeId,
+    eventId: event.id,
+    actorWid: event.actorWid,
+    profileId: event.profileId,
+    ...(event.pollWaMsgId ? { pollWaMsgId: event.pollWaMsgId } : {}),
+    ...(event.subgroupChatId ? { subgroupChatId: event.subgroupChatId } : {}),
+    metadata: {
+      deliveryKind: schedule.deliveryKind,
+      scheduleKind: schedule.scheduleKind,
+      scheduledAt: schedule.scheduledAt.toISOString(),
+      attempt: pending.attempt,
+      nextRunAt: pending.nextRunAt,
+      reason
+    }
+  });
+  try {
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.weatherForecast,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: nextRunAt,
+      payload: {
+        eventId: event.id,
+        eventUpdatedAt: event.updatedAt,
+        deliveryKind: schedule.deliveryKind,
+        scheduleKind: schedule.scheduleKind,
+        scheduledAt: schedule.scheduledAt.toISOString()
+      },
+      dedupeKey: eventWeatherForecastRetryDedupeKey(
+        event.id,
+        event.updatedAt,
+        schedule,
+        pending.attempt,
+        nextRunAt
+      )
+    });
+  } catch (error) {
+    context.logger.error({
+      error,
+      eventId: event.id,
+      deliveryKind: schedule.deliveryKind,
+      nextRunAt: nextRunAt.toISOString()
+    }, 'Unable to enqueue pending event weather delivery retry');
+    throw error;
+  }
+}
+
 async function markWeatherSkipped(
   context: PluginRuntimeContext,
   db: ReturnType<typeof eventsDatabase>,
   event: StoredEventRecord,
-  profile: EventProfile | undefined,
   deliveryKind: string,
   reason: string,
-  scheduledAt?: Date | undefined
+  scheduledAt?: Date | undefined,
+  scheduleKind?: EventWeatherDeliveryScheduleKind | undefined
 ): Promise<void> {
   const at = new Date().toISOString();
-  recordEventWeatherDelivery(db, {
+  skipEventWeatherDelivery(db, {
     eventId: event.id,
+    eventUpdatedAt: event.updatedAt,
     kind: deliveryKind,
+    scheduleKind: scheduleKind ?? weatherDeliveryScheduleKind(deliveryKind),
     scheduledAt: scheduledAt?.toISOString() ?? at,
-    status: 'skipped',
-    at,
-    error: reason
+    skippedAt: at,
+    reason
   });
   appendEventLog(db, {
     eventId: event.id,
@@ -670,39 +1236,10 @@ async function markWeatherSkipped(
   });
 }
 
-async function markWeatherFailed(
-  context: PluginRuntimeContext,
-  db: ReturnType<typeof eventsDatabase>,
-  event: StoredEventRecord,
-  profile: EventProfile,
-  deliveryKind: string,
-  scheduledAt: Date,
-  reason: string
-): Promise<void> {
-  const at = new Date().toISOString();
-  recordEventWeatherDelivery(db, {
-    eventId: event.id,
-    kind: deliveryKind,
-    scheduledAt: scheduledAt.toISOString(),
-    status: 'failed',
-    at,
-    error: reason
-  });
-  appendEventLog(db, {
-    eventId: event.id,
-    action: 'events.weather_forecast.failed',
-    metadata: { deliveryKind, reason, scheduledAt: scheduledAt.toISOString(), profileId: profile.id }
-  });
-  await appendWeatherJsonLog(context, {
-    action: 'event.weather_forecast_failed',
-    scopeId: event.scopeId,
-    eventId: event.id,
-    actorWid: event.actorWid,
-    profileId: event.profileId,
-    ...(event.pollWaMsgId ? { pollWaMsgId: event.pollWaMsgId } : {}),
-    ...(event.subgroupChatId ? { subgroupChatId: event.subgroupChatId } : {}),
-    metadata: { deliveryKind, reason, scheduledAt: scheduledAt.toISOString() }
-  });
+function weatherDeliveryScheduleKind(deliveryKind: string): EventWeatherDeliveryScheduleKind {
+  return deliveryKind.startsWith(`${EVENT_WEATHER_FORECAST_DAILY_KIND_PREFIX}.`)
+    ? 'daily'
+    : 'poll-close';
 }
 
 function parseLocalDate(value: string | undefined): { year: number; month: number; day: number } | undefined {
@@ -774,13 +1311,42 @@ function dateDiffDays(start: { year: number; month: number; day: number }, end: 
   return Math.round((endMs - startMs) / 86_400_000);
 }
 
-function eventWeatherForecastDedupeKey(eventId: string, schedule: EventWeatherForecastSchedule): string {
-  return `${EVENTS_JOBS.weatherForecast}:${eventId}:${schedule.deliveryKind}:${schedule.scheduledAt.toISOString()}`;
+function eventWeatherForecastDedupeKey(
+  eventId: string,
+  eventUpdatedAt: string,
+  schedule: EventWeatherForecastSchedule
+): string {
+  return [
+    EVENTS_JOBS.weatherForecast,
+    eventId,
+    eventUpdatedAt,
+    schedule.deliveryKind,
+    schedule.scheduledAt.toISOString()
+  ].join(':');
+}
+
+function eventWeatherForecastRetryDedupeKey(
+  eventId: string,
+  eventUpdatedAt: string,
+  schedule: EventWeatherForecastSchedule,
+  attempt: number,
+  retryAt: Date
+): string {
+  return `${eventWeatherForecastDedupeKey(eventId, eventUpdatedAt, schedule)}:retry:${attempt}:${retryAt.toISOString()}`;
 }
 
 function jobPayloadEventId(payload: unknown): string | undefined {
   return payload && typeof payload === 'object' && typeof (payload as { eventId?: unknown }).eventId === 'string'
     ? (payload as { eventId: string }).eventId
+    : undefined;
+}
+
+function jobPayloadEventUpdatedAt(payload: unknown): string | undefined {
+  return payload &&
+    typeof payload === 'object' &&
+    typeof (payload as { eventUpdatedAt?: unknown }).eventUpdatedAt === 'string' &&
+    (payload as { eventUpdatedAt: string }).eventUpdatedAt.trim()
+    ? (payload as { eventUpdatedAt: string }).eventUpdatedAt
     : undefined;
 }
 
@@ -790,7 +1356,7 @@ function jobPayloadDeliveryKind(payload: unknown): string | undefined {
     : undefined;
 }
 
-function jobPayloadScheduleKind(payload: unknown): EventWeatherForecastScheduleKind | undefined {
+function jobPayloadScheduleKind(payload: unknown): EventWeatherDeliveryScheduleKind | undefined {
   if (!payload || typeof payload !== 'object') {
     return undefined;
   }

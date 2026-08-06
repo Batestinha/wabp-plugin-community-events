@@ -15,6 +15,7 @@ export const EVENTS_DATABASE = 'events';
 export const EVENTS_JOBS = {
   close: 'event.close',
   provisioningRecovery: 'event.provisioningRecovery',
+  unplannedFinalization: 'event.unplannedFinalization',
   cleanup: 'event.cleanup',
   editRepair: 'event.editRepair',
   weatherForecast: 'event.weatherForecast',
@@ -38,7 +39,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.8.0',
+  version: '0.8.1',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -149,6 +150,7 @@ export const eventsManifest: PluginManifest = {
   backgroundJobs: [
     EVENTS_JOBS.close,
     EVENTS_JOBS.provisioningRecovery,
+    EVENTS_JOBS.unplannedFinalization,
     EVENTS_JOBS.cleanup,
     EVENTS_JOBS.editRepair,
     EVENTS_JOBS.weatherForecast,

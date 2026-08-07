@@ -46,6 +46,7 @@ export function createEventFlowDefinition(input: {
   initialData?: Record<string, unknown> | undefined;
   askPrefilledQuestions?: boolean | undefined;
   flowTypePrefix?: string | undefined;
+  flowInstanceId?: string | undefined;
   confirmMessageKey?: string | undefined;
   pastCompletionConfirmMessageKey?: string | undefined;
   completeMessageKey?: string | false | undefined;
@@ -53,7 +54,7 @@ export function createEventFlowDefinition(input: {
   now?: (() => Date) | undefined;
 }): FlowDefinition {
   const flowType = input.flowTypePrefix
-    ? `${input.flowTypePrefix}.${randomUUID()}`
+    ? `${input.flowTypePrefix}.${input.flowInstanceId?.trim() || randomUUID()}`
     : `${EVENT_CREATION_FLOW_TYPE_PREFIX}${randomUUID()}`;
   return buildEventFlowDefinition(input, flowType);
 }

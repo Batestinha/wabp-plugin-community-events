@@ -25,6 +25,8 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.location.wrongRequester': 'The event place was not confirmed by the original requester.',
   'official.community-events.pollPublished': 'Event poll published.',
   'official.community-events.unplannedPublished': 'Unplanned event group created.',
+  'official.community-events.unplannedProvisioningPending': 'The event group “{title}” was created, but its setup has not finished yet. I will retry automatically and confirm when it is ready. Event ID: {eventId}.',
+  'official.community-events.unplannedProvisioningRecovered': 'The event group is ready and linked to the community: {title} ({eventId}).',
   'official.community-events.publishFailed': 'Could not publish the event poll: {reason}',
   'official.community-events.unplannedPublishFailed': 'Could not create the unplanned event group: {reason}',
   'official.community-events.status': 'events enabled={enabled} profiles={profiles} timezone={timezone}',

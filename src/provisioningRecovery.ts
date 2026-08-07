@@ -63,6 +63,8 @@ class UnplannedEventFinalizationSupersededError extends Error {
 
 interface UnplannedEventFinalizationContext {
   config: PluginRuntimeContext['config'];
+  i18n?: PluginRuntimeContext['i18n'] | undefined;
+  resolveStableIdentityById?: PluginRuntimeContext['resolveStableIdentityById'] | undefined;
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
 }
 
@@ -130,6 +132,7 @@ export async function finalizeUnplannedEventLifecycle(input: {
   locale: string;
   creatorDisplayName: string;
   trigger: 'unplanned_created' | 'unplanned_recovery';
+  notifyRecoveryCreator?: boolean | undefined;
   expectedEventUpdatedAt: string;
   now?: Date | undefined;
 }): Promise<void> {
@@ -351,6 +354,49 @@ export async function finalizeUnplannedEventLifecycle(input: {
     );
   }
   assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+  if (
+    failures.length === 0 &&
+    input.trigger === 'unplanned_recovery' &&
+    input.notifyRecoveryCreator
+  ) {
+    try {
+      if (!input.context.resolveStableIdentityById || !input.context.i18n) {
+        throw new Error('Plugin runtime does not expose authoritative creator notification services.');
+      }
+      const actorIdentityId = requireRecoveryActorIdentityId(event);
+      const [creatorAddress, t] = await Promise.all([
+        input.context.resolveStableIdentityById(actorIdentityId),
+        input.context.i18n.translatorForIdentity(actorIdentityId, event.scopeId)
+      ]);
+      await input.activeTransport.sendText(
+        creatorAddress.deliveryChatId,
+        t('official.community-events.unplannedProvisioningRecovered', {
+          title: event.subgroupTitle || event.groupTitle,
+          eventId: event.id
+        }),
+        {
+          idempotencyKey: `community-events:unplanned-provisioning-recovered:${event.id}`
+        }
+      );
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.unplanned.recovery_creator_notified',
+        metadata: {
+          creatorIdentityId: actorIdentityId,
+          creatorChatId: creatorAddress.deliveryChatId
+        }
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      failures.push(`creator recovery notice: ${reason}`);
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.unplanned.recovery_creator_notification_failed',
+        metadata: { reason }
+      });
+    }
+  }
+  assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
   if (failures.length > 0) {
     appendEventLog(db, {
       eventId: event.id,
@@ -390,6 +436,7 @@ export async function attemptUnplannedEventFinalization(input: {
   locale: string;
   creatorDisplayName: string;
   trigger: 'unplanned_created' | 'unplanned_recovery';
+  notifyRecoveryCreator?: boolean | undefined;
   expected?: Pick<StoredUnplannedEventFinalization, 'generation' | 'attempt'> | undefined;
   now?: Date | undefined;
 }): Promise<AttemptUnplannedEventFinalizationResult> {
@@ -874,6 +921,7 @@ export async function resumeEventProvisioning(
       locale: resolvedLocale.locale,
       creatorDisplayName: completedEvent.actorLabel || completedEvent.actorWid,
       trigger: 'unplanned_recovery',
+      notifyRecoveryCreator: true,
       now: input.now
     });
     await input.context.audit.record({

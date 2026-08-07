@@ -2136,7 +2136,7 @@ async function publishConfirmedEvent(input: {
     const now = new Date();
     creationMode = materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
     if (creationMode === 'unplanned') {
-      await createUnplannedEventLifecycle({
+      const result = await createUnplannedEventLifecycle({
         context: input.context,
         runtime: input.runtime,
         activeTransport: input.activeTransport,
@@ -2150,7 +2150,12 @@ async function publishConfirmedEvent(input: {
       });
       await input.activeTransport.sendText(
         input.responseChatId,
-        input.t('official.community-events.unplannedPublished')
+        result.status === 'recovery_scheduled'
+          ? input.t('official.community-events.unplannedProvisioningPending', {
+              title: result.subgroupTitle,
+              eventId: result.eventId
+            })
+          : input.t('official.community-events.unplannedPublished')
       );
       return;
     }
@@ -2350,6 +2355,15 @@ async function eventProfileSnapshotIsCurrent(input: {
   }
 }
 
+type CreateUnplannedEventLifecycleResult =
+  | { status: 'completed' }
+  | {
+      status: 'recovery_scheduled';
+      eventId: string;
+      subgroupChatId: string;
+      subgroupTitle: string;
+    };
+
 async function createUnplannedEventLifecycle(input: {
   context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
@@ -2361,7 +2375,7 @@ async function createUnplannedEventLifecycle(input: {
   announcementGroupWid: string;
   materialized: MaterializedEventLifecycle;
   now: Date;
-}): Promise<void> {
+}): Promise<CreateUnplannedEventLifecycleResult> {
   const creatorParticipantWid = eventCreatorParticipantWid(input.draft);
   const nowIso = input.now.toISOString();
   const intent: NewStoredEventRecord = {
@@ -2417,6 +2431,9 @@ async function createUnplannedEventLifecycle(input: {
     event: intent,
     creatorParticipantWid
   });
+  if (result.status === 'recovery_scheduled') {
+    return result;
+  }
   const created = result.created;
   const completedAt = new Date().toISOString();
   const completed = completeUnplannedEventProvisioning(input.db, {
@@ -2464,7 +2481,17 @@ async function createUnplannedEventLifecycle(input: {
     trigger: 'unplanned_created',
     now: input.now
   });
+  return { status: 'completed' };
 }
+
+type ProvisionUnplannedEventSubgroupResult =
+  | ({ status: 'completed' } & Awaited<ReturnType<typeof createEventCommunitySubgroup>>)
+  | {
+      status: 'recovery_scheduled';
+      eventId: string;
+      subgroupChatId: string;
+      subgroupTitle: string;
+    };
 
 async function provisionUnplannedEventSubgroup(input: {
   context: EventFlowCompletionContext;
@@ -2472,15 +2499,16 @@ async function provisionUnplannedEventSubgroup(input: {
   db: ReturnType<typeof eventsDatabase>;
   event: StoredEventRecord;
   creatorParticipantWid: string;
-}): Promise<Awaited<ReturnType<typeof createEventCommunitySubgroup>>> {
+}): Promise<ProvisionUnplannedEventSubgroupResult> {
   try {
-    return await createEventCommunitySubgroup({
+    const result = await createEventCommunitySubgroup({
       context: input.context,
       scopeId: input.event.scopeId,
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
       title: input.event.groupTitle,
       participantWids: [input.creatorParticipantWid]
     });
+    return { status: 'completed', ...result };
   } catch (error) {
     if (!isManagedCommunitySubgroupProvisioningError(error)) {
       throw error;
@@ -2538,7 +2566,12 @@ async function provisionUnplannedEventSubgroup(input: {
         { cause: enqueueError }
       );
     }
-    throw error;
+    return {
+      status: 'recovery_scheduled',
+      eventId: failedEvent.id,
+      subgroupChatId: error.created.chatId,
+      subgroupTitle: error.created.title
+    };
   }
 }
 

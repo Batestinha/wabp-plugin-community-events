@@ -1169,6 +1169,7 @@ async function finalizeUnplannedEventJob(
       locale: locale.locale,
       creatorDisplayName: event.actorLabel || event.actorWid,
       trigger: 'unplanned_recovery',
+      notifyRecoveryCreator: true,
       expected: payload
     });
     return [audit(

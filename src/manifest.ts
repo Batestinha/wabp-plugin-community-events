@@ -39,7 +39,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.8.3',
+  version: '0.8.4',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -198,6 +198,16 @@ export const eventsManifest: PluginManifest = {
         cancellableStates: ['active'],
         terminalStates: ['completed', 'cancelled', 'expired'],
         effects: ['discard-pending-location-selection']
+      },
+      {
+        id: 'event-edit-selection',
+        description: 'Pending interactive event selection before a structured event update starts.',
+        mode: 'plugin-handler',
+        scope: 'actor-chat',
+        commands: ['/event edit'],
+        cancellableStates: ['active'],
+        terminalStates: ['completed', 'cancelled', 'expired'],
+        effects: ['discard-pending-event-edit-selection']
       },
       {
         id: 'published-event-lifecycle',

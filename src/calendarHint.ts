@@ -10,9 +10,11 @@ import type { EventCalendarResource, EventProfile } from './config';
 import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import {
+  assertScopeEventCalendarOwnershipResolved,
   eventsDatabase,
   getEventAnnouncementDeliveryClaim,
   getCalendarPublicationStatus,
+  resolvedEventCalendarId,
   type StoredEventRecord
 } from './store';
 
@@ -82,8 +84,10 @@ export async function sendEventCalendarHint(input: {
     }
   }
   const template = hint.template.trim() ? hint.template : '';
-  const calendarId = input.profile.calendar.calendarId.trim();
+  let calendarId = '';
   try {
+    calendarId = resolvedEventCalendarId(input.event) ?? '';
+    assertScopeEventCalendarOwnershipResolved(db, input.scopeId);
     const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;
     if (!template) {
       await recordCalendarHintSkipped(input, 'empty_template', calendarId);

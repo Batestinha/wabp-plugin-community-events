@@ -1,10 +1,10 @@
+import { createHash } from 'node:crypto';
 import type { EventsConfig } from './config';
-import { renderScopeCalendar } from './ics';
-import type { StoredEventRecord } from './store';
 
 const DEFAULT_PUBLICATION_TIMEOUT_MS = 15_000;
 
 export interface CalendarPublicationOutcome {
+  generation: number;
   enabled: boolean;
   attempted: boolean;
   ok: boolean;
@@ -17,27 +17,11 @@ export interface CalendarPublicationOutcome {
   error?: string | undefined;
 }
 
-export async function publishScopeCalendar(input: {
-  config: EventsConfig;
-  scopeId: string;
-  calendarId: string;
-  events: StoredEventRecord[];
-}): Promise<CalendarPublicationOutcome | undefined> {
-  const calendar = input.config.calendars.find((candidate) => candidate.id === input.calendarId);
-  if (!calendar || !calendar.enabled) {
-    return undefined;
-  }
-  return publishCalendarBody({
-    scopeId: input.scopeId,
-    calendar,
-    icsBody: renderScopeCalendar(input.config, input.scopeId, input.calendarId, input.events)
-  });
-}
-
 export async function publishCalendarBody(input: {
   scopeId: string;
   calendar: EventsConfig['calendars'][number];
   icsBody: string;
+  generation: number;
 }): Promise<CalendarPublicationOutcome | undefined> {
   if (!input.calendar.publication.enabled) {
     return undefined;
@@ -46,6 +30,7 @@ export async function publishCalendarBody(input: {
   if (!target.endpointUrl) {
     return {
       enabled: true,
+      generation: input.generation,
       attempted: false,
       ok: false,
       endpointUrl: '',
@@ -56,9 +41,10 @@ export async function publishCalendarBody(input: {
   }
 
   try {
-    const result = await postCalendarPublication(target, input.icsBody);
+    const result = await postCalendarPublication(target, input.icsBody, input.generation);
     return {
       enabled: true,
+      generation: input.generation,
       attempted: true,
       ok: true,
       endpointUrl: target.endpointUrl,
@@ -71,6 +57,7 @@ export async function publishCalendarBody(input: {
   } catch (error) {
     return {
       enabled: true,
+      generation: input.generation,
       attempted: true,
       ok: false,
       endpointUrl: target.endpointUrl,
@@ -109,8 +96,10 @@ export function calendarPublicationTarget(
 
 async function postCalendarPublication(
   target: ReturnType<typeof calendarPublicationTarget>,
-  icsBody: string
+  icsBody: string,
+  generation: number
 ): Promise<{ subscriptionUrl: string; calendarUrl: string; updatedAt: string }> {
+  const bodySha256 = createHash('sha256').update(icsBody).digest('hex');
   const body = new URLSearchParams();
   if (target.secret) {
     body.set(target.secretFieldName, target.secret);
@@ -119,6 +108,8 @@ async function postCalendarPublication(
   body.set('calendar_id', target.feedId);
   body.set('label', target.label);
   body.set('ics_body', icsBody);
+  body.set('generation', String(generation));
+  body.set('body_sha256', bodySha256);
   // Publishing a scoped feed must never replace the receiver's independently
   // selected default feed. Feed activation is an explicit receiver-side choice.
   body.set('activate', '0');
@@ -149,6 +140,18 @@ async function postCalendarPublication(
   if (publishedScopeId !== target.scopeId || publishedCalendarId !== target.feedId) {
     throw new Error(
       `Calendar publisher did not confirm scoped target ${target.scopeId}/${target.feedId}.`
+    );
+  }
+  const publishedGeneration = numberField(result, 'generation');
+  if (publishedGeneration !== generation) {
+    throw new Error(
+      `Calendar publisher did not confirm generation ${generation} for ${target.scopeId}/${target.feedId}.`
+    );
+  }
+  const publishedBodySha256 = stringField(result, 'bodySha256') || stringField(result, 'body_sha256');
+  if (publishedBodySha256 !== bodySha256) {
+    throw new Error(
+      `Calendar publisher did not confirm body SHA-256 for generation ${generation} at ${target.scopeId}/${target.feedId}.`
     );
   }
   return {
@@ -188,6 +191,14 @@ function publicationErrorMessage(payload: unknown): string {
 function stringField(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   return typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

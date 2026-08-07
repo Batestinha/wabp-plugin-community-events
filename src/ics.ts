@@ -1,4 +1,6 @@
-import { chown, lstat, mkdir, readdir, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { renameSync } from 'node:fs';
+import { chown, lstat, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { EventCalendarResource, EventsConfig } from './config';
@@ -9,61 +11,69 @@ const CALENDAR_EXPORT_ROOT = 'calendar-exports';
 const DEFAULT_CONTAINER_APP_UID = 1000;
 const DEFAULT_CONTAINER_APP_GID = 1000;
 
-export async function writeScopeCalendar(input: {
+export interface PreparedScopeCalendar {
+  filePath: string;
+  tempPath: string;
+  body: string;
+}
+
+export async function prepareScopeCalendar(input: {
   appConfig: AppConfig;
-  config: EventsConfig;
+  calendar: EventCalendarResource;
   scopeId: string;
-  calendarId: string;
-  events: StoredEventRecord[];
-}): Promise<string | undefined> {
-  const calendar = input.config.calendars.find((candidate) => candidate.id === input.calendarId);
-  if (!calendar || !calendar.enabled) {
-    return undefined;
-  }
-  const filePath = scopeCalendarPath(input.appConfig, calendar, input.scopeId);
+  body: string;
+  tempId?: string | undefined;
+}): Promise<PreparedScopeCalendar> {
+  const filePath = scopeCalendarPath(input.appConfig, input.calendar, input.scopeId);
   await mkdir(path.dirname(filePath), { recursive: true });
   await chownCalendarExportTree(calendarExportRoot(input.appConfig));
-  const tempPath = `${filePath}.tmp`;
-  await writeFile(
-    tempPath,
-    renderScopeCalendar(input.config, input.scopeId, input.calendarId, input.events),
-    'utf8'
-  );
-  await chownCalendarExportPath(tempPath);
-  await rename(tempPath, filePath);
-  await chownCalendarExportPath(filePath);
-  return filePath;
+  const tempId = sanitizePathSegment(input.tempId?.trim() || randomUUID());
+  const tempPath = `${filePath}.${process.pid}.${tempId}.tmp`;
+  try {
+    await writeFile(tempPath, input.body, 'utf8');
+    await chownCalendarExportPath(tempPath);
+    return { filePath, tempPath, body: input.body };
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
+}
+
+export function commitPreparedScopeCalendar(prepared: PreparedScopeCalendar): void {
+  renameSync(prepared.tempPath, prepared.filePath);
+}
+
+export async function discardPreparedScopeCalendar(prepared: PreparedScopeCalendar): Promise<void> {
+  await rm(prepared.tempPath, { force: true });
 }
 
 export function renderScopeCalendar(
   config: EventsConfig,
   scopeId: string,
   calendarId: string,
-  events: StoredEventRecord[]
+  events: StoredEventRecord[],
+  now = new Date()
 ): string {
   const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
   return renderIcsWithConfig(
-    scopeCalendarEvents(config, scopeId, calendarId, events),
+    scopeCalendarEvents(scopeId, calendarId, events),
     config,
-    new Date(),
+    now,
     calendar?.label || calendarId
   );
 }
 
 export function scopeCalendarEvents(
-  config: EventsConfig,
   scopeId: string,
   calendarId: string,
   events: StoredEventRecord[]
 ): StoredEventRecord[] {
-  const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
-  if (!calendar) {
-    return [];
-  }
-  const profileIds = new Set(config.eventProfiles
-    .filter((profile) => profile.calendar.calendarId === calendar.id)
-    .map((profile) => profile.id));
-  return events.filter((event) => event.scopeId === scopeId && profileIds.has(event.profileId));
+  return events.filter((event) =>
+    event.scopeId === scopeId &&
+    event.calendarOwnershipStatus === 'assigned' &&
+    event.calendarId === calendarId &&
+    (event.calendarStatus === 'included' || event.calendarStatus === 'cancelled')
+  );
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {
@@ -146,18 +156,7 @@ function calendarEventSummary(
 }
 
 function calendarTitleTemplateForProfile(profile: EventsConfig['eventProfiles'][number]): string {
-  return profile.calendar.titleTemplate?.trim()
-    || inferStylePlaceCalendarTitleTemplate(profile.group.titleTemplate)
-    || inferStylePlaceCalendarTitleTemplate(profile.poll.titleTemplate);
-}
-
-function inferStylePlaceCalendarTitleTemplate(template: string): string {
-  const match = template.trim().match(/^\{style\}([\s\S]*?)\{place\}/);
-  if (!match) {
-    return '';
-  }
-  const joiner = (match[1] ?? '').replace(/['"`]/g, '').replace(/\s+/g, ' ');
-  return joiner.trim() ? `{style}${joiner}{place}` : '';
+  return profile.calendar.titleTemplate?.trim() ?? '';
 }
 
 function formatUtc(date: Date): string {

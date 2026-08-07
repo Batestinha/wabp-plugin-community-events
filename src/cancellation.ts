@@ -4,11 +4,11 @@ import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
-  listCalendarEvents,
   listEventAnnouncementMessages,
   markEventAnnouncementMessageDeleted,
   markEventAnnouncementMessageDeleteFailed,
   markEventCancelled,
+  resolvedEventCalendarId,
   type EventAnnouncementMessageKind,
   type EventCalendarStatus,
   type StoredEventRecord
@@ -148,7 +148,26 @@ export async function cancelEventLifecycle(input: {
       announcementMessageDeletion
     }
   });
-  await refreshCalendar(runtime, db, event);
+  try {
+    await refreshCalendar(runtime, db, event);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.cancel.calendar_refresh_failed',
+      metadata: { reason }
+    });
+    await appendEventJsonLog(context, {
+      action: 'event.cancel_calendar_refresh_failed',
+      scopeId: event.scopeId,
+      eventId: event.id,
+      actorWid: actor.wid,
+      profileId: event.profileId,
+      ...(event.pollWaMsgId ? { pollWaMsgId: event.pollWaMsgId } : {}),
+      ...(event.subgroupChatId ? { subgroupChatId: event.subgroupChatId } : {}),
+      metadata: { reason }
+    });
+  }
   return {
     status: 'cancelled',
     cancelledAt,
@@ -254,16 +273,16 @@ async function refreshCalendar(
   event: StoredEventRecord
 ): Promise<void> {
   const config = parseEventsConfig(await runtime.configFor(event.scopeId));
-  const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
-  const calendarId = profile?.calendar.calendarId ?? '';
-  const events = listCalendarEvents(db, event.scopeId);
+  const calendarId = resolvedEventCalendarId(event);
+  if (!calendarId) {
+    return;
+  }
   await writePublishAndRecordScopeCalendar({
     appConfig: runtime.config,
     db,
     config,
     scopeId: event.scopeId,
-    calendarId,
-    events
+    calendarId
   });
 }
 

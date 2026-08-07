@@ -23,7 +23,7 @@ import {
   sendClaimedEventAnnouncement
 } from './announcementDelivery';
 import { repairEventEdit } from './editRepair';
-import { calendarResourceForProfile, eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
+import { eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { sendEventCalendarHint } from './calendarHint';
 import { formatEventDateTime } from './datetime';
@@ -78,15 +78,16 @@ import {
   appendEventLog,
   checkpointUnplannedEventProvisioningFailure,
   completeUnplannedEventProvisioning,
+  configuredEventCalendarOwnership,
   eventsDatabase,
   getEvent,
   listEventsBySubgroupChatId,
   insertEvent,
   listCancellableEvents,
-  listCalendarEvents,
   listScopeEvents,
   newEventId,
   recordEventAnnouncementMessage,
+  resolvedEventCalendarId,
   updateEventStructuredData,
   type EventAnnouncementDeliveryIntent,
   type StoredEventLocation,
@@ -1037,6 +1038,7 @@ async function updateEventLifecycle(input: {
   if (!changed) {
     return { changed: false, completedNow: false, repairPending: false, cleanupAt };
   }
+  const calendarId = resolvedEventCalendarId(input.event);
   const liveSubgroupChatId =
     input.event.subgroupChatId &&
     (input.event.eventStatus === 'active' || input.event.eventStatus === 'completed') &&
@@ -1049,7 +1051,7 @@ async function updateEventLifecycle(input: {
       throw new Error('Bot cannot change the event subgroup subject.');
     }
   }
-  const calendar = calendarResourceForProfile(input.config, input.profile);
+  const calendar = input.config.calendars.find((candidate) => candidate.id === calendarId);
   const announcementGroupWid = input.profile.eventEditAnnouncement.enabled
     ? input.event.announcementGroupWid?.trim()
     : undefined;
@@ -1134,7 +1136,7 @@ async function updateEventLifecycle(input: {
       scopeId: input.event.scopeId,
       ...(liveSubgroupChatId ? { subgroupChatId: liveSubgroupChatId } : {}),
       targetGroupTitle: input.materialized.groupTitle,
-      calendarId: input.profile.calendar.calendarId,
+      calendarId: calendarId ?? '',
       ...(announcementIntent ? { announcementDeliveryKey: announcementIntent.deliveryKey } : {})
     }
   });
@@ -1234,7 +1236,7 @@ async function updateEventLifecycle(input: {
       localTime: input.materialized.localTime,
       completionRequested,
       cleanupAt: cleanupAt.toISOString(),
-      calendarId: input.profile.calendar.calendarId,
+      calendarId,
       repairFailures
     }
   });
@@ -1248,7 +1250,7 @@ async function updateEventLifecycle(input: {
     ...(input.event.subgroupChatId ? { subgroupChatId: input.event.subgroupChatId } : {}),
     metadata: {
       calendarEnabled: calendar?.enabled === true,
-      calendarId: input.profile.calendar.calendarId,
+      calendarId,
       sourcePluginId: input.sourcePluginId,
       requestedTitle: input.requestedTitle,
       groupTitle: input.materialized.groupTitle,
@@ -2187,6 +2189,7 @@ async function publishConfirmedEvent(input: {
       eventStatus: 'active',
       groupLifecycleStatus: 'poll_open',
       calendarStatus: 'included',
+      ...configuredEventCalendarOwnership(input.profile.calendar.calendarId),
       actorIdentityId: input.draft.actorIdentityId,
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
@@ -2224,16 +2227,19 @@ async function publishConfirmedEvent(input: {
     });
     try {
       const calendarConfig = draftEventsConfig(input.draft);
-      const calendar = calendarResourceForProfile(calendarConfig, input.profile);
-      const calendarEvents = listCalendarEvents(db, input.draft.scopeId);
-      const publication = await writePublishAndRecordScopeCalendar({
-        appConfig: input.runtime.config,
-        db,
-        config: calendarConfig,
-        scopeId: input.draft.scopeId,
-        calendarId: input.profile.calendar.calendarId,
-        events: calendarEvents
-      });
+      const calendarId = resolvedEventCalendarId(event);
+      const calendar = calendarId
+        ? calendarConfig.calendars.find((candidate) => candidate.id === calendarId)
+        : undefined;
+      const publication = calendarId
+        ? await writePublishAndRecordScopeCalendar({
+          appConfig: input.runtime.config,
+          db,
+          config: calendarConfig,
+          scopeId: input.draft.scopeId,
+          calendarId
+        })
+        : undefined;
       await appendEventJsonLog(input.context, {
         action: 'calendar.exported',
         scopeId: input.draft.scopeId,
@@ -2243,7 +2249,7 @@ async function publishConfirmedEvent(input: {
         pollWaMsgId: sent.messageId,
         metadata: {
           calendarEnabled: calendar?.enabled === true,
-          calendarId: input.profile.calendar.calendarId,
+          calendarId: calendarId ?? '',
           ...(publication ? { publication } : {})
         }
       });
@@ -2370,6 +2376,7 @@ async function createUnplannedEventLifecycle(input: {
     eventStatus: 'failed',
     groupLifecycleStatus: 'none',
     calendarStatus: 'hidden',
+    ...configuredEventCalendarOwnership(input.profile.calendar.calendarId),
     actorIdentityId: input.draft.actorIdentityId,
     actorWid: input.draft.actorWid,
     actorLabel: input.draft.actorLabel,

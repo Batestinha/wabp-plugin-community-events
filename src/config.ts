@@ -117,11 +117,20 @@ export const eventResponseClassSchema = z.object({
   includeInAttendanceCount: z.boolean().default(false)
 }).strict();
 
+const eventCalendarDirectorySchema = z.string().trim().min(1).superRefine((directory, ctx) => {
+  if (/^(?:[\\/]|[A-Za-z]:[\\/])/.test(directory)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Calendar directory must be relative' });
+  }
+  if (directory.split(/[\\/]+/).some((segment) => segment === '.' || segment === '..')) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Calendar directory cannot contain relative path segments' });
+  }
+});
+
 const eventCalendarResourceObjectSchema = z.object({
   id: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
   label: z.string().trim().min(1),
   enabled: z.boolean().default(true),
-  directory: z.string().trim().min(1).default('calendar'),
+  directory: eventCalendarDirectorySchema.default('calendar'),
   subscriptionToken: z.string().trim().default(''),
   publication: z.object({
     enabled: z.boolean().default(false),
@@ -134,10 +143,7 @@ const eventCalendarResourceObjectSchema = z.object({
   }).strict().default({})
 }).strict();
 
-export const eventCalendarResourceSchema = z.preprocess(
-  normalizeEventCalendarResourceInput,
-  eventCalendarResourceObjectSchema
-);
+export const eventCalendarResourceSchema = eventCalendarResourceObjectSchema;
 
 export const eventLocationConfigSchema = z.discriminatedUnion('source', [
   z.object({
@@ -474,7 +480,35 @@ const eventsConfigObjectSchema = z.object({
   calendars: z.array(eventCalendarResourceSchema).min(1).default([defaultEventsCalendarResource]),
   eventProfiles: z.array(eventProfileSchema).min(1).default([defaultClimbingEventProfile])
 }).strict().superRefine((config, ctx) => {
-  const calendarIds = new Set(config.calendars.map((calendar) => calendar.id));
+  const calendarIds = new Set<string>();
+  const publicationTargets = new Set<string>();
+  config.calendars.forEach((calendar, index) => {
+    if (calendarIds.has(calendar.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'calendar ids must be unique',
+        path: ['calendars', index, 'id']
+      });
+    } else {
+      calendarIds.add(calendar.id);
+    }
+
+    if (!calendar.publication.enabled) {
+      return;
+    }
+    const endpointUrl = normalizedCalendarPublicationEndpoint(calendar.publication.endpointUrl);
+    const feedId = calendar.publication.feedId || calendar.id;
+    const targetKey = JSON.stringify([endpointUrl, feedId]);
+    if (publicationTargets.has(targetKey)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'enabled calendar publication targets must be unique per endpoint and feed id',
+        path: ['calendars', index, 'publication', 'feedId']
+      });
+    } else {
+      publicationTargets.add(targetKey);
+    }
+  });
   config.eventProfiles.forEach((profile, index) => {
     const calendarId = profile.calendar.calendarId.trim();
     if (calendarId && !calendarIds.has(calendarId)) {
@@ -486,6 +520,13 @@ const eventsConfigObjectSchema = z.object({
     }
   });
 });
+
+function normalizedCalendarPublicationEndpoint(endpointUrl: string): string {
+  if (!endpointUrl) {
+    return '';
+  }
+  return new URL(endpointUrl).toString();
+}
 
 export const eventsConfigSchema = z.preprocess(normalizeEventsConfigInput, eventsConfigObjectSchema);
 
@@ -527,11 +568,6 @@ export function localizeDefaultEventProfiles(profiles: EventProfile[], t: Transl
 
 export function eventProfilePermission(profile: EventProfile): string {
   return `${EVENT_CREATE_PERMISSION_PREFIX}${profile.permissionSuffix?.trim() || profile.id}`;
-}
-
-export function calendarResourceForProfile(config: EventsConfig, profile: EventProfile): EventCalendarResource | undefined {
-  const calendarId = profile.calendar.calendarId.trim();
-  return calendarId ? config.calendars.find((calendar) => calendar.id === calendarId) : undefined;
 }
 
 function localizedDefaultClimbingEventProfile(profile: EventProfile, t: TranslateFn): EventProfile {
@@ -671,51 +707,13 @@ function normalizeEventsConfigInput(input: unknown): unknown {
   if (!isRecord(input)) {
     return input;
   }
-  const {
-    announcementGroupWid: _legacyAnnouncementGroupWid,
-    calendar: _legacyCalendar,
-    ...inputWithoutLegacyProfileSettings
-  } = input;
-  const normalized = {
-    ...inputWithoutLegacyProfileSettings,
-    calendars: Array.isArray(input.calendars)
-      ? input.calendars.map((calendar) => normalizeEventCalendarResourceInput(calendar))
-      : input.calendars
-  };
   if (!Array.isArray(input.eventProfiles)) {
-    return normalized;
+    return input;
   }
   return {
-    ...normalized,
+    ...input,
     eventProfiles: input.eventProfiles.map((profile) => normalizeEventProfileInput(profile))
   };
-}
-
-function normalizeEventCalendarResourceInput(calendar: unknown): unknown {
-  if (!isRecord(calendar)) {
-    return calendar;
-  }
-  const { piwigo: legacyPiwigo, publication, ...calendarWithoutLegacy } = calendar;
-  const legacy = isRecord(legacyPiwigo)
-    ? {
-        enabled: legacyPiwigo.enabled,
-        feedId: legacyPiwigo.calendarId,
-        label: legacyPiwigo.label
-      }
-    : {};
-  const current = isRecord(publication) ? publicationWithoutDownloadUrl(publication) : {};
-  return {
-    ...calendarWithoutLegacy,
-    publication: {
-      ...legacy,
-      ...current
-    }
-  };
-}
-
-function publicationWithoutDownloadUrl(publication: Record<string, unknown>): Record<string, unknown> {
-  const { downloadUrl: _legacyDownloadUrl, ...current } = publication;
-  return current;
 }
 
 function normalizeEventProfileInput(profile: unknown): unknown {
@@ -733,10 +731,7 @@ function normalizeEventProfileInput(profile: unknown): unknown {
   const normalizedProfile = {
     ...profileWithoutLegacyFields,
     ...normalizedStartQuestions.keys,
-    eventGroupHint: normalizeEventGroupHintInput(profile.eventGroupHint, previousEventGroupHint),
-    ...(isRecord(profileWithoutLegacyFields.calendar) ? {
-      calendar: normalizeEventProfileCalendarInput(profileWithoutLegacyFields.calendar)
-    } : {})
+    eventGroupHint: normalizeEventGroupHintInput(profile.eventGroupHint, previousEventGroupHint)
   };
   const rawResponseClasses = Array.isArray(profile.poll.responseClasses)
     ? profile.poll.responseClasses.filter(isRecord)
@@ -896,16 +891,6 @@ function uniqueQuestionKey(questions: Array<Record<string, unknown>>, preferred:
     }
   }
   return `${preferred}1000`;
-}
-
-function normalizeEventProfileCalendarInput(calendar: Record<string, unknown>): Record<string, unknown> {
-  const {
-    enabled: _legacyEnabled,
-    directory: _legacyDirectory,
-    subscriptionToken: _legacySubscriptionToken,
-    ...nextCalendar
-  } = calendar;
-  return nextCalendar;
 }
 
 function normalizeEventQuestionInput(input: unknown): unknown {

@@ -13,7 +13,7 @@ import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement 
 import { sendEventCalendarHint } from './calendarHint';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
-import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
+import { parseEventsConfig, type EventProfile } from './config';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -24,6 +24,7 @@ import {
 } from './weather';
 import {
   appendEventLog,
+  configuredEventCalendarOwnership,
   eventsDatabase,
   getActiveEventByPoll,
   getLiveEventBySubgroup,
@@ -31,9 +32,9 @@ import {
   getEvent,
   getEventWeatherDelivery,
   insertEvent,
-  listCalendarEvents,
   newEventId,
   recordEventAnnouncementMessage,
+  resolvedEventCalendarId,
   updateEventSubgroupTitle,
   upsertVote,
   type EventOrigin,
@@ -253,6 +254,7 @@ export async function adoptEventLifecycle(input: {
     eventStatus: 'active',
     groupLifecycleStatus: origin === 'adopted_poll' ? 'poll_open' : 'poll_closed',
     calendarStatus: 'included',
+    ...configuredEventCalendarOwnership(profile.calendar.calendarId),
     actorIdentityId: adoption.actorIdentityId,
     actorWid: adoption.actorWid,
     actorLabel: adoption.actorLabel,
@@ -301,16 +303,6 @@ export async function adoptEventLifecycle(input: {
     snapshotVoteCount = snapshotVotes.length;
   }
 
-  const calendarEvents = [...listCalendarEvents(db, adoption.scopeId), event];
-  const publication = await writePublishAndRecordScopeCalendar({
-    appConfig: runtime.config,
-    db,
-    config,
-    scopeId: adoption.scopeId,
-    calendarId: profile.calendar.calendarId,
-    events: calendarEvents
-  });
-  const calendar = calendarResourceForProfile(config, profile);
   db.transaction(() => {
     insertEvent(db, event);
     if (event.pollWaMsgId && event.announcementGroupWid) {
@@ -340,6 +332,28 @@ export async function adoptEventLifecycle(input: {
       }
     });
   });
+  const calendarId = resolvedEventCalendarId(event);
+  const calendar = calendarId
+    ? config.calendars.find((candidate) => candidate.id === calendarId)
+    : undefined;
+  let publication: Awaited<ReturnType<typeof writePublishAndRecordScopeCalendar>> = undefined;
+  try {
+    publication = calendarId
+      ? await writePublishAndRecordScopeCalendar({
+        appConfig: runtime.config,
+        db,
+        config,
+        scopeId: adoption.scopeId,
+        calendarId
+      })
+      : undefined;
+  } catch (error) {
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.adopted.calendar_failed',
+      metadata: { reason: error instanceof Error ? error.message : String(error) }
+    });
+  }
   if (adoption.subgroupChatId) {
     await input.context.registerManagedGroup?.({
       scopeId: adoption.scopeId,
@@ -361,7 +375,7 @@ export async function adoptEventLifecycle(input: {
       startsAt: event.startsAt,
       closeAt: event.closeAt,
       cleanupAt: event.cleanupAt,
-      calendarId: calendar?.id ?? '',
+      calendarId: calendarId ?? '',
       calendarEnabled: calendar?.enabled === true,
       ...(publication ? { publication } : {}),
       groupValidation
@@ -458,20 +472,28 @@ async function reconcileAdoptedGroupLifecycle(input: {
     displayName: liveTitle
   });
 
-  const calendar = calendarResourceForProfile(input.config, input.profile);
   let calendarPublication: EventAdoptionReconcileEffects['calendarPublication'] = 'unavailable';
-  if (calendar) {
-    await writePublishAndRecordScopeCalendar({
-      appConfig: input.runtime.config,
-      db: input.db,
-      config: input.config,
-      scopeId: event.scopeId,
-      calendarId: calendar.id,
-      events: listCalendarEvents(input.db, event.scopeId)
+  try {
+    const calendarId = resolvedEventCalendarId(event);
+    const calendar = input.config.calendars.find((candidate) => candidate.id === calendarId);
+    if (calendarId && calendar) {
+      await writePublishAndRecordScopeCalendar({
+        appConfig: input.runtime.config,
+        db: input.db,
+        config: input.config,
+        scopeId: event.scopeId,
+        calendarId
+      });
+      calendarPublication = getCalendarPublicationStatus(input.db, event.scopeId, calendarId)?.ok
+        ? 'published'
+        : 'unavailable';
+    }
+  } catch (error) {
+    appendEventLog(input.db, {
+      eventId: event.id,
+      action: 'events.adoption_reconcile.calendar_failed',
+      metadata: { reason: error instanceof Error ? error.message : String(error) }
     });
-    calendarPublication = getCalendarPublicationStatus(input.db, event.scopeId, calendar.id)?.ok
-      ? 'published'
-      : 'unavailable';
   }
 
   const eventGroupHint = await sendAdoptedEventGroupHint({

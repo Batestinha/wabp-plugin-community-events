@@ -64,7 +64,8 @@ const eventsPanelControl = defineControl({
     builderEndpoints: {
       state: '/api/v1/plugins/official.community-events/events/:scopeId',
       terminate: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/terminate',
-      calendarDisposition: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar'
+      calendarDisposition: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar',
+      calendarOwnership: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar-ownership'
     },
     helpText: 'Published events recorded for this scope, with confirmed manual termination for active event lifecycles.'
   },

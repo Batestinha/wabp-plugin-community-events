@@ -22,7 +22,10 @@ import {
   eventSubgroupAttendeeCoverage,
   voterWidsForResponseBehavior
 } from './attendance';
-import { writePublishAndRecordScopeCalendar } from './calendarStatus';
+import {
+  eventCalendarPublicationConfigFingerprint,
+  writePublishAndRecordScopeCalendar
+} from './calendarStatus';
 import { repairEventEdit } from './editRepair';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -36,6 +39,7 @@ import {
 import {
   appendEventLog,
   EVENT_CLEANUP_CLAIM_LEASE_MS,
+  ensureEventCalendarPublicationConfiguration,
   eventsDatabase,
   getEvent,
   getUnplannedEventFinalization,
@@ -44,13 +48,15 @@ import {
   getEventCleanupClaim,
   getEventWeatherDelivery,
   listCreatedGroupParticipants,
+  listDirtyEventCalendarPublications,
+  listEventCalendarPublicationGenerations,
   listOpenPollEvents,
   listFailedProvisioningEvents,
   listPendingUnplannedEventFinalizations,
   listPendingCleanupEvents,
   listPendingEventEditRepairs,
   listRecoverableEventWeatherDeliveries,
-  listCalendarEvents,
+  listUnassignedEventCalendarOwnership,
   listWeatherForecastCandidateEvents,
   advanceEventProvisioningRecovery,
   claimEventCleanup,
@@ -66,6 +72,7 @@ import {
   replaceVotes,
   releaseEventCleanupClaim,
   releaseExpiredEventCleanupClaims,
+  resolvedEventCalendarId,
   renewEventCleanupClaim,
   saveCreatedGroupParticipants,
   supersedeEventWeatherDelivery,
@@ -98,6 +105,7 @@ import { registerEventCreationFlowDefinitionResolver } from './eventCreationFlow
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
 const EVENT_EDIT_REPAIR_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
+export const EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS = 30_000;
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
@@ -105,6 +113,7 @@ interface EventRecoveryOptions {
 
 interface EventsHooksOptions {
   recoverJobs?: boolean | undefined;
+  recoverCalendarPublications?: boolean | undefined;
 }
 
 export function createEventsHooks(context: PluginRuntimeContext, options: EventsHooksOptions = {}): PluginRuntimeHooks {
@@ -122,6 +131,9 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
       context.logger.error({ error }, 'official.community-events job recovery failed');
     });
   }
+  if (options.recoverCalendarPublications === true) {
+    startEventCalendarPublicationRecovery(context);
+  }
   return {
     async onPollVote(event) {
       await handlePollVote(context, event);
@@ -135,10 +147,42 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   };
 }
 
+function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): void {
+  let running = false;
+  const sweep = async (): Promise<void> => {
+    if (running) {
+      return;
+    }
+    running = true;
+    try {
+      await recoverDirtyEventCalendarPublications(context);
+    } catch (error) {
+      context.logger.error({ error }, 'official.community-events calendar publication recovery failed');
+    } finally {
+      running = false;
+    }
+  };
+  void sweep();
+  const timer = setInterval(() => {
+    void sweep();
+  }, EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS);
+  timer.unref();
+}
+
 export async function recoverEventJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
 ): Promise<number> {
+  const unresolvedCalendarOwnership = listUnassignedEventCalendarOwnership(
+    eventsDatabase(context.databases)
+  );
+  if (unresolvedCalendarOwnership.length > 0) {
+    context.logger.warn(
+      { unresolvedCalendarOwnership },
+      'Community events require explicit authoritative calendar ownership assignment'
+    );
+  }
+  const calendarPublications = await recoverDirtyEventCalendarPublications(context, options);
   const questionKeyRenames = await recoverEventQuestionKeyRenames(context, options);
   const editRepairJobs = await recoverEventEditRepairJobs(context);
   const closeJobs = await recoverEventCloseJobs(context, options);
@@ -148,13 +192,103 @@ export async function recoverEventJobs(
   const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
   const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
-  if (enqueued > 0 || questionKeyRenames.settled > 0 || questionKeyRenames.unresolved > 0) {
+  if (
+    enqueued > 0 ||
+    calendarPublications > 0 ||
+    questionKeyRenames.settled > 0 ||
+    questionKeyRenames.unresolved > 0
+  ) {
     context.logger.info(
-      { enqueued, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
   return enqueued;
+}
+
+export async function recoverDirtyEventCalendarPublications(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const now = options.now ?? new Date();
+  const unresolvedScopeIds = new Set(
+    listUnassignedEventCalendarOwnership(db).map((event) => event.scopeId)
+  );
+  const configByScope = new Map<string, ReturnType<typeof parseEventsConfig> | null>();
+  const configForEnabledScope = async (
+    scopeId: string
+  ): Promise<ReturnType<typeof parseEventsConfig> | null> => {
+    if (configByScope.has(scopeId)) {
+      return configByScope.get(scopeId) ?? null;
+    }
+    const config = await context.enabledFor(scopeId)
+      ? parseEventsConfig(await context.configFor(scopeId))
+      : null;
+    configByScope.set(scopeId, config);
+    return config;
+  };
+  for (const state of listEventCalendarPublicationGenerations(db)) {
+    if (unresolvedScopeIds.has(state.scopeId)) {
+      continue;
+    }
+    try {
+      const config = await configForEnabledScope(state.scopeId);
+      const calendar = config?.calendars.find((candidate) => candidate.id === state.calendarId);
+      if (!config || !calendar?.enabled) {
+        continue;
+      }
+      ensureEventCalendarPublicationConfiguration(db, {
+        scopeId: state.scopeId,
+        calendarId: state.calendarId,
+        fingerprint: eventCalendarPublicationConfigFingerprint(config, state.calendarId),
+        updatedAt: now.toISOString()
+      });
+    } catch (error) {
+      context.logger.warn(
+        { error, scopeId: state.scopeId, calendarId: state.calendarId },
+        'Unable to reconcile event calendar publication configuration'
+      );
+    }
+  }
+  let recovered = 0;
+  for (const dirty of listDirtyEventCalendarPublications(db, { readyAt: now.toISOString() })) {
+    if (unresolvedScopeIds.has(dirty.scopeId)) {
+      continue;
+    }
+    try {
+      const config = await configForEnabledScope(dirty.scopeId);
+      if (!config) {
+        continue;
+      }
+      const calendar = config.calendars.find((candidate) => candidate.id === dirty.calendarId);
+      if (!calendar?.enabled) {
+        continue;
+      }
+      const publication = await writePublishAndRecordScopeCalendar({
+        appConfig: context.config,
+        db,
+        config,
+        scopeId: dirty.scopeId,
+        calendarId: dirty.calendarId,
+        requestGeneration: false
+      });
+      if (publication && !publication.ok) {
+        context.logger.warn(
+          { scopeId: dirty.scopeId, calendarId: dirty.calendarId, error: publication.error },
+          'Unable to recover dirty event calendar publication'
+        );
+        continue;
+      }
+      recovered += 1;
+    } catch (error) {
+      context.logger.warn(
+        { error, scopeId: dirty.scopeId, calendarId: dirty.calendarId },
+        'Unable to recover dirty event calendar publication'
+      );
+    }
+  }
+  return recovered;
 }
 
 export async function recoverUnplannedEventFinalizationJobs(
@@ -746,18 +880,27 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(subgroupChatId ? { subgroupChatId } : {}),
       metadata: { attendeeCount: attendeeWids.length, subgroupTitle }
     });
-    const calendar = calendarProfile
-      ? config.calendars.find((candidate) => candidate.id === calendarProfile.calendar.calendarId)
-      : undefined;
-    const calendarEvents = listCalendarEvents(db, record.scopeId);
-    const calendarFailureAudit = await publishClosedEventCalendar(context, {
-      db,
-      config,
-      record: closedEvent,
-      calendarId: calendarProfile?.calendar.calendarId ?? '',
-      calendarEnabled: calendar?.enabled === true,
-      events: calendarEvents
-    });
+    let calendarFailureAudit: PluginAction | undefined;
+    try {
+      const calendarId = resolvedEventCalendarId(closedEvent);
+      const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
+      calendarFailureAudit = calendarId
+        ? await publishClosedEventCalendar(context, {
+          db,
+          config,
+          record: closedEvent,
+          calendarId,
+          calendarEnabled: calendar?.enabled === true
+        })
+        : undefined;
+    } catch (error) {
+      calendarFailureAudit = await recordCalendarPublicationFailure(
+        context,
+        db,
+        closedEvent,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
     return [
       ...plannedAnnouncementActions,
       ...(weatherForecastAction ? [weatherForecastAction] : []),
@@ -1470,7 +1613,6 @@ async function publishClosedEventCalendar(
     record: StoredEventRecord;
     calendarId: string;
     calendarEnabled: boolean;
-    events: StoredEventRecord[];
   }
 ): Promise<PluginAction | undefined> {
   try {
@@ -1479,8 +1621,7 @@ async function publishClosedEventCalendar(
       db: input.db,
       config: input.config,
       scopeId: input.record.scopeId,
-      calendarId: input.calendarId,
-      events: input.events
+      calendarId: input.calendarId
     });
     if (publication && !publication.ok) {
       return recordCalendarPublicationFailure(
@@ -2038,15 +2179,17 @@ async function refreshCalendarAfterStartupMiss(
   config: ReturnType<typeof parseEventsConfig>,
   record: StoredEventRecord
 ): Promise<void> {
-  const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
   try {
+    const calendarId = resolvedEventCalendarId(record);
+    if (!calendarId) {
+      return;
+    }
     await writePublishAndRecordScopeCalendar({
       appConfig: context.config,
       db,
       config,
       scopeId: record.scopeId,
-      calendarId: profile?.calendar.calendarId ?? '',
-      events: listCalendarEvents(db, record.scopeId)
+      calendarId
     });
   } catch (error) {
     context.logger.warn({ error, eventId: record.id, scopeId: record.scopeId }, 'Unable to refresh event calendar after marking startup event missed');

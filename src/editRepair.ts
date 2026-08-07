@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { OutboundSendResult, SendTextOptions } from '../../../platform/transport/transportTypes';
@@ -7,16 +6,11 @@ import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { parseEventsConfig } from './config';
 import {
   completeEventEditRepair,
-  claimEventCalendarRepairLease,
-  EVENT_CALENDAR_REPAIR_LEASE_MS,
-  eventCalendarRepairLeaseExpiry,
   getEvent,
   getEventAnnouncementDeliveryClaim,
   getEventEditRepair,
-  listCalendarEvents,
   markEventEditRepairPending,
-  releaseEventCalendarRepairLease,
-  renewEventCalendarRepairLease,
+  resolvedEventCalendarId,
   supersedeEventAnnouncementDelivery
 } from './store';
 
@@ -73,52 +67,24 @@ export async function repairEventEdit(input: {
   }
 
   if (config) {
-    const currentProfile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
-    const calendarId = currentProfile?.calendar.calendarId.trim() || repair.calendarId;
-    const calendarLeaseOwner = `${repair.operationId}:${randomUUID()}`;
-    const calendarLeaseNow = new Date();
-    const calendarLease = claimEventCalendarRepairLease(input.db, {
-      scopeId: repair.scopeId,
-      calendarId,
-      operationId: calendarLeaseOwner,
-      now: calendarLeaseNow.toISOString()
-    });
-    if (!calendarLease) {
-      failures.push('calendar: another repair is publishing this calendar');
-      const expiry = eventCalendarRepairLeaseExpiry(input.db, repair.scopeId, calendarId);
-      const expiryDate = expiry ? new Date(expiry) : undefined;
-      if (expiryDate && Number.isFinite(expiryDate.getTime()) && expiryDate > now) {
-        retryAt = laterDate(retryAt, expiryDate);
-      }
-    } else {
-      try {
-        const publication = await withCalendarRepairLeaseHeartbeat({
-          db: input.db,
-          scopeId: repair.scopeId,
-          calendarId,
-          leaseOwner: calendarLeaseOwner
-        }, () => (input.publishCalendar ?? writePublishAndRecordScopeCalendar)({
+    try {
+      const calendarId = resolvedEventCalendarId(event) ?? '';
+      if (repair.calendarId !== calendarId) {
+        failures.push('calendar: persisted edit intent does not match authoritative event calendar ownership');
+      } else if (calendarId) {
+        const publication = await (input.publishCalendar ?? writePublishAndRecordScopeCalendar)({
           appConfig: input.appConfig,
           db: input.db,
           config,
           scopeId: repair.scopeId,
-          calendarId,
-          events: listCalendarEvents(input.db, repair.scopeId)
-        }));
+          calendarId
+        });
         if (publication && !publication.ok) {
           failures.push(`calendar: ${publication.error || 'publication failed'}`);
         }
-      } catch (error) {
-        failures.push(`calendar: ${errorReason(error)}`);
-      } finally {
-        if (!releaseEventCalendarRepairLease(input.db, {
-          scopeId: repair.scopeId,
-          calendarId,
-          operationId: calendarLeaseOwner
-        })) {
-          failures.push('calendar: publication lease was lost');
-        }
       }
+    } catch (error) {
+      failures.push(`calendar: ${errorReason(error)}`);
     }
   }
 
@@ -191,38 +157,4 @@ export async function repairEventEdit(input: {
 
 function errorReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function laterDate(left: Date | undefined, right: Date): Date {
-  return left && left > right ? left : right;
-}
-
-async function withCalendarRepairLeaseHeartbeat<T>(input: {
-  db: PluginDatabase;
-  scopeId: string;
-  calendarId: string;
-  leaseOwner: string;
-}, operation: () => Promise<T>): Promise<T> {
-  let ownershipLost = false;
-  const renew = (): boolean => {
-    const renewed = renewEventCalendarRepairLease(input.db, {
-      scopeId: input.scopeId,
-      calendarId: input.calendarId,
-      operationId: input.leaseOwner,
-      leaseExpiresAt: new Date(Date.now() + EVENT_CALENDAR_REPAIR_LEASE_MS).toISOString()
-    });
-    ownershipLost ||= !renewed;
-    return renewed;
-  };
-  const timer = setInterval(renew, Math.max(1_000, Math.floor(EVENT_CALENDAR_REPAIR_LEASE_MS / 3)));
-  timer.unref();
-  try {
-    const result = await operation();
-    if (ownershipLost || !renew()) {
-      throw new Error('Calendar publication repair lease was lost.');
-    }
-    return result;
-  } finally {
-    clearInterval(timer);
-  }
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ManagedCommunitySubgroupProvisioningStage } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
 import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
@@ -10,6 +10,7 @@ import { EVENTS_DATABASE } from './manifest';
 export type EventStatus = 'active' | 'completed' | 'cancelled' | 'failed';
 export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
 export type EventCalendarStatus = 'included' | 'cancelled' | 'hidden';
+export type EventCalendarOwnershipStatus = 'assigned' | 'none' | 'unresolved';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
 export type EventWeatherDeliveryScheduleKind = 'poll-close' | 'daily';
 export type EventWeatherDeliveryStatus = 'pending' | 'sending' | 'sent' | 'skipped';
@@ -23,7 +24,13 @@ export type UnplannedEventFinalizationStatus = 'pending' | 'completed';
 
 export const EVENT_CLEANUP_CLAIM_LEASE_MS = 15 * 60 * 1000;
 export const EVENT_ANNOUNCEMENT_DELIVERY_LEASE_MS = 2 * 60 * 1000;
-export const EVENT_CALENDAR_REPAIR_LEASE_MS = 2 * 60 * 1000;
+export const EVENT_CALENDAR_PUBLICATION_LEASE_MS = 45 * 1000;
+export const EVENT_CALENDAR_PUBLICATION_RETRY_DELAYS_MS = [
+  60_000,
+  5 * 60_000,
+  15 * 60_000,
+  60 * 60_000
+] as const;
 export const EVENT_WEATHER_DELIVERY_LEASE_MS = 5 * 60 * 1000;
 
 export class EventQuestionKeyRenameConflictError extends Error {
@@ -113,6 +120,13 @@ export interface StoredEventRecord {
   groupLifecycleStatus: EventGroupLifecycleStatus;
   calendarStatus: EventCalendarStatus;
   /**
+   * Immutable calendar ownership captured when the event is created. A null
+   * value is reserved for pre-028 rows whose ownership still requires an
+   * explicit, persisted migration decision.
+   */
+  calendarId: string | null;
+  calendarOwnershipStatus: EventCalendarOwnershipStatus;
+  /**
    * The authoritative creator principal. Legacy rows migrated from the
    * WID-only schema have no value and therefore receive no creator privilege.
    */
@@ -168,9 +182,20 @@ export interface StoredUnplannedEventFinalization {
   completedAt?: string | undefined;
 }
 
-export type NewStoredEventRecord = StoredEventRecord & {
+export type NewStoredEventRecord = Omit<
+  StoredEventRecord,
+  'actorIdentityId' | 'calendarOwnershipStatus'
+> & {
   actorIdentityId: string;
+  calendarOwnershipStatus: Exclude<EventCalendarOwnershipStatus, 'unresolved'>;
 };
+
+export interface UnassignedEventCalendarOwnership {
+  eventId: string;
+  scopeId: string;
+  profileId: string;
+  actorIdentityId: string;
+}
 
 export interface StoredEventVote {
   eventId: string;
@@ -196,6 +221,7 @@ export interface StoredCreatedGroupParticipant {
 export interface StoredCalendarPublicationStatus {
   scopeId: string;
   calendarId: string;
+  generation: number;
   generatedAt: string;
   generatedEventCount: number;
   publicationEnabled: boolean;
@@ -212,6 +238,43 @@ export interface StoredCalendarPublicationStatus {
   lastError?: string | undefined;
   updatedAt: string;
 }
+
+export interface StoredEventCalendarPublicationGeneration {
+  scopeId: string;
+  calendarId: string;
+  requestedGeneration: number;
+  localGeneration: number;
+  completedGeneration: number;
+  leaseToken?: string | undefined;
+  leaseGeneration?: number | undefined;
+  leaseExpiresAt?: string | undefined;
+  failureCount: number;
+  nextAttemptAt?: string | undefined;
+  requestedConfigFingerprint?: string | undefined;
+  documentGeneration?: number | undefined;
+  documentBody?: string | undefined;
+  documentSha256?: string | undefined;
+  documentConfigFingerprint?: string | undefined;
+  documentCalendarJson?: string | undefined;
+  documentGeneratedAt?: string | undefined;
+  documentEventCount?: number | undefined;
+  completedConfigFingerprint?: string | undefined;
+  updatedAt: string;
+}
+
+export interface EventCalendarPublicationClaim {
+  scopeId: string;
+  calendarId: string;
+  generation: number;
+  leaseToken: string;
+  leaseExpiresAt: string;
+}
+
+export type EventCalendarPublicationClaimResult =
+  | { status: 'claimed'; claim: EventCalendarPublicationClaim }
+  | { status: 'busy'; retryAt: string }
+  | { status: 'configuration_changed'; state: StoredEventCalendarPublicationGeneration }
+  | { status: 'clean'; state: StoredEventCalendarPublicationGeneration };
 
 export interface StoredEventWeatherDelivery {
   eventId: string;
@@ -299,6 +362,8 @@ interface EventRow extends PluginDatabaseRow {
   event_status: EventStatus;
   group_lifecycle_status: EventGroupLifecycleStatus;
   calendar_status: EventCalendarStatus;
+  calendar_id: string | null;
+  calendar_ownership_status: EventCalendarOwnershipStatus;
   actor_identity_id: string | null;
   actor_wid: string;
   actor_label: string;
@@ -352,6 +417,7 @@ interface VoteRow extends PluginDatabaseRow {
 interface CalendarPublicationStatusRow extends PluginDatabaseRow {
   scope_id: string;
   calendar_id: string;
+  generation: number;
   generated_at: string;
   generated_event_count: number;
   publication_enabled: number;
@@ -366,6 +432,29 @@ interface CalendarPublicationStatusRow extends PluginDatabaseRow {
   last_success_at: string | null;
   last_error_at: string | null;
   last_error: string | null;
+  updated_at: string;
+}
+
+interface EventCalendarPublicationGenerationRow extends PluginDatabaseRow {
+  scope_id: string;
+  calendar_id: string;
+  requested_generation: number;
+  local_generation: number;
+  completed_generation: number;
+  lease_token: string | null;
+  lease_generation: number | null;
+  lease_expires_at: string | null;
+  failure_count: number;
+  next_attempt_at: string | null;
+  requested_config_fingerprint: string | null;
+  document_generation: number | null;
+  document_body: string | null;
+  document_sha256: string | null;
+  document_config_fingerprint: string | null;
+  document_calendar_json: string | null;
+  document_generated_at: string | null;
+  document_event_count: number | null;
+  completed_config_fingerprint: string | null;
   updated_at: string;
 }
 
@@ -485,6 +574,30 @@ export function eventsDatabase(registry: PluginDatabaseRegistry | undefined): Pl
 
 export function newEventId(): string {
   return `evt-${randomUUID().slice(0, 8)}`;
+}
+
+export function resolvedEventCalendarId(event: StoredEventRecord): string | undefined {
+  if (event.calendarOwnershipStatus === 'unresolved') {
+    throw new Error(`Event ${event.id} has unresolved calendar ownership.`);
+  }
+  if (event.calendarOwnershipStatus === 'none') {
+    return undefined;
+  }
+  const calendarId = event.calendarId?.trim() ?? '';
+  if (!calendarId) {
+    throw new Error(`Event ${event.id} has invalid assigned calendar ownership.`);
+  }
+  return calendarId;
+}
+
+export function configuredEventCalendarOwnership(calendarId: string): Pick<
+  NewStoredEventRecord,
+  'calendarId' | 'calendarOwnershipStatus'
+> {
+  const normalized = calendarId.trim();
+  return normalized
+    ? { calendarId: normalized, calendarOwnershipStatus: 'assigned' }
+    : { calendarId: null, calendarOwnershipStatus: 'none' };
 }
 
 export function beginEventQuestionKeyRename(db: PluginDatabase, input: {
@@ -757,10 +870,19 @@ export function insertEvent(
   if (!actorIdentityId) {
     throw new Error('An authoritative actor identity id is required for new event records.');
   }
+  const calendarId = event.calendarId?.trim() || null;
+  const calendarOwnershipStatus = event.calendarOwnershipStatus;
+  if (
+    (calendarOwnershipStatus === 'assigned' && !calendarId) ||
+    (calendarOwnershipStatus === 'none' && calendarId !== null)
+  ) {
+    throw new Error('New event calendar ownership is inconsistent.');
+  }
   db.run(
     `INSERT INTO event_records (
       id, scope_id, group_id, group_wid, profile_id, profile_revision, profile_label, origin,
-      event_status, group_lifecycle_status, calendar_status, actor_identity_id, actor_wid, actor_label,
+      event_status, group_lifecycle_status, calendar_status, calendar_id, calendar_ownership_status,
+      actor_identity_id, actor_wid, actor_label,
       announcement_group_wid, poll_wa_msg_id, poll_question, poll_options_json, response_classes_json,
       answers_json, event_location_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
@@ -768,7 +890,7 @@ export function insertEvent(
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
       provisioning_recovery_next_run_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -780,6 +902,8 @@ export function insertEvent(
     event.eventStatus,
     event.groupLifecycleStatus,
     event.calendarStatus,
+    calendarId,
+    calendarOwnershipStatus,
     actorIdentityId,
     event.actorWid,
     event.actorLabel,
@@ -2114,89 +2238,429 @@ export function markEventEditRepairPending(db: PluginDatabase, input: {
   ).changes === 1;
 }
 
-export function claimEventCalendarRepairLease(db: PluginDatabase, input: {
+export function markEventCalendarPublicationDirty(db: PluginDatabase, input: {
   scopeId: string;
   calendarId: string;
-  operationId: string;
-  now?: string | undefined;
-  leaseExpiresAt?: string | undefined;
-}): string | undefined {
-  const now = input.now ?? new Date().toISOString();
-  const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
-    new Date(now).getTime() + EVENT_CALENDAR_REPAIR_LEASE_MS
-  ).toISOString();
+  updatedAt?: string | undefined;
+}): number {
+  const scopeId = input.scopeId.trim();
+  const calendarId = input.calendarId.trim();
+  if (!scopeId || !calendarId) {
+    throw new Error('Calendar publication dirtiness requires a scope and calendar id.');
+  }
+  db.run(
+    `INSERT INTO event_calendar_publication_generations (
+       scope_id, calendar_id, requested_generation, local_generation,
+       completed_generation, lease_token, lease_generation, lease_expires_at,
+       failure_count, next_attempt_at, updated_at
+     ) VALUES (?, ?, 1, 0, 0, NULL, NULL, NULL, 0, NULL, ?)
+     ON CONFLICT(scope_id, calendar_id) DO UPDATE SET
+       requested_generation = event_calendar_publication_generations.requested_generation + 1,
+       failure_count = 0,
+       next_attempt_at = NULL,
+       updated_at = excluded.updated_at`,
+    scopeId,
+    calendarId,
+    input.updatedAt ?? new Date().toISOString()
+  );
+  const state = getEventCalendarPublicationGeneration(db, scopeId, calendarId);
+  if (!state) {
+    throw new Error(`Calendar publication generation was not created for ${scopeId}/${calendarId}.`);
+  }
+  return state.requestedGeneration;
+}
+
+export function getEventCalendarPublicationGeneration(
+  db: PluginDatabase,
+  scopeId: string,
+  calendarId: string
+): StoredEventCalendarPublicationGeneration | undefined {
+  const row = db.get<EventCalendarPublicationGenerationRow>(
+    `SELECT * FROM event_calendar_publication_generations
+      WHERE scope_id = ? AND calendar_id = ?`,
+    scopeId,
+    calendarId
+  );
+  return row ? eventCalendarPublicationGenerationFromRow(row) : undefined;
+}
+
+export function listEventCalendarPublicationGenerations(
+  db: PluginDatabase
+): StoredEventCalendarPublicationGeneration[] {
+  return db.all<EventCalendarPublicationGenerationRow>(
+    `SELECT * FROM event_calendar_publication_generations
+      ORDER BY scope_id ASC, calendar_id ASC`
+  ).map(eventCalendarPublicationGenerationFromRow);
+}
+
+/**
+ * Reconciles the render/target configuration revision with the durable
+ * publication generation. This is intentionally DB-backed so configuration
+ * changes discovered after a crash cannot bypass publication.
+ */
+export function ensureEventCalendarPublicationConfiguration(db: PluginDatabase, input: {
+  scopeId: string;
+  calendarId: string;
+  fingerprint: string;
+  updatedAt?: string | undefined;
+}): { generation: number; changed: boolean } {
+  const scopeId = input.scopeId.trim();
+  const calendarId = input.calendarId.trim();
+  const fingerprint = input.fingerprint.trim().toLowerCase();
+  if (!scopeId || !calendarId || !/^[a-f0-9]{64}$/.test(fingerprint)) {
+    throw new Error('Calendar publication configuration requires a scope, calendar id, and SHA-256 fingerprint.');
+  }
+  const updatedAt = input.updatedAt ?? new Date().toISOString();
   return db.transaction(() => {
+    const state = getEventCalendarPublicationGeneration(db, scopeId, calendarId);
+    if (!state) {
+      db.run(
+        `INSERT INTO event_calendar_publication_generations (
+           scope_id, calendar_id, requested_generation, local_generation,
+           completed_generation, lease_token, lease_generation, lease_expires_at,
+           failure_count, next_attempt_at, requested_config_fingerprint, updated_at
+         ) VALUES (?, ?, 1, 0, 0, NULL, NULL, NULL, 0, NULL, ?, ?)`,
+        scopeId,
+        calendarId,
+        fingerprint,
+        updatedAt
+      );
+      return { generation: 1, changed: true };
+    }
+    if (state.requestedConfigFingerprint === fingerprint) {
+      return { generation: state.requestedGeneration, changed: false };
+    }
+    const attachToInitialDirtyGeneration =
+      state.requestedConfigFingerprint === undefined &&
+      state.completedGeneration === 0 &&
+      state.documentGeneration === undefined;
     db.run(
-      `INSERT INTO event_calendar_repair_leases (
-         scope_id, calendar_id, operation_id, lease_expires_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(scope_id, calendar_id) DO UPDATE SET
-         operation_id = excluded.operation_id,
-         lease_expires_at = excluded.lease_expires_at,
-         updated_at = excluded.updated_at
-       WHERE event_calendar_repair_leases.operation_id = excluded.operation_id
-          OR event_calendar_repair_leases.lease_expires_at <= excluded.updated_at`,
-      input.scopeId,
-      input.calendarId,
-      input.operationId,
-      leaseExpiresAt,
-      now
-    );
-    const lease = db.get<{ operation_id: string; lease_expires_at: string }>(
-      `SELECT operation_id, lease_expires_at
-         FROM event_calendar_repair_leases
+      `UPDATE event_calendar_publication_generations
+          SET requested_generation = requested_generation + ?,
+              requested_config_fingerprint = ?,
+              failure_count = 0,
+              next_attempt_at = NULL,
+              updated_at = ?
         WHERE scope_id = ? AND calendar_id = ?`,
-      input.scopeId,
-      input.calendarId
+      attachToInitialDirtyGeneration ? 0 : 1,
+      fingerprint,
+      updatedAt,
+      scopeId,
+      calendarId
     );
-    return lease?.operation_id === input.operationId ? lease.lease_expires_at : undefined;
+    const updated = getEventCalendarPublicationGeneration(db, scopeId, calendarId);
+    if (!updated) {
+      throw new Error(`Calendar publication configuration was not persisted for ${scopeId}/${calendarId}.`);
+    }
+    return { generation: updated.requestedGeneration, changed: true };
   });
 }
 
-export function releaseEventCalendarRepairLease(db: PluginDatabase, input: {
-  scopeId: string;
-  calendarId: string;
-  operationId: string;
-}): boolean {
-  return db.run(
-    `DELETE FROM event_calendar_repair_leases
-      WHERE scope_id = ? AND calendar_id = ? AND operation_id = ?`,
-    input.scopeId,
-    input.calendarId,
-    input.operationId
-  ).changes === 1;
+export function listDirtyEventCalendarPublications(
+  db: PluginDatabase,
+  input: { readyAt?: string | undefined } = {}
+): StoredEventCalendarPublicationGeneration[] {
+  const rows = input.readyAt
+    ? db.all<EventCalendarPublicationGenerationRow>(
+      `SELECT * FROM event_calendar_publication_generations
+        WHERE completed_generation < requested_generation
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY scope_id ASC, calendar_id ASC`,
+      input.readyAt
+    )
+    : db.all<EventCalendarPublicationGenerationRow>(
+      `SELECT * FROM event_calendar_publication_generations
+        WHERE completed_generation < requested_generation
+        ORDER BY scope_id ASC, calendar_id ASC`
+    );
+  return rows.map(eventCalendarPublicationGenerationFromRow);
 }
 
-export function renewEventCalendarRepairLease(db: PluginDatabase, input: {
+export function claimEventCalendarPublication(db: PluginDatabase, input: {
   scopeId: string;
   calendarId: string;
-  operationId: string;
+  leaseToken: string;
+  expectedConfigFingerprint?: string | undefined;
+  now?: string | undefined;
+  leaseExpiresAt?: string | undefined;
+}): EventCalendarPublicationClaimResult {
+  const now = input.now ?? new Date().toISOString();
+  const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
+    new Date(now).getTime() + EVENT_CALENDAR_PUBLICATION_LEASE_MS
+  ).toISOString();
+  return db.transaction(() => {
+    const state = getEventCalendarPublicationGeneration(db, input.scopeId, input.calendarId);
+    if (!state) {
+      throw new Error(`Calendar publication generation is missing for ${input.scopeId}/${input.calendarId}.`);
+    }
+    if (state.completedGeneration >= state.requestedGeneration) {
+      return { status: 'clean', state };
+    }
+    const claimed = db.run(
+      `UPDATE event_calendar_publication_generations
+          SET lease_token = ?,
+              lease_generation = requested_generation,
+              lease_expires_at = ?,
+              updated_at = ?
+        WHERE scope_id = ?
+          AND calendar_id = ?
+          AND completed_generation < requested_generation
+          AND (? IS NULL OR requested_config_fingerprint = ?)
+          AND (
+            lease_token IS NULL
+            OR lease_expires_at <= ?
+            OR lease_token = ?
+          )`,
+      input.leaseToken,
+      leaseExpiresAt,
+      now,
+      input.scopeId,
+      input.calendarId,
+      input.expectedConfigFingerprint ?? null,
+      input.expectedConfigFingerprint ?? null,
+      now,
+      input.leaseToken
+    );
+    const current = getEventCalendarPublicationGeneration(db, input.scopeId, input.calendarId);
+    if (
+      claimed.changes === 1 &&
+      current?.leaseToken === input.leaseToken &&
+      current.leaseGeneration === current.requestedGeneration &&
+      current.leaseExpiresAt
+    ) {
+      return {
+        status: 'claimed',
+        claim: {
+          scopeId: current.scopeId,
+          calendarId: current.calendarId,
+          generation: current.requestedGeneration,
+          leaseToken: input.leaseToken,
+          leaseExpiresAt: current.leaseExpiresAt
+        }
+      };
+    }
+    if (
+      input.expectedConfigFingerprint !== undefined &&
+      current?.requestedConfigFingerprint !== input.expectedConfigFingerprint
+    ) {
+      if (!current) {
+        throw new Error(`Calendar publication generation disappeared for ${input.scopeId}/${input.calendarId}.`);
+      }
+      return { status: 'configuration_changed', state: current };
+    }
+    if (!current?.leaseExpiresAt) {
+      throw new Error(`Calendar publication lease state is inconsistent for ${input.scopeId}/${input.calendarId}.`);
+    }
+    return { status: 'busy', retryAt: current.leaseExpiresAt };
+  });
+}
+
+export function renewEventCalendarPublicationClaim(db: PluginDatabase, input: {
+  claim: EventCalendarPublicationClaim;
   leaseExpiresAt: string;
   updatedAt?: string | undefined;
 }): boolean {
   return db.run(
-    `UPDATE event_calendar_repair_leases
+    `UPDATE event_calendar_publication_generations
         SET lease_expires_at = ?, updated_at = ?
-      WHERE scope_id = ? AND calendar_id = ? AND operation_id = ?`,
+      WHERE scope_id = ?
+        AND calendar_id = ?
+        AND lease_token = ?
+        AND lease_generation = ?
+        AND requested_generation = ?`,
     input.leaseExpiresAt,
     input.updatedAt ?? new Date().toISOString(),
-    input.scopeId,
-    input.calendarId,
-    input.operationId
+    input.claim.scopeId,
+    input.claim.calendarId,
+    input.claim.leaseToken,
+    input.claim.generation,
+    input.claim.generation
   ).changes === 1;
 }
 
-export function eventCalendarRepairLeaseExpiry(
+/**
+ * Freezes the exact rendered document for a claimed generation. Retries must
+ * reuse this snapshot so an equal generation can never carry different bytes.
+ */
+export function storeEventCalendarPublicationDocument(db: PluginDatabase, input: {
+  claim: EventCalendarPublicationClaim;
+  configFingerprint: string;
+  calendarJson: string;
+  body: string;
+  generatedAt: string;
+  eventCount: number;
+}): boolean {
+  if (!Number.isInteger(input.eventCount) || input.eventCount < 0) {
+    throw new Error('Calendar publication document event count must be a non-negative integer.');
+  }
+  const sha256 = createHash('sha256').update(input.body).digest('hex');
+  return db.run(
+    `UPDATE event_calendar_publication_generations
+        SET document_generation = ?,
+            document_body = ?,
+            document_sha256 = ?,
+            document_config_fingerprint = ?,
+            document_calendar_json = ?,
+            document_generated_at = ?,
+            document_event_count = ?,
+            updated_at = ?
+      WHERE scope_id = ?
+        AND calendar_id = ?
+        AND lease_token = ?
+        AND lease_generation = ?
+        AND requested_generation = ?
+        AND requested_config_fingerprint = ?`,
+    input.claim.generation,
+    input.body,
+    sha256,
+    input.configFingerprint,
+    input.calendarJson,
+    input.generatedAt,
+    input.eventCount,
+    new Date().toISOString(),
+    input.claim.scopeId,
+    input.claim.calendarId,
+    input.claim.leaseToken,
+    input.claim.generation,
+    input.claim.generation,
+    input.configFingerprint
+  ).changes === 1;
+}
+
+export function commitEventCalendarLocalGeneration(
   db: PluginDatabase,
-  scopeId: string,
-  calendarId: string
-): string | undefined {
-  return db.get<{ lease_expires_at: string }>(
-    `SELECT lease_expires_at FROM event_calendar_repair_leases
-      WHERE scope_id = ? AND calendar_id = ?`,
-    scopeId,
-    calendarId
-  )?.lease_expires_at;
+  claim: EventCalendarPublicationClaim,
+  commit: () => void
+): boolean {
+  return db.transaction(() => {
+    if (!eventCalendarPublicationClaimIsCurrent(db, claim)) {
+      return false;
+    }
+    commit();
+    return db.run(
+      `UPDATE event_calendar_publication_generations
+          SET local_generation = ?, updated_at = ?
+        WHERE scope_id = ?
+          AND calendar_id = ?
+          AND lease_token = ?
+          AND lease_generation = ?
+          AND requested_generation = ?`,
+      claim.generation,
+      new Date().toISOString(),
+      claim.scopeId,
+      claim.calendarId,
+      claim.leaseToken,
+      claim.generation,
+      claim.generation
+    ).changes === 1;
+  });
+}
+
+export function finishEventCalendarPublicationAttempt(db: PluginDatabase, input: {
+  claim: EventCalendarPublicationClaim;
+  generatedAt: string;
+  generatedEventCount: number;
+  publication?: CalendarPublicationOutcome | undefined;
+  completed: boolean;
+}): boolean {
+  return db.transaction(() => {
+    if (!eventCalendarPublicationClaimIsCurrent(db, input.claim)) {
+      return false;
+    }
+    const state = getEventCalendarPublicationGeneration(
+      db,
+      input.claim.scopeId,
+      input.claim.calendarId
+    );
+    if (!state) {
+      return false;
+    }
+    const now = new Date();
+    const nextFailureCount = input.completed ? 0 : state.failureCount + 1;
+    const retryDelay = EVENT_CALENDAR_PUBLICATION_RETRY_DELAYS_MS[
+      Math.min(nextFailureCount - 1, EVENT_CALENDAR_PUBLICATION_RETRY_DELAYS_MS.length - 1)
+    ];
+    const nextAttemptAt = input.completed || retryDelay === undefined
+      ? null
+      : new Date(now.getTime() + retryDelay).toISOString();
+    recordCalendarPublicationStatus(db, {
+      scopeId: input.claim.scopeId,
+      calendarId: input.claim.calendarId,
+      generation: input.claim.generation,
+      generatedAt: input.generatedAt,
+      generatedEventCount: input.generatedEventCount,
+      ...(input.publication ? { publication: input.publication } : {})
+    });
+    const result = db.run(
+      `UPDATE event_calendar_publication_generations
+          SET completed_generation = CASE
+                WHEN ? = 1 THEN ?
+                ELSE completed_generation
+              END,
+              lease_token = NULL,
+              lease_generation = NULL,
+              lease_expires_at = NULL,
+              failure_count = ?,
+              next_attempt_at = ?,
+              completed_config_fingerprint = CASE
+                WHEN ? = 1 THEN document_config_fingerprint
+                ELSE completed_config_fingerprint
+              END,
+              updated_at = ?
+        WHERE scope_id = ?
+          AND calendar_id = ?
+          AND lease_token = ?
+          AND lease_generation = ?
+          AND requested_generation = ?`,
+      input.completed ? 1 : 0,
+      input.claim.generation,
+      nextFailureCount,
+      nextAttemptAt,
+      input.completed ? 1 : 0,
+      now.toISOString(),
+      input.claim.scopeId,
+      input.claim.calendarId,
+      input.claim.leaseToken,
+      input.claim.generation,
+      input.claim.generation
+    );
+    return result.changes === 1;
+  });
+}
+
+export function releaseEventCalendarPublicationClaim(
+  db: PluginDatabase,
+  claim: EventCalendarPublicationClaim
+): boolean {
+  return db.run(
+    `UPDATE event_calendar_publication_generations
+        SET lease_token = NULL,
+            lease_generation = NULL,
+            lease_expires_at = NULL,
+            updated_at = ?
+      WHERE scope_id = ?
+        AND calendar_id = ?
+        AND lease_token = ?
+        AND lease_generation = ?`,
+    new Date().toISOString(),
+    claim.scopeId,
+    claim.calendarId,
+    claim.leaseToken,
+    claim.generation
+  ).changes === 1;
+}
+
+export function eventCalendarPublicationClaimIsCurrent(
+  db: PluginDatabase,
+  claim: EventCalendarPublicationClaim
+): boolean {
+  const state = getEventCalendarPublicationGeneration(db, claim.scopeId, claim.calendarId);
+  return Boolean(
+    state &&
+    state.leaseToken === claim.leaseToken &&
+    state.leaseGeneration === claim.generation &&
+    state.requestedGeneration === claim.generation
+  );
 }
 
 export function listEventAnnouncementMessages(db: PluginDatabase, eventId: string, input: {
@@ -2958,6 +3422,7 @@ function eventRecordVersionMatches(
 export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
   scopeId: string;
   calendarId: string;
+  generation: number;
   generatedAt: string;
   generatedEventCount: number;
   publication?: CalendarPublicationOutcome | undefined;
@@ -2969,12 +3434,13 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
   const lastError = publication && !publication.ok ? publication.error || 'Calendar publication failed.' : null;
   db.run(
     `INSERT INTO event_calendar_publication_status (
-       scope_id, calendar_id, generated_at, generated_event_count,
+       scope_id, calendar_id, generation, generated_at, generated_event_count,
        publication_enabled, attempted, ok, endpoint_url, feed_id, label,
        subscription_url, calendar_url, target_updated_at, last_success_at,
        last_error_at, last_error, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(scope_id, calendar_id) DO UPDATE SET
+       generation = excluded.generation,
        generated_at = excluded.generated_at,
        generated_event_count = excluded.generated_event_count,
        publication_enabled = excluded.publication_enabled,
@@ -2983,11 +3449,28 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
        endpoint_url = excluded.endpoint_url,
        feed_id = excluded.feed_id,
        label = excluded.label,
-       subscription_url = COALESCE(excluded.subscription_url, event_calendar_publication_status.subscription_url),
-       calendar_url = COALESCE(excluded.calendar_url, event_calendar_publication_status.calendar_url),
-       target_updated_at = COALESCE(excluded.target_updated_at, event_calendar_publication_status.target_updated_at),
+       subscription_url = CASE
+         WHEN excluded.endpoint_url IS event_calendar_publication_status.endpoint_url
+          AND excluded.feed_id IS event_calendar_publication_status.feed_id
+           THEN COALESCE(excluded.subscription_url, event_calendar_publication_status.subscription_url)
+         ELSE excluded.subscription_url
+       END,
+       calendar_url = CASE
+         WHEN excluded.endpoint_url IS event_calendar_publication_status.endpoint_url
+          AND excluded.feed_id IS event_calendar_publication_status.feed_id
+           THEN COALESCE(excluded.calendar_url, event_calendar_publication_status.calendar_url)
+         ELSE excluded.calendar_url
+       END,
+       target_updated_at = CASE
+         WHEN excluded.endpoint_url IS event_calendar_publication_status.endpoint_url
+          AND excluded.feed_id IS event_calendar_publication_status.feed_id
+           THEN COALESCE(excluded.target_updated_at, event_calendar_publication_status.target_updated_at)
+         ELSE excluded.target_updated_at
+       END,
        last_success_at = CASE
          WHEN excluded.last_success_at IS NOT NULL THEN excluded.last_success_at
+         WHEN excluded.endpoint_url IS NOT event_calendar_publication_status.endpoint_url
+           OR excluded.feed_id IS NOT event_calendar_publication_status.feed_id THEN NULL
          ELSE event_calendar_publication_status.last_success_at
        END,
        last_error_at = CASE
@@ -3000,9 +3483,11 @@ export function recordCalendarPublicationStatus(db: PluginDatabase, input: {
          WHEN excluded.ok = 1 THEN NULL
          ELSE event_calendar_publication_status.last_error
        END,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at
+     WHERE excluded.generation >= event_calendar_publication_status.generation`,
     input.scopeId,
     input.calendarId,
+    input.generation,
     input.generatedAt,
     input.generatedEventCount,
     publication?.enabled ? 1 : 0,
@@ -3034,22 +3519,206 @@ export function getCalendarPublicationStatus(
   return row ? calendarPublicationStatusFromRow(row) : undefined;
 }
 
-export function listCalendarEvents(db: PluginDatabase, scopeId: string, profileId?: string | undefined): StoredEventRecord[] {
-  const rows = profileId
-    ? db.all<EventRow>(
-      `SELECT * FROM event_records
-        WHERE scope_id = ? AND profile_id = ? AND calendar_status IN ('included', 'cancelled')
-        ORDER BY starts_at ASC, id ASC`,
-      scopeId,
-      profileId
-    )
-    : db.all<EventRow>(
-      `SELECT * FROM event_records
-        WHERE scope_id = ? AND calendar_status IN ('included', 'cancelled')
-        ORDER BY starts_at ASC, id ASC`,
+export function listCalendarEvents(
+  db: PluginDatabase,
+  scopeId: string,
+  calendarId: string
+): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE scope_id = ?
+        AND calendar_id = ?
+        AND calendar_ownership_status = 'assigned'
+        AND calendar_status IN ('included', 'cancelled')
+      ORDER BY starts_at ASC, id ASC`,
+    scopeId,
+    calendarId
+  ).map(eventFromRow);
+}
+
+export function listUnassignedEventCalendarOwnership(
+  db: PluginDatabase,
+  scopeId?: string | undefined
+): UnassignedEventCalendarOwnership[] {
+  const rows = scopeId
+    ? db.all<{
+      id: string;
+      scope_id: string;
+      profile_id: string;
+      actor_identity_id: string;
+    }>(
+      `SELECT id, scope_id, profile_id, actor_identity_id
+         FROM event_records
+        WHERE scope_id = ? AND calendar_ownership_status = 'unresolved'
+        ORDER BY profile_id ASC, id ASC`,
       scopeId
+    )
+    : db.all<{
+    id: string;
+    scope_id: string;
+    profile_id: string;
+    actor_identity_id: string;
+  }>(
+    `SELECT id, scope_id, profile_id, actor_identity_id
+       FROM event_records
+      WHERE calendar_ownership_status = 'unresolved'
+      ORDER BY scope_id ASC, profile_id ASC, id ASC`
+  );
+  return rows.map((row) => ({
+    eventId: row.id,
+    scopeId: row.scope_id,
+    profileId: row.profile_id,
+    actorIdentityId: row.actor_identity_id
+  }));
+}
+
+export function assertScopeEventCalendarOwnershipResolved(
+  db: PluginDatabase,
+  scopeId: string
+): void {
+  const unresolved = listUnassignedEventCalendarOwnership(db, scopeId);
+  if (unresolved.length > 0) {
+    throw new Error(
+      `Calendar publication for scope ${scopeId} is blocked until authoritative ownership is assigned for events: ${unresolved.map((event) => event.eventId).join(', ')}.`
     );
-  return rows.map(eventFromRow);
+  }
+}
+
+/**
+ * Persists a migration decision exactly once. Runtime calendar rendering never
+ * infers ownership from profile configuration.
+ */
+export function assignUnassignedEventCalendarOwnership(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  profileId: string;
+  calendarId: string | null;
+  source: string;
+}): boolean {
+  const calendarId = input.calendarId?.trim() || null;
+  const calendarOwnershipStatus: EventCalendarOwnershipStatus = calendarId ? 'assigned' : 'none';
+  const source = input.source.trim();
+  if (!source) {
+    throw new Error('Calendar ownership assignment source is required.');
+  }
+  return db.transaction(() => {
+    return assignUnassignedEventCalendarOwnershipInTransaction(db, {
+      ...input,
+      calendarId,
+      calendarOwnershipStatus,
+      source
+    });
+  });
+}
+
+export function assignUnassignedEventCalendarOwnershipBatch(db: PluginDatabase, input: {
+  assignments: Array<{
+    eventId: string;
+    scopeId: string;
+    profileId: string;
+    calendarId: string | null;
+  }>;
+  source: string;
+}): { assigned: string[]; alreadyAssigned: string[] } {
+  const source = input.source.trim();
+  if (!source) {
+    throw new Error('Calendar ownership assignment source is required.');
+  }
+  const duplicateIds = input.assignments
+    .map((assignment) => assignment.eventId)
+    .filter((eventId, index, values) => values.indexOf(eventId) !== index);
+  if (duplicateIds.length > 0) {
+    throw new Error(`Duplicate event calendar ownership assignments: ${[...new Set(duplicateIds)].join(', ')}.`);
+  }
+  return db.transaction(() => {
+    const assigned: string[] = [];
+    const alreadyAssigned: string[] = [];
+    for (const assignment of input.assignments) {
+      const event = getEvent(db, assignment.eventId);
+      if (
+        !event ||
+        event.scopeId !== assignment.scopeId ||
+        event.profileId !== assignment.profileId
+      ) {
+        throw new Error(`Event calendar ownership preflight failed for ${assignment.eventId}.`);
+      }
+      const requestedCalendarId = assignment.calendarId?.trim() || null;
+      if (event.calendarOwnershipStatus === 'unresolved') {
+        const changed = assignUnassignedEventCalendarOwnershipInTransaction(db, {
+          ...assignment,
+          calendarId: requestedCalendarId,
+          calendarOwnershipStatus: requestedCalendarId ? 'assigned' : 'none',
+          source
+        });
+        if (!changed) {
+          throw new Error(`Event calendar ownership changed during assignment for ${assignment.eventId}.`);
+        }
+        assigned.push(assignment.eventId);
+        continue;
+      }
+
+      const currentCalendarId = resolvedEventCalendarId(event) ?? null;
+      const matchingAudit = db.get<{ id: string; metadata_json: string }>(
+        `SELECT id, metadata_json
+           FROM event_logs
+          WHERE event_id = ?
+            AND action = 'events.calendar_ownership.assigned'
+            AND json_extract(metadata_json, '$.source') = ?
+            AND json_extract(metadata_json, '$.calendarId') IS ?
+          LIMIT 1`,
+        assignment.eventId,
+        source,
+        requestedCalendarId
+      );
+      if (
+        currentCalendarId !== requestedCalendarId ||
+        !matchingAudit
+      ) {
+        throw new Error(`Event calendar ownership is already resolved differently for ${assignment.eventId}.`);
+      }
+      alreadyAssigned.push(assignment.eventId);
+    }
+    return { assigned, alreadyAssigned };
+  });
+}
+
+function assignUnassignedEventCalendarOwnershipInTransaction(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  profileId: string;
+  calendarId: string | null;
+  calendarOwnershipStatus: Exclude<EventCalendarOwnershipStatus, 'unresolved'>;
+  source: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET calendar_id = ?,
+            calendar_ownership_status = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND profile_id = ?
+        AND calendar_ownership_status = 'unresolved'`,
+    input.calendarId,
+    input.calendarOwnershipStatus,
+    input.eventId,
+    input.scopeId,
+    input.profileId
+  );
+  if (result.changes !== 1) {
+    return false;
+  }
+  appendEventLog(db, {
+    eventId: input.eventId,
+    action: 'events.calendar_ownership.assigned',
+    metadata: {
+      scopeId: input.scopeId,
+      profileId: input.profileId,
+      calendarId: input.calendarId,
+      calendarOwnershipStatus: input.calendarOwnershipStatus,
+      source: input.source
+    }
+  });
+  return true;
 }
 
 export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEventRecord[] {
@@ -3075,6 +3744,8 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     eventStatus: row.event_status,
     groupLifecycleStatus: row.group_lifecycle_status,
     calendarStatus: row.calendar_status,
+    calendarId: row.calendar_id?.trim() || null,
+    calendarOwnershipStatus: row.calendar_ownership_status,
     ...(row.actor_identity_id ? { actorIdentityId: row.actor_identity_id } : {}),
     actorWid: row.actor_wid,
     actorLabel: row.actor_label,
@@ -3281,6 +3952,7 @@ function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): St
   return {
     scopeId: row.scope_id,
     calendarId: row.calendar_id,
+    generation: Number(row.generation),
     generatedAt: row.generated_at,
     generatedEventCount: Number(row.generated_event_count),
     publicationEnabled: row.publication_enabled === 1,
@@ -3295,6 +3967,45 @@ function calendarPublicationStatusFromRow(row: CalendarPublicationStatusRow): St
     ...(row.last_success_at ? { lastSuccessAt: row.last_success_at } : {}),
     ...(row.last_error_at ? { lastErrorAt: row.last_error_at } : {}),
     ...(row.last_error ? { lastError: row.last_error } : {}),
+    updatedAt: row.updated_at
+  };
+}
+
+function eventCalendarPublicationGenerationFromRow(
+  row: EventCalendarPublicationGenerationRow
+): StoredEventCalendarPublicationGeneration {
+  return {
+    scopeId: row.scope_id,
+    calendarId: row.calendar_id,
+    requestedGeneration: Number(row.requested_generation),
+    localGeneration: Number(row.local_generation),
+    completedGeneration: Number(row.completed_generation),
+    ...(row.lease_token ? { leaseToken: row.lease_token } : {}),
+    ...(row.lease_generation !== null ? { leaseGeneration: Number(row.lease_generation) } : {}),
+    ...(row.lease_expires_at ? { leaseExpiresAt: row.lease_expires_at } : {}),
+    failureCount: Number(row.failure_count),
+    ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
+    ...(row.requested_config_fingerprint
+      ? { requestedConfigFingerprint: row.requested_config_fingerprint }
+      : {}),
+    ...(row.document_generation !== null
+      ? { documentGeneration: Number(row.document_generation) }
+      : {}),
+    ...(row.document_body !== null ? { documentBody: row.document_body } : {}),
+    ...(row.document_sha256 ? { documentSha256: row.document_sha256 } : {}),
+    ...(row.document_config_fingerprint
+      ? { documentConfigFingerprint: row.document_config_fingerprint }
+      : {}),
+    ...(row.document_calendar_json
+      ? { documentCalendarJson: row.document_calendar_json }
+      : {}),
+    ...(row.document_generated_at ? { documentGeneratedAt: row.document_generated_at } : {}),
+    ...(row.document_event_count !== null
+      ? { documentEventCount: Number(row.document_event_count) }
+      : {}),
+    ...(row.completed_config_fingerprint
+      ? { completedConfigFingerprint: row.completed_config_fingerprint }
+      : {}),
     updatedAt: row.updated_at
   };
 }

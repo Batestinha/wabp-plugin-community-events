@@ -4,7 +4,7 @@ import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runti
 import type { CreatedGroupParticipantResult, OutboundSendResult } from '../../../platform/transport/transportTypes';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import { voterWidsForResponseBehavior } from './attendance';
-import { calendarResourceForProfile, parseEventsConfig, type EventProfile } from './config';
+import { parseEventsConfig, type EventProfile } from './config';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { resumeEventCommunitySubgroup } from './subgroups';
@@ -23,10 +23,10 @@ import {
   getLiveEventBySubgroup,
   getEvent,
   getUnplannedEventFinalization,
-  listCalendarEvents,
   listCreatedGroupParticipants,
   listVotes,
   markEventProvisioningResumed,
+  resolvedEventCalendarId,
   saveCreatedGroupParticipants,
   type StoredEventRecord,
   type StoredUnplannedEventFinalization
@@ -145,33 +145,33 @@ export async function finalizeUnplannedEventLifecycle(input: {
     throw new Error(`Unplanned event ${event.id} cannot finalize without its announcement group.`);
   }
   const failures: string[] = [];
-
   try {
-    const calendar = calendarResourceForProfile(input.config, input.profile);
-    const calendarEvents = listCalendarEvents(db, event.scopeId);
-    const publication = await writePublishAndRecordScopeCalendar({
-      appConfig: input.runtime.config,
-      db,
-      config: input.config,
-      scopeId: event.scopeId,
-      calendarId: input.profile.calendar.calendarId,
-      events: calendarEvents
-    });
-    await appendFinalizationJsonLog(input.context, {
-      action: 'calendar.exported',
-      scopeId: event.scopeId,
-      eventId: event.id,
-      actorWid: event.actorWid,
-      profileId: event.profileId,
-      subgroupChatId,
-      metadata: {
-        calendarEnabled: calendar?.enabled === true,
-        calendarId: input.profile.calendar.calendarId,
-        ...(publication ? { publication } : {})
+    const calendarId = resolvedEventCalendarId(event);
+    if (calendarId) {
+      const calendar = input.config.calendars.find((candidate) => candidate.id === calendarId);
+      const publication = await writePublishAndRecordScopeCalendar({
+        appConfig: input.runtime.config,
+        db,
+        config: input.config,
+        scopeId: event.scopeId,
+        calendarId
+      });
+      await appendFinalizationJsonLog(input.context, {
+        action: 'calendar.exported',
+        scopeId: event.scopeId,
+        eventId: event.id,
+        actorWid: event.actorWid,
+        profileId: event.profileId,
+        subgroupChatId,
+        metadata: {
+          calendarEnabled: calendar?.enabled === true,
+          calendarId,
+          ...(publication ? { publication } : {})
+        }
+      });
+      if (publication && !publication.ok) {
+        failures.push(`calendar: ${publication.error || 'publication failed'}`);
       }
-    });
-    if (publication && !publication.ok) {
-      failures.push(`calendar: ${publication.error || 'publication failed'}`);
     }
   } catch (error) {
     if (error instanceof UnplannedEventFinalizationSupersededError) {
@@ -484,13 +484,16 @@ async function repairSupersededUnplannedCalendar(input: {
   if (!currentBeforeRepair || currentBeforeRepair.scopeId !== input.event.scopeId) {
     return;
   }
+  const calendarId = resolvedEventCalendarId(currentBeforeRepair);
+  if (!calendarId) {
+    return;
+  }
   const publication = await writePublishAndRecordScopeCalendar({
     appConfig: input.runtime.config,
     db,
     config: input.config,
     scopeId: input.event.scopeId,
-    calendarId: input.profile.calendar.calendarId,
-    events: listCalendarEvents(db, input.event.scopeId)
+    calendarId
   });
   if (publication && !publication.ok) {
     throw new Error(publication.error || 'calendar publication failed');

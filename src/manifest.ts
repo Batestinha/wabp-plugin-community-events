@@ -39,7 +39,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.8.1',
+  version: '0.8.3',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -216,7 +216,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
   databases: eventsDatabases,
-  dataVersion: '8',
+  dataVersion: '10',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

@@ -17,7 +17,10 @@ export const eventsPlugin: BotPlugin = {
     return registerEventsCancellations(context);
   },
   registerHooks(context) {
-    return createEventsHooks(context, { recoverJobs: false });
+    return createEventsHooks(context, {
+      recoverJobs: false,
+      recoverCalendarPublications: true
+    });
   },
   registerServices(context) {
     return registerEventAlbumSourceServices(context);

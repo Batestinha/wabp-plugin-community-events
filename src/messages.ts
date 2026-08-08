@@ -78,7 +78,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.lifecycle.group.none': 'Not started',
   'official.community-events.flow.profile': 'What type of event?',
   'official.community-events.flow.confirm': 'Create this event?\n\n{summary}',
-  'official.community-events.flow.confirmSummary': '{profile}\nWhen: {startsAt}\nManaged subgroup cleanup: {cleanupAt}',
+  'official.community-events.flow.confirmSummary': '{profile}\nWhen: {startsAt}',
   'official.community-events.flow.complete': 'Creating event.',
   'official.community-events.flow.yes': 'Yes',
   'official.community-events.flow.no': 'No',

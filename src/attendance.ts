@@ -67,6 +67,14 @@ export async function eventSubgroupAttendeeCoverage(
   attendeeWids: readonly string[],
   participantOutcomes: Readonly<Record<string, CreatedGroupParticipantResult>> = {}
 ): Promise<EventSubgroupAttendeeCoverage> {
+  const uniqueAttendeeWids = [...new Set(attendeeWids.map((wid) => wid.trim()).filter(Boolean))];
+  if (uniqueAttendeeWids.length === 0) {
+    return {
+      presentAttendeeWids: [],
+      pendingInviteWids: [],
+      missingAttendeeWids: []
+    };
+  }
   if (!context.getGroupParticipants) {
     throw new Error('Plugin runtime does not expose group participant reads.');
   }
@@ -115,7 +123,6 @@ export async function eventSubgroupAttendeeCoverage(
   const pendingInviteWids: string[] = [];
   const missingAttendeeWids: string[] = [];
   const seenAttendeeIdentityIds = new Set<string>();
-  const uniqueAttendeeWids = [...new Set(attendeeWids.map((wid) => wid.trim()).filter(Boolean))];
   for (const attendeeWid of uniqueAttendeeWids) {
     const attendeeIdentityId = await identityIdFor(attendeeWid);
     if (seenAttendeeIdentityIds.has(attendeeIdentityId)) {

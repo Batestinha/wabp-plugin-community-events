@@ -26,6 +26,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.pollPublished': 'Event poll published.',
   'official.community-events.unplannedPublished': 'Unplanned event group created.',
   'official.community-events.unplannedProvisioningPending': 'The event group “{title}” was created, but its setup has not finished yet. I will retry automatically and confirm when it is ready. Event ID: {eventId}.',
+  'official.community-events.unplannedProvisioningOperatorRequired': 'The event group “{title}” was created, but automatic setup stopped because its community link needs operator reconciliation. Event ID: {eventId}.',
   'official.community-events.unplannedProvisioningRecovered': 'The event group is ready and linked to the community: {title} ({eventId}).',
   'official.community-events.publishFailed': 'Could not publish the event poll: {reason}',
   'official.community-events.unplannedPublishFailed': 'Could not create the unplanned event group: {reason}',

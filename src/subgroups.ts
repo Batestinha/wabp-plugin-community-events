@@ -1,11 +1,13 @@
 import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
 import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import {
-  COMMUNITY_SUBGROUPS_CREATE_METHOD,
-  COMMUNITY_SUBGROUPS_RESUME_METHOD,
+  COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
+  COMMUNITY_SUBGROUPS_COMPLETE_METHOD,
+  COMMUNITY_SUBGROUPS_CONFIGURE_METHOD,
   COMMUNITY_SUBGROUPS_SERVICE_ID,
-  type CommunitySubgroupCreateOutput,
-  type CommunitySubgroupResumeOutput
+  type CommunitySubgroupCandidateOutput,
+  type CommunitySubgroupCompleteOutput,
+  type CommunitySubgroupConfigureOutput,
 } from '../community-subgroups/serviceApi';
 
 export interface EventSubgroupContext {
@@ -14,13 +16,12 @@ export interface EventSubgroupContext {
   ensureChatArchivePolicyForScope?(scopeId: string): Promise<unknown>;
 }
 
-export async function createEventCommunitySubgroup(input: {
+export async function createEventCommunitySubgroupCandidate(input: {
   context: EventSubgroupContext;
   scopeId: string;
   actorIdentityId: string;
   title: string;
-  participantWids: string[];
-}): Promise<CommunitySubgroupCreateOutput> {
+}): Promise<CommunitySubgroupCandidateOutput> {
   if (!input.context.services) {
     throw new Error('Plugin runtime does not expose plugin services.');
   }
@@ -29,22 +30,20 @@ export async function createEventCommunitySubgroup(input: {
   if (!parentCommunityWid) {
     throw new Error('No parent community is mapped for this scope.');
   }
-
-  return input.context.services.call<CommunitySubgroupCreateOutput>({
+  return input.context.services.call<CommunitySubgroupCandidateOutput>({
     serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
-    method: COMMUNITY_SUBGROUPS_CREATE_METHOD,
+    method: COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
     scopeId: input.scopeId,
     actorIdentityId: input.actorIdentityId,
     groupWid: parentCommunityWid,
     input: {
       title: input.title,
-      participantWids: input.participantWids,
       parentCommunityWid
     }
   });
 }
 
-export async function resumeEventCommunitySubgroup(input: {
+export async function completeEventCommunitySubgroup(input: {
   context: EventSubgroupContext;
   scopeId: string;
   actorIdentityId: string;
@@ -53,14 +52,14 @@ export async function resumeEventCommunitySubgroup(input: {
   participantWids: string[];
   participants: Record<string, CreatedGroupParticipantResult>;
   parentCommunityWid: string;
-}): Promise<CommunitySubgroupResumeOutput> {
+}): Promise<CommunitySubgroupCompleteOutput> {
   if (!input.context.services) {
     throw new Error('Plugin runtime does not expose plugin services.');
   }
   await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
-  return input.context.services.call<CommunitySubgroupResumeOutput>({
+  return input.context.services.call<CommunitySubgroupCompleteOutput>({
     serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
-    method: COMMUNITY_SUBGROUPS_RESUME_METHOD,
+    method: COMMUNITY_SUBGROUPS_COMPLETE_METHOD,
     scopeId: input.scopeId,
     actorIdentityId: input.actorIdentityId,
     groupWid: input.parentCommunityWid,
@@ -68,6 +67,34 @@ export async function resumeEventCommunitySubgroup(input: {
       chatId: input.subgroupChatId,
       title: input.subgroupTitle,
       participantWids: input.participantWids,
+      participants: input.participants,
+      parentCommunityWid: input.parentCommunityWid
+    }
+  });
+}
+
+export async function configureEventCommunitySubgroup(input: {
+  context: EventSubgroupContext;
+  scopeId: string;
+  actorIdentityId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  parentCommunityWid: string;
+}): Promise<CommunitySubgroupConfigureOutput> {
+  if (!input.context.services) {
+    throw new Error('Plugin runtime does not expose plugin services.');
+  }
+  await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
+  return input.context.services.call<CommunitySubgroupConfigureOutput>({
+    serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
+    method: COMMUNITY_SUBGROUPS_CONFIGURE_METHOD,
+    scopeId: input.scopeId,
+    actorIdentityId: input.actorIdentityId,
+    groupWid: input.parentCommunityWid,
+    input: {
+      chatId: input.subgroupChatId,
+      title: input.subgroupTitle,
       participants: input.participants,
       parentCommunityWid: input.parentCommunityWid
     }

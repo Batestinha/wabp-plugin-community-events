@@ -57,9 +57,14 @@ import {
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
-import { createEventCommunitySubgroup } from './subgroups';
+import {
+  completeEventCommunitySubgroup,
+  configureEventCommunitySubgroup,
+  createEventCommunitySubgroupCandidate
+} from './subgroups';
 import {
   attemptUnplannedEventFinalization,
+  eventCommunityLinkRecoveryRunAt,
   EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
   eventProvisioningRecoveryDedupeKey,
   eventProvisioningRecoveryRunAt
@@ -79,8 +84,11 @@ import {
 import {
   appendEventLog,
   checkpointClaimedEventProvisioningChild,
+  checkpointClaimedEventParticipantOutcomes,
+  advanceEventProvisioningRecovery,
   claimInitialEventPreCreateProvisioningAttempt,
   completeUnplannedEventProvisioning,
+  markClaimedEventReadyForCommunityLink,
   configuredEventCalendarOwnership,
   eventsDatabase,
   getEvent,
@@ -89,6 +97,7 @@ import {
   listCancellableEvents,
   listScopeEvents,
   haltClaimedEventPreCreateProvisioning,
+  haltClaimedKnownChildEventProvisioning,
   markClaimedEventPreCreateProvisioningMissed,
   newEventId,
   rearmClaimedEventPreCreateProvisioningAttempt,
@@ -2601,6 +2610,11 @@ async function publishConfirmedEvent(input: {
               title: result.subgroupTitle,
               eventId: result.eventId
             })
+          : result.status === 'operator_required'
+            ? input.t('official.community-events.unplannedProvisioningOperatorRequired', {
+                title: result.subgroupTitle,
+                eventId: result.eventId
+              })
           : input.t('official.community-events.unplannedPublished')
       );
       return;
@@ -2804,7 +2818,7 @@ async function eventProfileSnapshotIsCurrent(input: {
 type CreateUnplannedEventLifecycleResult =
   | { status: 'completed' }
   | {
-      status: 'recovery_scheduled';
+      status: 'recovery_scheduled' | 'operator_required';
       eventId: string;
       subgroupChatId?: string | undefined;
       subgroupTitle: string;
@@ -2877,7 +2891,7 @@ async function createUnplannedEventLifecycle(input: {
     event: intent,
     creatorParticipantWid
   });
-  if (result.status === 'recovery_scheduled') {
+  if (result.status !== 'completed') {
     return result;
   }
   const created = result.created;
@@ -2916,9 +2930,9 @@ async function createUnplannedEventLifecycle(input: {
 }
 
 type ProvisionUnplannedEventSubgroupResult =
-  | ({ status: 'completed' } & Awaited<ReturnType<typeof createEventCommunitySubgroup>>)
+  | ({ status: 'completed' } & Awaited<ReturnType<typeof completeEventCommunitySubgroup>>)
   | {
-      status: 'recovery_scheduled';
+      status: 'recovery_scheduled' | 'operator_required';
       eventId: string;
       subgroupChatId?: string | undefined;
       subgroupTitle: string;
@@ -2961,16 +2975,72 @@ async function provisionUnplannedEventSubgroup(input: {
     metadata: { generation, attempt, claimedAt: claimedAt.toISOString(), origin: 'unplanned' }
   });
 
-  let created: Awaited<ReturnType<typeof createEventCommunitySubgroup>>['created'] | undefined;
+  let created: Awaited<ReturnType<typeof createEventCommunitySubgroupCandidate>>['created'] | undefined;
   try {
-    const result = await createEventCommunitySubgroup({
+    const candidateResult = await createEventCommunitySubgroupCandidate({
       context: input.context,
       scopeId: input.event.scopeId,
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
-      title: input.event.groupTitle,
-      participantWids: [input.creatorParticipantWid]
+      title: input.event.groupTitle
     });
-    created = result.created;
+    created = candidateResult.created;
+    const boundAt = new Date().toISOString();
+    const bound = checkpointClaimedEventProvisioningChild(input.db, {
+      eventId: input.event.id,
+      scopeId: input.event.scopeId,
+      generation,
+      expectedAttempt: attempt,
+      nextAttempt: attempt,
+      subgroupChatId: created.chatId,
+      subgroupTitle: created.title,
+      participants: created.participants,
+      checkpointedAt: boundAt
+    });
+    if (!bound) {
+      throw new Error(
+        `Unplanned event ${input.event.id} rejected the exact child checkpoint ${created.chatId}.`
+      );
+    }
+    await configureEventCommunitySubgroup({
+      context: input.context,
+      scopeId: input.event.scopeId,
+      actorIdentityId: requireStoredEventActorIdentityId(input.event),
+      subgroupChatId: created.chatId,
+      subgroupTitle: created.title,
+      participants: created.participants,
+      parentCommunityWid: created.intendedParentCommunityJid
+    });
+    const preparedAt = new Date().toISOString();
+    const fenced = markClaimedEventReadyForCommunityLink(input.db, {
+      eventId: input.event.id,
+      scopeId: input.event.scopeId,
+      subgroupChatId: created.chatId,
+      subgroupTitle: created.title,
+      recoveryGeneration: generation,
+      recoveryAttempt: attempt,
+      closedAt: preparedAt,
+      preparedAt
+    });
+    if (!fenced) {
+      throw new Error(
+        `Unplanned event ${input.event.id} changed before its community-link fence was persisted.`
+      );
+    }
+    const result = await completeEventCommunitySubgroup({
+      context: input.context,
+      scopeId: input.event.scopeId,
+      actorIdentityId: requireStoredEventActorIdentityId(input.event),
+      subgroupChatId: created.chatId,
+      subgroupTitle: created.title,
+      participantWids: [input.creatorParticipantWid],
+      participants: created.participants,
+      parentCommunityWid: created.intendedParentCommunityJid
+    });
+    created = {
+      ...created,
+      title: result.created.title,
+      participants: result.created.participants
+    };
     const completedAt = new Date().toISOString();
     const completed = completeUnplannedEventProvisioning(input.db, {
       eventId: input.event.id,
@@ -2992,25 +3062,73 @@ async function provisionUnplannedEventSubgroup(input: {
   } catch (error) {
     const failedAt = new Date();
     const nextAttempt = attempt + 1;
-    const runAt = eventProvisioningRecoveryRunAt(nextAttempt, failedAt);
     const knownChild = isManagedCommunitySubgroupProvisioningError(error)
       ? error.created
       : created;
+    const recoveryDisposition = isManagedCommunitySubgroupProvisioningError(error)
+      ? error.recoveryDisposition
+      : undefined;
+    const retryableLinkDisposition = recoveryDisposition === 'verify_only' ||
+      recoveryDisposition === 'mutation_allowed';
+    const operatorRequired = Boolean(knownChild) && !retryableLinkDisposition;
+    const recoveryAttempt = operatorRequired ? attempt : nextAttempt;
+    const runAt = eventCommunityLinkRecoveryRunAt(
+      recoveryDisposition,
+      failedAt,
+      nextAttempt
+    );
     let checkpointed = false;
     if (knownChild) {
-      checkpointed = checkpointClaimedEventProvisioningChild(input.db, {
-        eventId: input.event.id,
-        scopeId: input.event.scopeId,
-        generation,
-        expectedAttempt: attempt,
-        nextAttempt,
-        nextRunAt: runAt.toISOString(),
-        subgroupChatId: knownChild.chatId,
-        subgroupTitle: knownChild.title,
-        participants: knownChild.participants,
-        checkpointedAt: failedAt.toISOString(),
-        reason: error instanceof Error ? error.message : String(error)
-      });
+      const latest = getEvent(input.db, input.event.id);
+      if (!latest?.subgroupChatId) {
+        checkpointed = checkpointClaimedEventProvisioningChild(input.db, {
+          eventId: input.event.id,
+          scopeId: input.event.scopeId,
+          generation,
+          expectedAttempt: attempt,
+          nextAttempt: recoveryAttempt,
+          ...(!operatorRequired ? { nextRunAt: runAt.toISOString() } : {}),
+          subgroupChatId: knownChild.chatId,
+          subgroupTitle: knownChild.title,
+          participants: knownChild.participants,
+          checkpointedAt: failedAt.toISOString(),
+          reason: error instanceof Error ? error.message : String(error),
+          ...(operatorRequired ? { haltedAt: failedAt.toISOString() } : {})
+        });
+      } else if (latest.subgroupChatId === knownChild.chatId) {
+        const outcomesCheckpointed = checkpointClaimedEventParticipantOutcomes(input.db, {
+          eventId: input.event.id,
+          scopeId: input.event.scopeId,
+          subgroupChatId: knownChild.chatId,
+          subgroupTitle: knownChild.title,
+          participants: knownChild.participants,
+          recoveryGeneration: generation,
+          recoveryAttempt: attempt,
+          checkpointedAt: failedAt.toISOString(),
+          reason: error instanceof Error ? error.message : String(error)
+        });
+        checkpointed = outcomesCheckpointed && (operatorRequired
+          ? haltClaimedKnownChildEventProvisioning(input.db, {
+              eventId: input.event.id,
+              scopeId: input.event.scopeId,
+              subgroupChatId: knownChild.chatId,
+              generation,
+              expectedAttempt: attempt,
+              reason: error instanceof Error ? error.message : String(error),
+              haltedAt: failedAt.toISOString()
+            })
+          : advanceEventProvisioningRecovery(input.db, {
+              eventId: input.event.id,
+              scopeId: input.event.scopeId,
+              subgroupChatId: knownChild.chatId,
+              generation,
+              expectedAttempt: attempt,
+              expectedNextRunAt: null,
+              nextAttempt,
+              nextRunAt: runAt.toISOString(),
+              updatedAt: failedAt.toISOString()
+            }));
+      }
     } else if (isManagedCommunitySubgroupPreCreateError(error)) {
       const retryBeforeCleanup = error.retryableWithoutCheckpoint && runAt.getTime() < cleanupAt.getTime();
       const retryAttemptsRemain = nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
@@ -3065,8 +3183,10 @@ async function provisionUnplannedEventSubgroup(input: {
       !checkpointed ||
       !failedEvent ||
       failedEvent.provisioningRecoveryGeneration !== generation ||
-      failedEvent.provisioningRecoveryAttempt !== nextAttempt ||
-      failedEvent.provisioningRecoveryNextRunAt !== runAt.toISOString() ||
+      failedEvent.provisioningRecoveryAttempt !== recoveryAttempt ||
+      failedEvent.provisioningRecoveryNextRunAt !== (
+        operatorRequired ? undefined : runAt.toISOString()
+      ) ||
       (knownChild && failedEvent.subgroupChatId !== knownChild.chatId)
     ) {
       throw new Error(
@@ -3085,12 +3205,35 @@ async function provisionUnplannedEventSubgroup(input: {
         } : {}),
         generation,
         failedAttempt: attempt,
-        recoveryAttempt: nextAttempt,
+        recoveryAttempt,
+        ...(recoveryDisposition
+          ? { recoveryDisposition }
+          : {}),
         ...(isManagedCommunitySubgroupProvisioningError(error) || isManagedCommunitySubgroupPreCreateError(error)
           ? { stage: error.stage }
           : {})
       }
     });
+    if (operatorRequired) {
+      appendEventLog(input.db, {
+        eventId: failedEvent.id,
+        action: 'events.provisioning.operator_required',
+        metadata: {
+          subgroupChatId: knownChild?.chatId,
+          generation,
+          attempt: recoveryAttempt,
+          stage: isManagedCommunitySubgroupProvisioningError(error) ? error.stage : undefined,
+          recoveryDisposition: 'operator_required',
+          origin: 'unplanned'
+        }
+      });
+      return {
+        status: 'operator_required',
+        eventId: failedEvent.id,
+        ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
+        subgroupTitle: knownChild?.title ?? failedEvent.groupTitle
+      };
+    }
     try {
       await input.runtime.enqueuePluginJob({
         jobName: EVENTS_JOBS.provisioningRecovery,
@@ -3120,6 +3263,7 @@ async function provisionUnplannedEventSubgroup(input: {
           ...(isManagedCommunitySubgroupProvisioningError(error) || isManagedCommunitySubgroupPreCreateError(error)
             ? { stage: error.stage }
             : {}),
+          ...(recoveryDisposition ? { recoveryDisposition } : {}),
           origin: 'unplanned'
         }
       });

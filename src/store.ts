@@ -1314,7 +1314,7 @@ export function markClaimedEventReadyForCommunityLink(db: PluginDatabase, input:
         AND provisioning_recovery_next_run_at IS NULL
         AND (
           (event_status = 'active' AND group_lifecycle_status = 'poll_open')
-          OR (event_status = 'failed' AND group_lifecycle_status IN ('none', 'poll_closed'))
+          OR (event_status = 'failed' AND group_lifecycle_status = 'none')
         )`,
     input.subgroupTitle,
     input.closedAt,

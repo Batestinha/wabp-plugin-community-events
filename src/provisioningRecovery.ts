@@ -1337,32 +1337,38 @@ export async function resumeEventProvisioning(
     input.participants
   );
   const resumedAt = (input.now ?? new Date()).toISOString();
-  await configureEventCommunitySubgroup({
-    context: input.context,
-    scopeId,
-    actorIdentityId: requireRecoveryActorIdentityId(event),
-    subgroupChatId,
-    subgroupTitle,
-    participants: participantOutcomes,
-    parentCommunityWid: parentCommunityChatId
-  });
-  const preparedAt = (input.now ?? new Date()).toISOString();
-  const fenced = markClaimedEventReadyForCommunityLink(db, {
-    eventId: event.id,
-    scopeId,
-    subgroupChatId,
-    subgroupTitle,
-    recoveryGeneration: recoveryCursor!.generation,
-    recoveryAttempt: recoveryCursor!.attempt,
-    closedAt: preparedAt,
-    preparedAt
-  });
-  if (!fenced) {
-    const changedEvent = getEvent(db, event.id) ?? event;
-    return rejected(
-      changedEvent,
-      `Event ${event.id} changed before its community-link fence was persisted.`
-    );
+  // poll_closed is the durable required-settings fence. Once it is persisted,
+  // link verification and mutation retries must remain link-only.
+  const configurationPending = event.groupLifecycleStatus === 'poll_open' ||
+    event.groupLifecycleStatus === 'none';
+  if (configurationPending) {
+    await configureEventCommunitySubgroup({
+      context: input.context,
+      scopeId,
+      actorIdentityId: requireRecoveryActorIdentityId(event),
+      subgroupChatId,
+      subgroupTitle,
+      participants: participantOutcomes,
+      parentCommunityWid: parentCommunityChatId
+    });
+    const preparedAt = (input.now ?? new Date()).toISOString();
+    const fenced = markClaimedEventReadyForCommunityLink(db, {
+      eventId: event.id,
+      scopeId,
+      subgroupChatId,
+      subgroupTitle,
+      recoveryGeneration: recoveryCursor!.generation,
+      recoveryAttempt: recoveryCursor!.attempt,
+      closedAt: preparedAt,
+      preparedAt
+    });
+    if (!fenced) {
+      const changedEvent = getEvent(db, event.id) ?? event;
+      return rejected(
+        changedEvent,
+        `Event ${event.id} changed before its community-link fence was persisted.`
+      );
+    }
   }
   try {
     const result = await completeEventCommunitySubgroup({

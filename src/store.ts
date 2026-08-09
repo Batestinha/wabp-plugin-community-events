@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ManagedCommunitySubgroupProvisioningStage } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
 import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
@@ -997,6 +996,9 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             updated_at = ?
       WHERE id = ?
         AND updated_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL
         AND (? = 0 OR (event_status = 'active' AND group_lifecycle_status <> 'poll_open'))
         AND NOT EXISTS (
           SELECT 1
@@ -1241,26 +1243,44 @@ export function listFailedProvisioningEvents(db: PluginDatabase): StoredEventRec
     `SELECT * FROM event_records
       WHERE event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND subgroup_chat_id IS NOT NULL
+        AND (
+          subgroup_chat_id IS NOT NULL
+          OR (
+            provisioning_recovery_generation IS NOT NULL
+            AND provisioning_recovery_attempt IS NOT NULL
+            AND provisioning_recovery_next_run_at IS NOT NULL
+          )
+        )
       ORDER BY updated_at ASC, id ASC`
   ).map(eventFromRow);
 }
 
 export function updateEventCloseAt(db: PluginDatabase, input: {
   eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
   closeAt: string;
   updatedAt: string;
-}): void {
-  db.run(
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET close_at = ?, updated_at = ?
       WHERE id = ?
+        AND scope_id = ?
         AND event_status = 'active'
-        AND group_lifecycle_status = 'poll_open'`,
+        AND group_lifecycle_status = 'poll_open'
+        AND subgroup_chat_id IS NULL
+        AND updated_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
     input.closeAt,
     input.updatedAt,
-    input.eventId
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
 export function markEventProvisioningResumed(db: PluginDatabase, input: {
@@ -1286,7 +1306,7 @@ export function markEventProvisioningResumed(db: PluginDatabase, input: {
         AND scope_id = ?
         AND event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+        AND subgroup_chat_id = ?`,
     input.subgroupChatId,
     input.subgroupTitle,
     input.resumedAt,
@@ -1314,7 +1334,7 @@ export function checkpointEventProvisioningCandidate(db: PluginDatabase, input: 
           AND scope_id = ?
           AND event_status = 'failed'
           AND group_lifecycle_status = 'none'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+          AND subgroup_chat_id = ?`,
       input.eventId,
       input.scopeId,
       input.subgroupChatId
@@ -1340,7 +1360,7 @@ export function checkpointEventProvisioningCandidate(db: PluginDatabase, input: 
           AND scope_id = ?
           AND event_status = 'failed'
           AND group_lifecycle_status = 'none'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+        AND subgroup_chat_id = ?`,
       input.subgroupChatId,
       input.subgroupTitle,
       input.reason ?? null,
@@ -1356,105 +1376,15 @@ export function checkpointEventProvisioningCandidate(db: PluginDatabase, input: 
   });
 }
 
-export interface UnplannedEventProvisioningProgress {
-  standaloneRegistered: boolean;
-  attendeesVerified: boolean;
-  communityLinkConfirmed: boolean;
-  linkedChildRegistered: boolean;
-}
-
-export function checkpointUnplannedEventProvisioningFailure(db: PluginDatabase, input: {
-  eventId: string;
-  scopeId: string;
-  subgroupChatId: string;
-  subgroupTitle: string;
-  participants: Record<string, CreatedGroupParticipantResult>;
-  parentCommunityWid: string;
-  stage: ManagedCommunitySubgroupProvisioningStage;
-  progress: UnplannedEventProvisioningProgress;
-  reason: string;
-  failedAt: string;
-  recoveryGeneration: string;
-  recoveryAttempt: number;
-  recoveryNextRunAt: string;
-}): boolean {
-  return db.transaction(() => {
-    const current = db.get<{ id: string }>(
-      `SELECT id
-         FROM event_records
-        WHERE id = ?
-          AND scope_id = ?
-          AND origin = 'unplanned'
-          AND event_status = 'failed'
-          AND group_lifecycle_status = 'none'
-          AND calendar_status = 'hidden'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
-      input.eventId,
-      input.scopeId,
-      input.subgroupChatId
-    );
-    if (!current) {
-      return false;
-    }
-
-    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.failedAt);
-    const result = db.run(
-      `UPDATE event_records
-          SET subgroup_chat_id = ?,
-              subgroup_title = ?,
-              error = ?,
-              provisioning_recovery_generation = ?,
-              provisioning_recovery_attempt = ?,
-              provisioning_recovery_next_run_at = ?,
-              updated_at = ?
-        WHERE id = ?
-          AND scope_id = ?
-          AND origin = 'unplanned'
-          AND event_status = 'failed'
-          AND group_lifecycle_status = 'none'
-          AND calendar_status = 'hidden'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
-      input.subgroupChatId,
-      input.subgroupTitle,
-      input.reason,
-      input.recoveryGeneration,
-      input.recoveryAttempt,
-      input.recoveryNextRunAt,
-      input.failedAt,
-      input.eventId,
-      input.scopeId,
-      input.subgroupChatId
-    );
-    if (result.changes !== 1) {
-      throw new Error(`Event ${input.eventId} changed while checkpointing unplanned subgroup provisioning.`);
-    }
-    appendEventLog(db, {
-      eventId: input.eventId,
-      action: 'events.unplanned.provisioning_failed',
-      metadata: {
-        reason: input.reason,
-        subgroupChatId: input.subgroupChatId,
-        subgroupTitle: input.subgroupTitle,
-        parentCommunityWid: input.parentCommunityWid,
-        stage: input.stage,
-        progress: input.progress,
-        participants: input.participants,
-        recoveryGeneration: input.recoveryGeneration,
-        recoveryAttempt: input.recoveryAttempt,
-        recoveryNextRunAt: input.recoveryNextRunAt
-      }
-    });
-    return true;
-  });
-}
-
 export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  recoveryGeneration: string;
+  recoveryAttempt: number;
+  recoveryNextRunAt: string | null;
   completedAt: string;
 }): boolean {
   return db.transaction(() => {
@@ -1467,10 +1397,18 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
           AND event_status = 'failed'
           AND group_lifecycle_status = 'none'
           AND calendar_status = 'hidden'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND ((? IS NULL AND provisioning_recovery_next_run_at IS NULL)
+            OR provisioning_recovery_next_run_at = ?)`,
       input.eventId,
       input.scopeId,
-      input.subgroupChatId
+      input.subgroupChatId,
+      input.recoveryGeneration,
+      input.recoveryAttempt,
+      input.recoveryNextRunAt,
+      input.recoveryNextRunAt
     );
     if (!current) {
       return false;
@@ -1497,14 +1435,22 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
           AND event_status = 'failed'
           AND group_lifecycle_status = 'none'
           AND calendar_status = 'hidden'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND ((? IS NULL AND provisioning_recovery_next_run_at IS NULL)
+            OR provisioning_recovery_next_run_at = ?)`,
       input.subgroupChatId,
       input.subgroupTitle,
       input.completedAt,
       input.completedAt,
       input.eventId,
       input.scopeId,
-      input.subgroupChatId
+      input.subgroupChatId,
+      input.recoveryGeneration,
+      input.recoveryAttempt,
+      input.recoveryNextRunAt,
+      input.recoveryNextRunAt
     );
     if (result.changes !== 1) {
       throw new Error(`Event ${input.eventId} changed while completing unplanned subgroup provisioning.`);
@@ -1621,20 +1567,71 @@ export function advanceUnplannedEventFinalization(db: PluginDatabase, input: {
 
 export function markEventClosed(db: PluginDatabase, input: {
   eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  expectedSubgroupChatId?: string | undefined;
+  expectedRecoveryGeneration?: string | undefined;
+  expectedRecoveryAttempt?: number | undefined;
   subgroupChatId?: string | undefined;
   subgroupTitle?: string | undefined;
   closedAt: string;
-}): void {
-  db.run(
+}): boolean {
+  if (
+    (input.expectedSubgroupChatId ?? null) !== (input.subgroupChatId ?? null)
+  ) {
+    return false;
+  }
+  const hasRecoveryClaim = input.expectedRecoveryGeneration !== undefined ||
+    input.expectedRecoveryAttempt !== undefined;
+  if (
+    hasRecoveryClaim &&
+    (!input.expectedRecoveryGeneration || input.expectedRecoveryAttempt === undefined)
+  ) {
+    return false;
+  }
+  const result = db.run(
     `UPDATE event_records
-        SET group_lifecycle_status = 'poll_closed', subgroup_chat_id = ?, subgroup_title = ?, closed_at = ?, updated_at = ?
-      WHERE id = ?`,
+        SET group_lifecycle_status = 'poll_closed',
+            subgroup_chat_id = ?,
+            subgroup_title = ?,
+            closed_at = ?,
+            error = NULL,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'active'
+        AND group_lifecycle_status = 'poll_open'
+        AND updated_at = ?
+        AND ((? IS NULL AND subgroup_chat_id IS NULL) OR subgroup_chat_id = ?)
+        AND (
+          (? IS NULL
+            AND provisioning_recovery_generation IS NULL
+            AND provisioning_recovery_attempt IS NULL
+            AND provisioning_recovery_next_run_at IS NULL)
+          OR
+          (? IS NOT NULL
+            AND provisioning_recovery_generation = ?
+            AND provisioning_recovery_attempt = ?
+            AND provisioning_recovery_next_run_at IS NULL)
+        )`,
     input.subgroupChatId ?? null,
     input.subgroupTitle ?? null,
     input.closedAt,
     input.closedAt,
-    input.eventId
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt,
+    input.expectedSubgroupChatId ?? null,
+    input.expectedSubgroupChatId ?? null,
+    input.expectedRecoveryGeneration ?? null,
+    input.expectedRecoveryGeneration ?? null,
+    input.expectedRecoveryGeneration ?? null,
+    input.expectedRecoveryAttempt ?? null
   );
+  return result.changes === 1;
 }
 
 export function markEventCleaned(db: PluginDatabase, input: {
@@ -1832,7 +1829,10 @@ export function markEventCancelled(db: PluginDatabase, input: {
       WHERE id = ?
         AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
-        AND updated_at = ?`,
+        AND updated_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
     input.calendarStatus ?? 'cancelled',
     input.cancelledAt,
     input.cancelledByWid,
@@ -2732,32 +2732,217 @@ export function markEventCleanupFailed(db: PluginDatabase, input: {
   return result.changes === 1;
 }
 
-export function markEventFailed(db: PluginDatabase, eventId: string, reason: string, failedAt: string): void {
-  db.run(
+export function markUnclaimedEventFailed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'none',
             calendar_status = 'hidden',
             error = ?,
             updated_at = ?
-      WHERE id = ?`,
-    reason,
-    failedAt,
-    eventId
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'active'
+        AND group_lifecycle_status = 'poll_open'
+        AND updated_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.reason,
+    input.failedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt
   );
+  return result.changes === 1;
 }
 
-export function markEventProvisioningFailed(db: PluginDatabase, input: {
+export function claimInitialEventPreCreateProvisioningAttempt(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
+  expectedUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  claimedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_generation = ?,
+            provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND subgroup_chat_id IS NULL
+        AND actor_identity_id IS NOT NULL
+        AND trim(actor_identity_id) <> ''
+        AND updated_at = ?
+        AND cleanup_at > ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL
+        AND (
+          (origin IN ('created', 'adopted_poll')
+            AND event_status = 'active'
+            AND group_lifecycle_status = 'poll_open'
+            AND poll_wa_msg_id IS NOT NULL)
+          OR
+          (origin = 'unplanned'
+            AND event_status = 'failed'
+            AND group_lifecycle_status = 'none'
+            AND calendar_status = 'hidden'
+            AND poll_wa_msg_id IS NULL)
+        )`,
+    input.generation,
+    input.attempt,
+    input.claimedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt,
+    input.claimedAt
+  );
+  return result.changes === 1;
+}
+
+export function markInterruptedPlannedEventPreCreateClaimFailed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  generation: string;
+  expectedAttempt: number;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'none',
+            calendar_status = 'hidden',
+            error = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND origin IN ('created', 'adopted_poll')
+        AND event_status = 'active'
+        AND group_lifecycle_status = 'poll_open'
+        AND poll_wa_msg_id IS NOT NULL
+        AND subgroup_chat_id IS NULL
+        AND updated_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.reason,
+    input.failedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
+}
+
+export function claimScheduledEventPreCreateProvisioningAttempt(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  attempt: number;
+  expectedNextRunAt: string;
+  claimedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_next_run_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND calendar_status = 'hidden'
+        AND subgroup_chat_id IS NULL
+        AND cleanup_at > ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at = ?`,
+    input.claimedAt,
+    input.eventId,
+    input.scopeId,
+    input.claimedAt,
+    input.generation,
+    input.attempt,
+    input.expectedNextRunAt
+  );
+  return result.changes === 1;
+}
+
+export function rearmClaimedEventPreCreateProvisioningAttempt(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  nextAttempt: number;
+  nextRunAt: string;
+  reason: string;
+  rearmedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'none',
+            calendar_status = 'hidden',
+            error = ?,
+            provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND subgroup_chat_id IS NULL
+        AND cleanup_at > ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at IS NULL
+        AND (
+          (origin IN ('created', 'adopted_poll')
+            AND event_status IN ('active', 'failed')
+            AND group_lifecycle_status IN ('poll_open', 'none')
+            AND poll_wa_msg_id IS NOT NULL)
+          OR
+          (origin = 'unplanned'
+            AND event_status = 'failed'
+            AND group_lifecycle_status = 'none'
+            AND poll_wa_msg_id IS NULL)
+        )`,
+    input.reason,
+    input.nextAttempt,
+    input.nextRunAt,
+    input.rearmedAt,
+    input.eventId,
+    input.scopeId,
+    input.nextRunAt,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
+}
+
+export function checkpointClaimedEventProvisioningChild(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  nextAttempt: number;
+  nextRunAt: string;
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
-  reason: string;
-  failedAt: string;
-  recoveryGeneration: string;
-  recoveryAttempt: number;
-  recoveryNextRunAt: string;
+  checkpointedAt: string;
+  reason?: string | undefined;
 }): boolean {
   return db.transaction(() => {
     const current = db.get<{ id: string }>(
@@ -2765,24 +2950,29 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
          FROM event_records
         WHERE id = ?
           AND scope_id = ?
-          AND event_status = 'active'
-          AND group_lifecycle_status = 'poll_open'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+          AND subgroup_chat_id IS NULL
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_next_run_at IS NULL
+          AND (
+            (origin IN ('created', 'adopted_poll')
+              AND event_status IN ('active', 'failed')
+              AND group_lifecycle_status IN ('poll_open', 'none'))
+            OR
+            (origin = 'unplanned'
+              AND event_status = 'failed'
+              AND group_lifecycle_status = 'none')
+          )`,
       input.eventId,
       input.scopeId,
-      input.subgroupChatId
+      input.generation,
+      input.expectedAttempt
     );
     if (!current) {
       return false;
     }
-
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(
-      db,
-      input.eventId,
-      input.participants,
-      input.failedAt
-    );
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.checkpointedAt);
     const result = db.run(
       `UPDATE event_records
           SET event_status = 'failed',
@@ -2791,31 +2981,207 @@ export function markEventProvisioningFailed(db: PluginDatabase, input: {
               subgroup_chat_id = ?,
               subgroup_title = ?,
               error = ?,
-              provisioning_recovery_generation = ?,
               provisioning_recovery_attempt = ?,
               provisioning_recovery_next_run_at = ?,
               updated_at = ?
         WHERE id = ?
           AND scope_id = ?
-          AND event_status = 'active'
-          AND group_lifecycle_status = 'poll_open'
-          AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)`,
+          AND subgroup_chat_id IS NULL
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_next_run_at IS NULL`,
       input.subgroupChatId,
       input.subgroupTitle,
-      input.reason,
-      input.recoveryGeneration,
-      input.recoveryAttempt,
-      input.recoveryNextRunAt,
-      input.failedAt,
+      input.reason ?? null,
+      input.nextAttempt,
+      input.nextRunAt,
+      input.checkpointedAt,
       input.eventId,
       input.scopeId,
-      input.subgroupChatId
+      input.generation,
+      input.expectedAttempt
     );
     if (result.changes !== 1) {
-      throw new Error(`Event ${input.eventId} changed while checkpointing subgroup provisioning failure.`);
+      throw new Error(`Event ${input.eventId} changed while binding its claimed subgroup.`);
     }
     return true;
   });
+}
+
+export function bindClaimedInitialPlannedEventProvisioningChild(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  boundAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin IN ('created', 'adopted_poll')
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND subgroup_chat_id IS NULL
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_next_run_at IS NULL`,
+      input.eventId,
+      input.scopeId,
+      input.generation,
+      input.expectedAttempt
+    );
+    if (!current) {
+      return false;
+    }
+    db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.boundAt);
+    const result = db.run(
+      `UPDATE event_records
+          SET subgroup_chat_id = ?,
+              subgroup_title = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND origin IN ('created', 'adopted_poll')
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND subgroup_chat_id IS NULL
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_next_run_at IS NULL`,
+      input.subgroupChatId,
+      input.subgroupTitle,
+      input.boundAt,
+      input.eventId,
+      input.scopeId,
+      input.generation,
+      input.expectedAttempt
+    );
+    if (result.changes !== 1) {
+      throw new Error(`Event ${input.eventId} changed while binding its initial planned subgroup.`);
+    }
+    return true;
+  });
+}
+
+export function haltClaimedEventPreCreateProvisioning(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  reason: string;
+  haltedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'none',
+            calendar_status = 'hidden',
+            error = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND subgroup_chat_id IS NULL
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at IS NULL
+        AND event_status IN ('active', 'failed')
+        AND group_lifecycle_status IN ('poll_open', 'none')`,
+    input.reason,
+    input.haltedAt,
+    input.eventId,
+    input.scopeId,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
+}
+
+export function markClaimedEventPreCreateProvisioningMissed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  expectedCleanupAt: string;
+  reason: string;
+  missedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'missed',
+            calendar_status = 'hidden',
+            error = ?,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND subgroup_chat_id IS NULL
+        AND cleanup_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at IS NULL
+        AND event_status IN ('active', 'failed')
+        AND group_lifecycle_status IN ('poll_open', 'none')`,
+    input.reason,
+    input.missedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedCleanupAt,
+    input.generation,
+    input.expectedAttempt
+  );
+  return result.changes === 1;
+}
+
+export function markScheduledEventPreCreateProvisioningMissed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: string;
+  expectedAttempt: number;
+  expectedNextRunAt: string;
+  expectedCleanupAt: string;
+  reason: string;
+  missedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'missed',
+            calendar_status = 'hidden',
+            error = ?,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND subgroup_chat_id IS NULL
+        AND cleanup_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_next_run_at = ?`,
+    input.reason,
+    input.missedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedCleanupAt,
+    input.generation,
+    input.expectedAttempt,
+    input.expectedNextRunAt
+  );
+  return result.changes === 1;
 }
 
 export function initializeEventProvisioningRecovery(db: PluginDatabase, input: {
@@ -2852,12 +3218,57 @@ export function initializeEventProvisioningRecovery(db: PluginDatabase, input: {
   return result.changes === 1;
 }
 
+export function initializeEventPreCreateProvisioningRecovery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  nextRunAt: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_generation = ?,
+            provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = ?,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND calendar_status = 'hidden'
+        AND subgroup_chat_id IS NULL
+        AND actor_identity_id IS NOT NULL
+        AND trim(actor_identity_id) <> ''
+        AND (
+          (origin IN ('created', 'adopted_poll') AND poll_wa_msg_id IS NOT NULL)
+          OR (origin = 'unplanned' AND poll_wa_msg_id IS NULL)
+        )
+        AND cleanup_at > ?
+        AND updated_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.generation,
+    input.attempt,
+    input.nextRunAt,
+    input.updatedAt,
+    input.eventId,
+    input.scopeId,
+    input.nextRunAt,
+    input.expectedUpdatedAt
+  );
+  return result.changes === 1;
+}
+
 export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
-  subgroupChatId: string;
+  subgroupChatId?: string | undefined;
   generation: string;
   expectedAttempt: number;
+  expectedNextRunAt: string | null;
   nextAttempt: number;
   nextRunAt: string;
   updatedAt: string;
@@ -2871,23 +3282,35 @@ export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
         AND scope_id = ?
         AND event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND subgroup_chat_id = ?
+        AND ((? IS NULL AND subgroup_chat_id IS NULL) OR subgroup_chat_id = ?)
         AND provisioning_recovery_generation = ?
-        AND provisioning_recovery_attempt = ?`,
+        AND provisioning_recovery_attempt = ?
+        AND ((? IS NULL AND provisioning_recovery_next_run_at IS NULL)
+          OR provisioning_recovery_next_run_at = ?)`,
     input.nextAttempt,
     input.nextRunAt,
     input.updatedAt,
     input.eventId,
     input.scopeId,
-    input.subgroupChatId,
+    input.subgroupChatId ?? null,
+    input.subgroupChatId ?? null,
     input.generation,
-    input.expectedAttempt
+    input.expectedAttempt,
+    input.expectedNextRunAt,
+    input.expectedNextRunAt
   );
   return result.changes === 1;
 }
 
-export function markEventMissed(db: PluginDatabase, eventId: string, reason: string, missedAt: string): void {
-  db.run(
+export function markUnclaimedEventPreCreateProvisioningMissed(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  expectedCleanupAt: string;
+  reason: string;
+  missedAt: string;
+}): boolean {
+  const result = db.run(
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'missed',
@@ -2895,12 +3318,23 @@ export function markEventMissed(db: PluginDatabase, eventId: string, reason: str
             error = ?,
             updated_at = ?
       WHERE id = ?
+        AND scope_id = ?
         AND event_status = 'active'
-        AND group_lifecycle_status = 'poll_open'`,
-    reason,
-    missedAt,
-    eventId
+        AND group_lifecycle_status = 'poll_open'
+        AND subgroup_chat_id IS NULL
+        AND updated_at = ?
+        AND cleanup_at = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.reason,
+    input.missedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt,
+    input.expectedCleanupAt
   );
+  return result.changes === 1;
 }
 
 export function upsertVote(db: PluginDatabase, eventId: string, vote: PluginPollVote): void {

@@ -8,8 +8,8 @@ import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runti
 import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../platform/jobs/queue';
 import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '../../../platform/transport/pollContract';
 import {
-  isManagedCommunitySubgroupProvisioningError,
-  type ManagedCommunitySubgroupProvisioningError
+  isManagedCommunitySubgroupPreCreateError,
+  isManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type {
   OutboundSendResult,
@@ -60,6 +60,7 @@ import { EVENTS_JOBS, EVENTS_PERMISSIONS, EVENTS_PLUGIN_ID } from './manifest';
 import { createEventCommunitySubgroup } from './subgroups';
 import {
   attemptUnplannedEventFinalization,
+  EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
   eventProvisioningRecoveryDedupeKey,
   eventProvisioningRecoveryRunAt
 } from './provisioningRecovery';
@@ -77,7 +78,8 @@ import {
 } from '../doas/serviceApi';
 import {
   appendEventLog,
-  checkpointUnplannedEventProvisioningFailure,
+  checkpointClaimedEventProvisioningChild,
+  claimInitialEventPreCreateProvisioningAttempt,
   completeUnplannedEventProvisioning,
   configuredEventCalendarOwnership,
   eventsDatabase,
@@ -86,7 +88,10 @@ import {
   insertEvent,
   listCancellableEvents,
   listScopeEvents,
+  haltClaimedEventPreCreateProvisioning,
+  markClaimedEventPreCreateProvisioningMissed,
   newEventId,
+  rearmClaimedEventPreCreateProvisioningAttempt,
   recordEventAnnouncementMessage,
   resolvedEventCalendarId,
   updateEventStructuredData,
@@ -2801,7 +2806,7 @@ type CreateUnplannedEventLifecycleResult =
   | {
       status: 'recovery_scheduled';
       eventId: string;
-      subgroupChatId: string;
+      subgroupChatId?: string | undefined;
       subgroupTitle: string;
     };
 
@@ -2876,21 +2881,6 @@ async function createUnplannedEventLifecycle(input: {
     return result;
   }
   const created = result.created;
-  const completedAt = new Date().toISOString();
-  const completed = completeUnplannedEventProvisioning(input.db, {
-    eventId: intent.id,
-    scopeId: intent.scopeId,
-    subgroupChatId: created.chatId,
-    subgroupTitle: created.title,
-    participants: created.participants,
-    completedAt
-  });
-  if (!completed) {
-    throw new Error(
-      `Unplanned event ${intent.id} cannot complete with subgroup ${created.chatId}; ` +
-      'its persisted provisioning intent is missing or belongs to another subgroup.'
-    );
-  }
   const event = getEvent(input.db, intent.id);
   if (!event) {
     throw new Error(`Unplanned event ${intent.id} disappeared after provisioning completion.`);
@@ -2930,7 +2920,7 @@ type ProvisionUnplannedEventSubgroupResult =
   | {
       status: 'recovery_scheduled';
       eventId: string;
-      subgroupChatId: string;
+      subgroupChatId?: string | undefined;
       subgroupTitle: string;
     };
 
@@ -2941,6 +2931,37 @@ async function provisionUnplannedEventSubgroup(input: {
   event: StoredEventRecord;
   creatorParticipantWid: string;
 }): Promise<ProvisionUnplannedEventSubgroupResult> {
+  const generation = randomUUID();
+  const attempt = 1;
+  const claimedAt = new Date();
+  const cleanupAt = new Date(input.event.cleanupAt);
+  if (
+    !Number.isFinite(cleanupAt.getTime()) ||
+    claimedAt.getTime() >= cleanupAt.getTime()
+  ) {
+    throw new Error(`Unplanned event ${input.event.id} reached its cleanup deadline before subgroup creation.`);
+  }
+  const claimed = claimInitialEventPreCreateProvisioningAttempt(input.db, {
+    eventId: input.event.id,
+    scopeId: input.event.scopeId,
+    expectedUpdatedAt: input.event.updatedAt,
+    generation,
+    attempt,
+    claimedAt: claimedAt.toISOString()
+  });
+  if (!claimed) {
+    throw new Error(
+      `Unplanned event ${input.event.id} already has a claimed subgroup creation attempt; ` +
+      'automatic creation is halted pending reconciliation.'
+    );
+  }
+  appendEventLog(input.db, {
+    eventId: input.event.id,
+    action: 'events.provisioning.precreate_claimed',
+    metadata: { generation, attempt, claimedAt: claimedAt.toISOString(), origin: 'unplanned' }
+  });
+
+  let created: Awaited<ReturnType<typeof createEventCommunitySubgroup>>['created'] | undefined;
   try {
     const result = await createEventCommunitySubgroup({
       context: input.context,
@@ -2949,42 +2970,156 @@ async function provisionUnplannedEventSubgroup(input: {
       title: input.event.groupTitle,
       participantWids: [input.creatorParticipantWid]
     });
-    return { status: 'completed', ...result };
-  } catch (error) {
-    if (!isManagedCommunitySubgroupProvisioningError(error)) {
-      throw error;
-    }
-    const cursor = checkpointManagedUnplannedProvisioningFailure(input.db, input.event, error);
-    const failedEvent = getEvent(input.db, input.event.id);
-    if (!failedEvent || failedEvent.subgroupChatId !== error.created.chatId) {
+    created = result.created;
+    const completedAt = new Date().toISOString();
+    const completed = completeUnplannedEventProvisioning(input.db, {
+      eventId: input.event.id,
+      scopeId: input.event.scopeId,
+      subgroupChatId: created.chatId,
+      subgroupTitle: created.title,
+      participants: created.participants,
+      recoveryGeneration: generation,
+      recoveryAttempt: attempt,
+      recoveryNextRunAt: null,
+      completedAt
+    });
+    if (!completed) {
       throw new Error(
-        `Unplanned event ${input.event.id} lost its exact subgroup recovery checkpoint ${error.created.chatId}.`
+        `Unplanned event ${input.event.id} rejected completion for claimed subgroup ${created.chatId}.`
       );
     }
+    return { status: 'completed', ...result };
+  } catch (error) {
+    const failedAt = new Date();
+    const nextAttempt = attempt + 1;
+    const runAt = eventProvisioningRecoveryRunAt(nextAttempt, failedAt);
+    const knownChild = isManagedCommunitySubgroupProvisioningError(error)
+      ? error.created
+      : created;
+    let checkpointed = false;
+    if (knownChild) {
+      checkpointed = checkpointClaimedEventProvisioningChild(input.db, {
+        eventId: input.event.id,
+        scopeId: input.event.scopeId,
+        generation,
+        expectedAttempt: attempt,
+        nextAttempt,
+        nextRunAt: runAt.toISOString(),
+        subgroupChatId: knownChild.chatId,
+        subgroupTitle: knownChild.title,
+        participants: knownChild.participants,
+        checkpointedAt: failedAt.toISOString(),
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    } else if (isManagedCommunitySubgroupPreCreateError(error)) {
+      const retryBeforeCleanup = error.retryableWithoutCheckpoint && runAt.getTime() < cleanupAt.getTime();
+      const retryAttemptsRemain = nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+      const retryScheduled = retryBeforeCleanup && retryAttemptsRemain;
+      checkpointed = retryScheduled
+        ? rearmClaimedEventPreCreateProvisioningAttempt(input.db, {
+            eventId: input.event.id,
+            scopeId: input.event.scopeId,
+            generation,
+            expectedAttempt: attempt,
+            nextAttempt,
+            nextRunAt: runAt.toISOString(),
+            reason: error.message,
+            rearmedAt: failedAt.toISOString()
+          })
+        : error.retryableWithoutCheckpoint && !retryBeforeCleanup
+          ? markClaimedEventPreCreateProvisioningMissed(input.db, {
+              eventId: input.event.id,
+              scopeId: input.event.scopeId,
+              generation,
+              expectedAttempt: attempt,
+              expectedCleanupAt: input.event.cleanupAt,
+              reason: 'Event subgroup creation retries reached the cleanup deadline.',
+              missedAt: failedAt.toISOString()
+            })
+          : haltClaimedEventPreCreateProvisioning(input.db, {
+              eventId: input.event.id,
+              scopeId: input.event.scopeId,
+              generation,
+              expectedAttempt: attempt,
+              reason: error.retryableWithoutCheckpoint && !retryAttemptsRemain
+                ? `Event subgroup creation reached the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts: ${error.message}`
+                : error.message,
+              haltedAt: failedAt.toISOString()
+            });
+      if (!retryScheduled) {
+        throw error;
+      }
+    } else {
+      haltClaimedEventPreCreateProvisioning(input.db, {
+        eventId: input.event.id,
+        scopeId: input.event.scopeId,
+        generation,
+        expectedAttempt: attempt,
+        reason: error instanceof Error ? error.message : String(error),
+        haltedAt: failedAt.toISOString()
+      });
+      throw error;
+    }
+    const failedEvent = getEvent(input.db, input.event.id);
+    if (
+      !checkpointed ||
+      !failedEvent ||
+      failedEvent.provisioningRecoveryGeneration !== generation ||
+      failedEvent.provisioningRecoveryAttempt !== nextAttempt ||
+      failedEvent.provisioningRecoveryNextRunAt !== runAt.toISOString() ||
+      (knownChild && failedEvent.subgroupChatId !== knownChild.chatId)
+    ) {
+      throw new Error(
+        `Unplanned event ${input.event.id} lost its durable provisioning recovery checkpoint.`
+      );
+    }
+    appendEventLog(input.db, {
+      eventId: failedEvent.id,
+      action: 'events.unplanned.provisioning_failed',
+      metadata: {
+        reason: error instanceof Error ? error.message : String(error),
+        ...(knownChild ? {
+          subgroupChatId: knownChild.chatId,
+          subgroupTitle: knownChild.title,
+          participants: knownChild.participants
+        } : {}),
+        generation,
+        failedAttempt: attempt,
+        recoveryAttempt: nextAttempt,
+        ...(isManagedCommunitySubgroupProvisioningError(error) || isManagedCommunitySubgroupPreCreateError(error)
+          ? { stage: error.stage }
+          : {})
+      }
+    });
     try {
       await input.runtime.enqueuePluginJob({
         jobName: EVENTS_JOBS.provisioningRecovery,
         scopeId: failedEvent.scopeId,
         ...(failedEvent.groupId ? { groupId: failedEvent.groupId } : {}),
         ...(failedEvent.groupWid ? { groupWid: failedEvent.groupWid } : {}),
-        runAt: cursor.runAt,
+        runAt,
         payload: {
           eventId: failedEvent.id,
-          subgroupChatId: error.created.chatId,
-          generation: cursor.generation,
-          attempt: cursor.attempt
+          ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
+          generation,
+          attempt: nextAttempt
         },
-        dedupeKey: eventProvisioningRecoveryDedupeKey(failedEvent, cursor)
+        dedupeKey: eventProvisioningRecoveryDedupeKey(failedEvent, {
+          generation,
+          attempt: nextAttempt
+        })
       });
       appendEventLog(input.db, {
         eventId: failedEvent.id,
         action: 'events.provisioning.recovery_scheduled',
         metadata: {
-          subgroupChatId: error.created.chatId,
-          generation: cursor.generation,
-          attempt: cursor.attempt,
-          runAt: cursor.runAt.toISOString(),
-          stage: error.stage,
+          ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
+          generation,
+          attempt: nextAttempt,
+          runAt: runAt.toISOString(),
+          ...(isManagedCommunitySubgroupProvisioningError(error) || isManagedCommunitySubgroupPreCreateError(error)
+            ? { stage: error.stage }
+            : {}),
           origin: 'unplanned'
         }
       });
@@ -2993,16 +3128,16 @@ async function provisionUnplannedEventSubgroup(input: {
         eventId: failedEvent.id,
         action: 'events.provisioning.recovery_enqueue_failed',
         metadata: {
-          subgroupChatId: error.created.chatId,
-          generation: cursor.generation,
-          attempt: cursor.attempt,
-          runAt: cursor.runAt.toISOString(),
+          ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
+          generation,
+          attempt: nextAttempt,
+          runAt: runAt.toISOString(),
           reason: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
           origin: 'unplanned'
         }
       });
       throw new Error(
-        `Unplanned event ${failedEvent.id} preserved exact subgroup ${error.created.chatId}, ` +
+        `Unplanned event ${failedEvent.id} preserved its durable provisioning checkpoint, ` +
         'but its durable provisioning recovery job could not be enqueued.',
         { cause: enqueueError }
       );
@@ -3010,48 +3145,10 @@ async function provisionUnplannedEventSubgroup(input: {
     return {
       status: 'recovery_scheduled',
       eventId: failedEvent.id,
-      subgroupChatId: error.created.chatId,
-      subgroupTitle: error.created.title
+      ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
+      subgroupTitle: knownChild?.title ?? failedEvent.groupTitle
     };
   }
-}
-
-function checkpointManagedUnplannedProvisioningFailure(
-  db: ReturnType<typeof eventsDatabase>,
-  event: StoredEventRecord,
-  error: ManagedCommunitySubgroupProvisioningError
-): { generation: string; attempt: number; runAt: Date } {
-  const generation = randomUUID();
-  const attempt = 1;
-  const failedAt = new Date();
-  const runAt = eventProvisioningRecoveryRunAt(attempt, failedAt);
-  const checkpointed = checkpointUnplannedEventProvisioningFailure(db, {
-    eventId: event.id,
-    scopeId: event.scopeId,
-    subgroupChatId: error.created.chatId,
-    subgroupTitle: error.created.title,
-    participants: error.created.participants,
-    parentCommunityWid: error.provisioning.parentCommunityWid,
-    stage: error.stage,
-    progress: {
-      standaloneRegistered: error.provisioning.standaloneRegistered,
-      attendeesVerified: error.provisioning.attendeesVerified,
-      communityLinkConfirmed: error.provisioning.communityLinkConfirmed,
-      linkedChildRegistered: error.provisioning.linkedChildRegistered
-    },
-    reason: error.message,
-    failedAt: failedAt.toISOString(),
-    recoveryGeneration: generation,
-    recoveryAttempt: attempt,
-    recoveryNextRunAt: runAt.toISOString()
-  });
-  if (!checkpointed) {
-    throw new Error(
-      `Unplanned event ${event.id} rejected provisioning output for subgroup ${error.created.chatId}; ` +
-      'the event is already bound to another subgroup or left its recoverable state.'
-    );
-  }
-  return { generation, attempt, runAt };
 }
 
 function draftEventsConfig(draft: {

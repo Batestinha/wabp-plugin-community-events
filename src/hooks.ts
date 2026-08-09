@@ -6,7 +6,10 @@ import type {
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
-import { isManagedCommunitySubgroupProvisioningError } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
+import {
+  isManagedCommunitySubgroupPreCreateError,
+  isManagedCommunitySubgroupProvisioningError
+} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
@@ -38,7 +41,11 @@ import {
 } from './weather';
 import {
   appendEventLog,
+  bindClaimedInitialPlannedEventProvisioningChild,
   EVENT_CLEANUP_CLAIM_LEASE_MS,
+  checkpointClaimedEventProvisioningChild,
+  claimInitialEventPreCreateProvisioningAttempt,
+  claimScheduledEventPreCreateProvisioningAttempt,
   ensureEventCalendarPublicationConfiguration,
   eventsDatabase,
   getEvent,
@@ -66,15 +73,18 @@ import {
   markClaimedEventCleaned,
   markEventCleaned,
   markEventClosed,
-  markEventFailed,
-  markEventProvisioningFailed,
-  markEventMissed,
+  markInterruptedPlannedEventPreCreateClaimFailed,
+  markUnclaimedEventFailed,
+  markUnclaimedEventPreCreateProvisioningMissed,
   replaceVotes,
+  rearmClaimedEventPreCreateProvisioningAttempt,
   releaseEventCleanupClaim,
   releaseExpiredEventCleanupClaims,
   resolvedEventCalendarId,
   renewEventCleanupClaim,
-  saveCreatedGroupParticipants,
+  haltClaimedEventPreCreateProvisioning,
+  markClaimedEventPreCreateProvisioningMissed,
+  markScheduledEventPreCreateProvisioningMissed,
   supersedeEventWeatherDelivery,
   updateEventCloseAt,
   upsertVote,
@@ -86,7 +96,9 @@ import {
   eventProvisioningRecoveryCursor,
   eventProvisioningRecoveryDedupeKey,
   eventProvisioningRecoveryRunAt,
+  EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
   eventProvisioningResumeDedupeKey,
+  retryEventProvisioningCreation,
   resumeEventProvisioning,
   scheduleUnplannedEventFinalizationRetry,
   unplannedEventFinalizationDedupeKey,
@@ -109,6 +121,7 @@ export const EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS = 30_000;
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
+  startupBeforeWorker?: boolean | undefined;
 }
 
 interface EventsHooksOptions {
@@ -173,6 +186,9 @@ export async function recoverEventJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
 ): Promise<number> {
+  const interruptedPreCreateClaims = options.startupBeforeWorker === true
+    ? await reconcileInterruptedEventPreCreateClaimsAtStartup(context, options.now)
+    : 0;
   const unresolvedCalendarOwnership = listUnassignedEventCalendarOwnership(
     eventsDatabase(context.databases)
   );
@@ -194,12 +210,13 @@ export async function recoverEventJobs(
   const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (
     enqueued > 0 ||
+    interruptedPreCreateClaims > 0 ||
     calendarPublications > 0 ||
     questionKeyRenames.settled > 0 ||
     questionKeyRenames.unresolved > 0
   ) {
     context.logger.info(
-      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, interruptedPreCreateClaims, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -334,15 +351,11 @@ export async function recoverEventProvisioningJobs(
   let enqueued = 0;
   for (const candidate of records) {
     let record = candidate;
-    const subgroupChatId = record.subgroupChatId;
-    if (!subgroupChatId) {
-      continue;
-    }
-    if (!eventProvisioningRecoveryCursor(record)) {
+    if (record.subgroupChatId && !eventProvisioningRecoveryCursor(record)) {
       const initialized = initializeEventProvisioningRecovery(db, {
         eventId: record.id,
         scopeId: record.scopeId,
-        subgroupChatId,
+        subgroupChatId: record.subgroupChatId,
         generation: randomUUID(),
         attempt: 1,
         nextRunAt: now.toISOString(),
@@ -355,6 +368,54 @@ export async function recoverEventProvisioningJobs(
     }
     const cursor = eventProvisioningRecoveryCursor(record);
     if (!cursor?.nextRunAt) {
+      continue;
+    }
+    if (!record.subgroupChatId && !eventPreCreateEligibleBeforeCleanup(record, now)) {
+      markScheduledEventPreCreateProvisioningMissed(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: cursor.generation,
+        expectedAttempt: cursor.attempt,
+        expectedNextRunAt: cursor.nextRunAt,
+        expectedCleanupAt: record.cleanupAt,
+        reason: 'Event subgroup creation retries reached the cleanup deadline.',
+        missedAt: now.toISOString()
+      });
+      continue;
+    }
+    if (
+      !record.subgroupChatId &&
+      cursor.attempt > EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS
+    ) {
+      const claimedAt = now.toISOString();
+      const claimed = claimScheduledEventPreCreateProvisioningAttempt(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: cursor.generation,
+        attempt: cursor.attempt,
+        expectedNextRunAt: cursor.nextRunAt,
+        claimedAt
+      });
+      const halted = claimed && haltClaimedEventPreCreateProvisioning(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: cursor.generation,
+        expectedAttempt: cursor.attempt,
+        reason: `Event subgroup creation exceeded the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts.`,
+        haltedAt: claimedAt
+      });
+      if (halted) {
+        appendEventLog(db, {
+          eventId: record.id,
+          action: 'events.provisioning.precreate_retry_limit_reached',
+          metadata: {
+            generation: cursor.generation,
+            attempt: cursor.attempt,
+            maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+            source: 'recovery_scan'
+          }
+        });
+      }
       continue;
     }
     const runAt = new Date(cursor.nextRunAt);
@@ -370,7 +431,7 @@ export async function recoverEventProvisioningJobs(
       runAt,
       payload: {
         eventId: record.id,
-        subgroupChatId,
+        ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
         generation: cursor.generation,
         attempt: cursor.attempt
       } satisfies EventProvisioningRecoveryPayload,
@@ -386,10 +447,17 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
   const records = listOpenPollEvents(db);
   const now = options.now ?? new Date();
   let enqueued = 0;
-  for (const record of records) {
-    const config = parseEventsConfig(await context.configFor(record.scopeId));
-    const closeAt = effectiveCloseAt(record, config);
-    persistEffectiveCloseAt(db, record, closeAt);
+  for (const candidate of records) {
+    const candidateCursor = eventProvisioningRecoveryCursor(candidate);
+    if (!candidate.subgroupChatId && candidateCursor && !candidateCursor.nextRunAt) {
+      // A partial cursor is a permanent one-shot ownership fence. Ordinary
+      // recovery must neither replay creation nor keep enqueueing a close job
+      // that cannot safely determine whether groupCreate already succeeded.
+      continue;
+    }
+    const config = parseEventsConfig(await context.configFor(candidate.scopeId));
+    const closeAt = effectiveCloseAt(candidate, config);
+    const record = persistEffectiveCloseAt(db, candidate, closeAt, now);
     const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : 'invalid';
     const due = Boolean(record.subgroupChatId) ||
       (Number.isFinite(closeAt.getTime()) && closeAt.getTime() <= now.getTime());
@@ -412,6 +480,81 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
     enqueued += 1;
   }
   return enqueued;
+}
+
+async function reconcileInterruptedEventPreCreateClaimsAtStartup(
+  context: PluginRuntimeContext,
+  now: Date = new Date()
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  let reconciled = 0;
+  for (const record of listOpenPollEvents(db)) {
+    if (
+      (record.origin !== 'created' && record.origin !== 'adopted_poll') ||
+      record.subgroupChatId
+    ) {
+      continue;
+    }
+    const cursor = eventProvisioningRecoveryCursor(record);
+    if (!cursor || cursor.nextRunAt) {
+      continue;
+    }
+    const failedAt = now.toISOString();
+    const reason = 'Runtime startup found an interrupted subgroup creation attempt with an unknown outcome. Automatic creation is halted pending operator reconciliation.';
+    const persisted = markInterruptedPlannedEventPreCreateClaimFailed(db, {
+      eventId: record.id,
+      scopeId: record.scopeId,
+      expectedUpdatedAt: record.updatedAt,
+      generation: cursor.generation,
+      expectedAttempt: cursor.attempt,
+      reason,
+      failedAt
+    });
+    if (!persisted) {
+      continue;
+    }
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.provisioning.precreate_interrupted_at_startup',
+      metadata: {
+        generation: cursor.generation,
+        attempt: cursor.attempt,
+        outcome: 'unknown',
+        automaticRetry: false
+      }
+    });
+    try {
+      await context.audit.record({
+        scopeId: record.scopeId,
+        ...(record.groupId ? { groupId: record.groupId } : {}),
+        action: 'official.community-events.provisioning.precreate_interrupted_at_startup',
+        targetJson: { eventId: record.id },
+        metadataJson: {
+          expectedUpdatedAt: record.updatedAt,
+          generation: cursor.generation,
+          attempt: cursor.attempt,
+          status: 'halted_ambiguous',
+          automaticRetry: false
+        }
+      });
+    } catch (error) {
+      context.logger.warn(
+        { error, eventId: record.id, scopeId: record.scopeId },
+        'Unable to audit interrupted event subgroup creation claim found at startup'
+      );
+    }
+    context.logger.error(
+      {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: cursor.generation,
+        attempt: cursor.attempt
+      },
+      'Halted interrupted event subgroup creation claim with an unknown provider outcome'
+    );
+    reconciled += 1;
+  }
+  return reconciled;
 }
 
 export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Promise<number> {
@@ -718,7 +861,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
   if (!eventId) {
     return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
   }
-  const record = getEvent(db, eventId);
+  let record = getEvent(db, eventId);
   if (!record || record.eventStatus !== 'active' || record.groupLifecycleStatus !== 'poll_open') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or poll not open' })];
   }
@@ -727,10 +870,32 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
   }
 
   let closePersisted = false;
+  const persistedCloseCursor = eventProvisioningRecoveryCursor(record);
+  if (!record.subgroupChatId && persistedCloseCursor && !persistedCloseCursor.nextRunAt) {
+    return [audit('events.provisioning.precreate_skipped', {
+      eventId: record.id,
+      reason: 'an earlier one-shot subgroup creation attempt has an unknown outcome'
+    })];
+  }
+  let preCreateClaim: { generation: string; attempt: number; cleanupAt: string } | undefined =
+    (record.origin === 'created' || record.origin === 'adopted_poll') &&
+    record.subgroupChatId && persistedCloseCursor && !persistedCloseCursor.nextRunAt
+      ? {
+          generation: persistedCloseCursor.generation,
+          attempt: persistedCloseCursor.attempt,
+          cleanupAt: record.cleanupAt
+        }
+      : undefined;
+  let createdSubgroupLog: {
+    chatId: string;
+    title: string;
+    attendeeWids: string[];
+    participants: Record<string, CreatedGroupParticipantResult>;
+  } | undefined;
   try {
     const config = parseEventsConfig(await context.configFor(record.scopeId));
     const closeAt = effectiveCloseAt(record, config);
-    persistEffectiveCloseAt(db, record, closeAt);
+    record = persistEffectiveCloseAt(db, record, closeAt);
     const now = new Date();
     if (!record.subgroupChatId && Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now.getTime()) {
       return [
@@ -750,9 +915,17 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       ];
     }
+    const pollWaMsgId = record.pollWaMsgId;
+    if (!pollWaMsgId) {
+      return [audit('events.job.skipped', {
+        jobName: job.jobName,
+        eventId,
+        reason: 'event lost its poll while resolving the effective close time'
+      })];
+    }
     if (!context.pollVoteReadbackFor) {
       throw new IncompletePollVoteReadbackError({
-        pollWaMsgId: record.pollWaMsgId,
+        pollWaMsgId,
         coverage: 'incomplete',
         source: 'plugin-runtime',
         votes: [],
@@ -760,7 +933,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       });
     }
     const liveVotes = await resolvePluginPollVotes(
-      requireCompletePollVotes(await context.pollVoteReadbackFor(record.pollWaMsgId)),
+      requireCompletePollVotes(await context.pollVoteReadbackFor(pollWaMsgId)),
       requirePollVoteIdentityResolver(context)
     );
     replaceVotes(db, record.id, liveVotes);
@@ -812,6 +985,48 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       });
     } else if (attendeeWids.length > 0) {
+      const claimRecord = getEvent(db, record.id);
+      const claimedAt = new Date();
+      if (!claimRecord || !eventPreCreateEligibleBeforeCleanup(claimRecord, claimedAt)) {
+        const missed = Boolean(claimRecord) && markUnclaimedEventPreCreateProvisioningMissed(db, {
+          eventId: claimRecord!.id,
+          scopeId: claimRecord!.scopeId,
+          expectedUpdatedAt: claimRecord!.updatedAt,
+          expectedCleanupAt: claimRecord!.cleanupAt,
+          reason: 'Event subgroup creation was not started before its cleanup deadline.',
+          missedAt: claimedAt.toISOString()
+        });
+        return [audit(missed
+          ? 'events.provisioning.precreate_missed'
+          : 'events.provisioning.precreate_skipped', {
+          eventId: record.id,
+          reason: missed
+            ? 'cleanup deadline reached or invalid'
+            : 'event state changed or subgroup creation is already claimed'
+        })];
+      }
+      const generation = randomUUID();
+      const attempt = 1;
+      const claimed = claimInitialEventPreCreateProvisioningAttempt(db, {
+        eventId: claimRecord.id,
+        scopeId: claimRecord.scopeId,
+        expectedUpdatedAt: claimRecord.updatedAt,
+        generation,
+        attempt,
+        claimedAt: claimedAt.toISOString()
+      });
+      if (!claimed) {
+        return [audit('events.provisioning.precreate_skipped', {
+          eventId: record.id,
+          reason: 'pre-create attempt is already claimed or event state changed'
+        })];
+      }
+      preCreateClaim = { generation, attempt, cleanupAt: claimRecord.cleanupAt };
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.provisioning.precreate_claimed',
+        metadata: { generation, attempt, claimedAt: claimedAt.toISOString(), origin: record.origin }
+      });
       const result = await createEventCommunitySubgroup({
         context,
         scopeId: record.scopeId,
@@ -822,30 +1037,53 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       const created = result.created;
       subgroupChatId = created.chatId;
       subgroupTitle = created.title;
-      saveCreatedGroupParticipants(db, record.id, created.participants);
-      await appendJsonLog(context, {
-        action: 'subgroup.created',
-        scopeId: record.scopeId,
+      const checkpointedAt = new Date();
+      const checkpointed = bindClaimedInitialPlannedEventProvisioningChild(db, {
         eventId: record.id,
-        profileId: record.profileId,
-        pollWaMsgId: record.pollWaMsgId,
+        scopeId: record.scopeId,
+        generation,
+        expectedAttempt: attempt,
         subgroupChatId: created.chatId,
-        metadata: {
-          title: created.title,
-          attendeeWids,
-          participants: created.participants
-        }
+        subgroupTitle: created.title,
+        participants: created.participants,
+        boundAt: checkpointedAt.toISOString()
       });
+      if (!checkpointed) {
+        throw new Error(
+          `Event ${record.id} rejected the exact child checkpoint ${created.chatId} after creation.`
+        );
+      }
+      createdSubgroupLog = {
+        chatId: created.chatId,
+        title: created.title,
+        attendeeWids,
+        participants: created.participants
+      };
     }
 
-    const calendarProfile = config.eventProfiles.find((profile) => profile.id === record.profileId);
+    const recordProfileId = record.profileId;
+    const calendarProfile = config.eventProfiles.find((profile) => profile.id === recordProfileId);
+    const closeRecord = getEvent(db, record.id);
+    if (!closeRecord) {
+      throw new Error(`Event ${record.id} disappeared before poll closure.`);
+    }
     const closedAt = new Date().toISOString();
-    markEventClosed(db, {
+    const closed = markEventClosed(db, {
       eventId: record.id,
+      scopeId: record.scopeId,
+      expectedUpdatedAt: closeRecord.updatedAt,
+      ...(subgroupChatId ? { expectedSubgroupChatId: subgroupChatId } : {}),
+      ...(preCreateClaim ? {
+        expectedRecoveryGeneration: preCreateClaim.generation,
+        expectedRecoveryAttempt: preCreateClaim.attempt
+      } : {}),
       ...(subgroupChatId ? { subgroupChatId } : {}),
       ...(subgroupTitle ? { subgroupTitle } : {}),
       closedAt
     });
+    if (!closed) {
+      throw new Error(`Event ${record.id} changed while its poll closure was being claimed.`);
+    }
     closePersisted = true;
     const closedEvent = getEvent(db, record.id);
     if (
@@ -855,6 +1093,21 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       closedEvent.subgroupChatId !== subgroupChatId
     ) {
       throw new Error(`Event ${record.id} changed while its poll closure was being persisted.`);
+    }
+    if (createdSubgroupLog) {
+      await appendJsonLog(context, {
+        action: 'subgroup.created',
+        scopeId: record.scopeId,
+        eventId: record.id,
+        profileId: record.profileId,
+        pollWaMsgId: record.pollWaMsgId,
+        subgroupChatId: createdSubgroupLog.chatId,
+        metadata: {
+          title: createdSubgroupLog.title,
+          attendeeWids: createdSubgroupLog.attendeeWids,
+          participants: createdSubgroupLog.participants
+        }
+      });
     }
     const plannedAnnouncementActions = await plannedEventAnnouncementActions(context, {
       record: closedEvent,
@@ -966,33 +1219,117 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     let failureMetadata: Record<string, unknown> = { reason };
     let failedSubgroupChatId: string | undefined;
     let provisioningRecoveryAction: PluginEnqueueJobAction | undefined;
-    if (isManagedCommunitySubgroupProvisioningError(error)) {
+    let failurePersisted = true;
+    if (isManagedCommunitySubgroupPreCreateError(error)) {
+      const { provisioning, stage } = error;
+      const nextAttempt = (preCreateClaim?.attempt ?? 0) + 1;
+      const recoveryRunAt = eventProvisioningRecoveryRunAt(nextAttempt, new Date(failedAt));
+      const claimedCleanupRecord = { ...record, cleanupAt: preCreateClaim?.cleanupAt ?? record.cleanupAt };
+      const retryWithinCleanup = eventPreCreateEligibleBeforeCleanup(claimedCleanupRecord, recoveryRunAt);
+      const retryAttemptsRemain = nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+      const checkpointPersisted = Boolean(preCreateClaim) && (
+        error.retryableWithoutCheckpoint && retryWithinCleanup && retryAttemptsRemain
+          ? rearmClaimedEventPreCreateProvisioningAttempt(db, {
+              eventId: record.id,
+              scopeId: record.scopeId,
+              generation: preCreateClaim!.generation,
+              expectedAttempt: preCreateClaim!.attempt,
+              nextAttempt,
+              nextRunAt: recoveryRunAt.toISOString(),
+              reason,
+              rearmedAt: failedAt
+            })
+          : error.retryableWithoutCheckpoint && !retryWithinCleanup
+            ? markClaimedEventPreCreateProvisioningMissed(db, {
+                eventId: record.id,
+                scopeId: record.scopeId,
+                generation: preCreateClaim!.generation,
+                expectedAttempt: preCreateClaim!.attempt,
+                expectedCleanupAt: preCreateClaim!.cleanupAt,
+                reason: 'Event subgroup creation retries reached the cleanup deadline.',
+                missedAt: failedAt
+              })
+            : haltClaimedEventPreCreateProvisioning(db, {
+                eventId: record.id,
+                scopeId: record.scopeId,
+                generation: preCreateClaim!.generation,
+                expectedAttempt: preCreateClaim!.attempt,
+                reason: error.retryableWithoutCheckpoint && !retryAttemptsRemain
+                  ? `Event subgroup creation reached the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts: ${reason}`
+                  : reason,
+                haltedAt: failedAt
+              })
+      );
+      failurePersisted = checkpointPersisted;
+      failureMetadata = {
+        reason,
+        parentCommunityWid: provisioning.parentCommunityWid,
+        stage,
+        providerId: provisioning.providerId,
+        certainty: provisioning.certainty,
+        details: provisioning.details,
+        participantWids: provisioning.participantWids,
+        claimGeneration: preCreateClaim?.generation,
+        claimAttempt: preCreateClaim?.attempt,
+        retryWithinCleanup,
+        retryAttemptsRemain,
+        maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+        checkpointPersisted
+      };
+      if (
+        checkpointPersisted &&
+        error.retryableWithoutCheckpoint &&
+        retryWithinCleanup &&
+        retryAttemptsRemain
+      ) {
+        const failedRecord = getEvent(db, record.id);
+        const cursor = failedRecord
+          ? eventProvisioningRecoveryCursor(failedRecord)
+          : undefined;
+        if (failedRecord && cursor?.nextRunAt) {
+          provisioningRecoveryAction = eventProvisioningRecoveryAction(failedRecord, {
+            ...cursor,
+            nextRunAt: cursor.nextRunAt
+          });
+          appendEventLog(db, {
+            eventId: record.id,
+            action: 'events.provisioning.recovery_scheduled',
+            metadata: {
+              generation: preCreateClaim?.generation,
+              attempt: nextAttempt,
+              runAt: recoveryRunAt.toISOString(),
+              stage,
+              checkpointKind: 'no_child'
+            }
+          });
+        }
+      }
+    } else if (isManagedCommunitySubgroupProvisioningError(error)) {
       const { created, provisioning, stage } = error;
       failedSubgroupChatId = created.chatId;
-      const recoveryGeneration = randomUUID();
-      const recoveryAttempt = 1;
-      const recoveryRunAt = eventProvisioningRecoveryRunAt(
-        recoveryAttempt,
-        new Date(failedAt)
-      );
+      const nextAttempt = (preCreateClaim?.attempt ?? 0) + 1;
+      const recoveryRunAt = eventProvisioningRecoveryRunAt(nextAttempt, new Date(failedAt));
       const progress = {
         standaloneRegistered: provisioning.standaloneRegistered,
         attendeesVerified: provisioning.attendeesVerified,
         communityLinkConfirmed: provisioning.communityLinkConfirmed,
         linkedChildRegistered: provisioning.linkedChildRegistered
       };
-      const checkpointPersisted = markEventProvisioningFailed(db, {
-        eventId: record.id,
-        scopeId: record.scopeId,
-        subgroupChatId: created.chatId,
-        subgroupTitle: created.title,
-        participants: created.participants,
-        reason,
-        failedAt,
-        recoveryGeneration,
-        recoveryAttempt,
-        recoveryNextRunAt: recoveryRunAt.toISOString()
-      });
+      const checkpointPersisted = Boolean(preCreateClaim) &&
+        checkpointClaimedEventProvisioningChild(db, {
+          eventId: record.id,
+          scopeId: record.scopeId,
+          generation: preCreateClaim!.generation,
+          expectedAttempt: preCreateClaim!.attempt,
+          nextAttempt,
+          nextRunAt: recoveryRunAt.toISOString(),
+          subgroupChatId: created.chatId,
+          subgroupTitle: created.title,
+          participants: created.participants,
+          checkpointedAt: failedAt,
+          reason
+        });
+      failurePersisted = checkpointPersisted;
       failureMetadata = {
         reason,
         subgroupChatId: created.chatId,
@@ -1029,8 +1366,8 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
             action: 'events.provisioning.recovery_scheduled',
             metadata: {
               subgroupChatId: created.chatId,
-              generation: recoveryGeneration,
-              attempt: recoveryAttempt,
+              generation: preCreateClaim?.generation,
+              attempt: nextAttempt,
               runAt: recoveryRunAt.toISOString(),
               stage
             }
@@ -1038,7 +1375,67 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       }
     } else {
-      markEventFailed(db, record.id, reason, failedAt);
+      if (preCreateClaim) {
+        const latest = getEvent(db, record.id);
+        const latestCursor = latest ? eventProvisioningRecoveryCursor(latest) : undefined;
+        if (
+          latest?.subgroupChatId &&
+          latest.eventStatus === 'active' &&
+          latest.groupLifecycleStatus === 'poll_open' &&
+          latestCursor &&
+          !latestCursor.nextRunAt &&
+          latestCursor.generation === preCreateClaim.generation &&
+          latestCursor.attempt === preCreateClaim.attempt
+        ) {
+          const retryAt = new Date(Date.now() + 1_000);
+          failedSubgroupChatId = latest.subgroupChatId;
+          provisioningRecoveryAction = {
+            type: 'plugin.enqueueJob',
+            pluginId: EVENTS_PLUGIN_ID,
+            jobName: EVENTS_JOBS.close,
+            scopeId: latest.scopeId,
+            runAt: retryAt,
+            payload: { eventId: latest.id },
+            dedupeKey: `${EVENTS_JOBS.close}:${latest.id}:bound:${latest.updatedAt}`
+          };
+        } else if (latest?.subgroupChatId && latestCursor?.nextRunAt) {
+          failedSubgroupChatId = latest.subgroupChatId;
+          provisioningRecoveryAction = eventProvisioningRecoveryAction(latest, {
+            ...latestCursor,
+            nextRunAt: latestCursor.nextRunAt
+          });
+        } else {
+          failurePersisted = haltClaimedEventPreCreateProvisioning(db, {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            generation: preCreateClaim.generation,
+            expectedAttempt: preCreateClaim.attempt,
+            reason,
+            haltedAt: failedAt
+          });
+        }
+        failureMetadata = {
+          reason,
+          claimGeneration: preCreateClaim.generation,
+          claimAttempt: preCreateClaim.attempt,
+          ambiguousPreCreateOutcome: !latest?.subgroupChatId
+        };
+      } else {
+        const current = getEvent(db, record.id);
+        failurePersisted = Boolean(current) && markUnclaimedEventFailed(db, {
+          eventId: current!.id,
+          scopeId: current!.scopeId,
+          expectedUpdatedAt: current!.updatedAt,
+          reason,
+          failedAt
+        });
+      }
+    }
+    if (!failurePersisted) {
+      return [audit('events.close.failure_stale', {
+        eventId: record.id,
+        reason: 'event state changed or subgroup creation is already claimed'
+      })];
     }
     appendEventLog(db, {
       eventId: record.id,
@@ -1219,7 +1616,7 @@ async function recoverFailedEventProvisioning(
   if (!record || record.scopeId !== job.scopeId) {
     return [audit('events.provisioning.recovery_skipped', {
       eventId: payload.eventId,
-      subgroupChatId: payload.subgroupChatId,
+      ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
       generation: payload.generation,
       attempt: payload.attempt,
       reason: 'event missing or scope mismatch'
@@ -1246,10 +1643,13 @@ async function recoverFailedEventProvisioning(
       runAt: runAt.toISOString()
     })];
   }
-  if (record.subgroupChatId !== payload.subgroupChatId) {
+  const recoveryTargetMatches = payload.subgroupChatId
+    ? record.subgroupChatId === payload.subgroupChatId
+    : !record.subgroupChatId;
+  if (!recoveryTargetMatches) {
     return [audit('events.provisioning.recovery_rejected', {
       eventId: record.id,
-      subgroupChatId: payload.subgroupChatId,
+      ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
       generation: payload.generation,
       attempt: payload.attempt,
       reason: `Event is bound to subgroup ${record.subgroupChatId ?? 'none'}.`
@@ -1263,38 +1663,158 @@ async function recoverFailedEventProvisioning(
   ) {
     return [audit('events.provisioning.recovery_skipped', {
       eventId: record.id,
-      subgroupChatId: payload.subgroupChatId,
+      ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
       generation: payload.generation,
       attempt: payload.attempt,
       reason: 'stale provisioning recovery cursor'
     })];
   }
+  if (!payload.subgroupChatId) {
+    const claimedAt = new Date();
+    if (!eventPreCreateEligibleBeforeCleanup(record, claimedAt)) {
+      markScheduledEventPreCreateProvisioningMissed(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: payload.generation,
+        expectedAttempt: payload.attempt,
+        expectedNextRunAt: cursor.nextRunAt,
+        expectedCleanupAt: record.cleanupAt,
+        reason: 'Event subgroup creation retries reached the cleanup deadline.',
+        missedAt: claimedAt.toISOString()
+      });
+      return [audit('events.provisioning.precreate_missed', {
+        eventId: record.id,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        cleanupAt: record.cleanupAt
+      })];
+    }
+    const claimed = claimScheduledEventPreCreateProvisioningAttempt(db, {
+      eventId: record.id,
+      scopeId: record.scopeId,
+      generation: payload.generation,
+      attempt: payload.attempt,
+      expectedNextRunAt: cursor.nextRunAt,
+      claimedAt: claimedAt.toISOString()
+    });
+    if (!claimed) {
+      return [audit('events.provisioning.precreate_skipped', {
+        eventId: record.id,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        reason: 'pre-create attempt is already claimed or stale'
+      })];
+    }
+    if (payload.attempt > EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS) {
+      const reason = `Event subgroup creation exceeded the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts.`;
+      const halted = haltClaimedEventPreCreateProvisioning(db, {
+        eventId: record.id,
+        scopeId: record.scopeId,
+        generation: payload.generation,
+        expectedAttempt: payload.attempt,
+        reason,
+        haltedAt: claimedAt.toISOString()
+      });
+      if (halted) {
+        appendEventLog(db, {
+          eventId: record.id,
+          action: 'events.provisioning.precreate_retry_limit_reached',
+          metadata: {
+            generation: payload.generation,
+            attempt: payload.attempt,
+            maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+            source: 'recovery_job'
+          }
+        });
+      }
+      return [audit(halted
+        ? 'events.provisioning.precreate_retry_limit_reached'
+        : 'events.provisioning.precreate_skipped', {
+        eventId: record.id,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+        reason: halted ? reason : 'event state changed while enforcing the retry limit'
+      })];
+    }
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.provisioning.precreate_claimed',
+      metadata: {
+        generation: payload.generation,
+        attempt: payload.attempt,
+        claimedAt: claimedAt.toISOString(),
+        source: 'recovery'
+      }
+    });
+  }
 
   try {
-    const result = await resumeEventProvisioning({
-      context,
-      scopeId: record.scopeId,
-      eventId: record.id,
-      subgroupChatId: payload.subgroupChatId,
-      ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
-      actorWid: 'plugin-recovery@system',
-      actorLabel: 'Plugin provisioning recovery'
-    });
+    const result = payload.subgroupChatId
+      ? await resumeEventProvisioning({
+          context,
+          scopeId: record.scopeId,
+          eventId: record.id,
+          subgroupChatId: payload.subgroupChatId,
+          ...(record.subgroupTitle ? { subgroupTitle: record.subgroupTitle } : {}),
+          actorWid: 'plugin-recovery@system',
+          actorLabel: 'Plugin provisioning recovery'
+        })
+      : await retryEventProvisioningCreation({
+          context,
+          scopeId: record.scopeId,
+          eventId: record.id,
+          actorWid: 'plugin-recovery@system',
+          actorLabel: 'Plugin provisioning recovery'
+        });
     if (result.status === 'rejected' || result.status === 'not_found') {
-      const retry = await enqueueAndAdvanceEventProvisioningRecoveryCursor(
-        context,
-        db,
-        record,
-        payload,
-        new Date()
-      );
+      const failedAt = new Date();
+      let retry = payload.subgroupChatId
+        ? await enqueueAndAdvanceEventProvisioningRecoveryCursor(
+            context,
+            db,
+            record,
+            payload,
+            failedAt
+          )
+        : undefined;
+      if (!payload.subgroupChatId) {
+        const latest = getEvent(db, record.id);
+        const latestCursor = latest ? eventProvisioningRecoveryCursor(latest) : undefined;
+        if (
+          latest?.subgroupChatId &&
+          latestCursor?.nextRunAt &&
+          latestCursor.generation === payload.generation &&
+          latestCursor.attempt === payload.attempt + 1
+        ) {
+          const runAt = await enqueuePersistedEventProvisioningRecovery(
+            context,
+            latest,
+            { ...latestCursor, nextRunAt: latestCursor.nextRunAt }
+          );
+          retry = {
+            record: latest,
+            cursor: { ...latestCursor, nextRunAt: latestCursor.nextRunAt },
+            runAt
+          };
+        } else {
+          haltClaimedEventPreCreateProvisioning(db, {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            generation: payload.generation,
+            expectedAttempt: payload.attempt,
+            reason: result.reason,
+            haltedAt: failedAt.toISOString()
+          });
+        }
+      }
       appendEventLog(db, {
         eventId: record.id,
         action: retry
           ? 'events.provisioning.recovery_scheduled'
           : 'events.provisioning.recovery_rejected',
         metadata: {
-          subgroupChatId: payload.subgroupChatId,
+          ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
           generation: payload.generation,
           failedAttempt: payload.attempt,
           ...(retry ? {
@@ -1308,7 +1828,7 @@ async function recoverFailedEventProvisioning(
         return [
           audit('events.provisioning.recovery_retry_scheduled', {
             eventId: record.id,
-            subgroupChatId: payload.subgroupChatId,
+            ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
             generation: payload.generation,
             failedAttempt: payload.attempt,
             attempt: retry.cursor.attempt,
@@ -1328,7 +1848,7 @@ async function recoverFailedEventProvisioning(
           : 'events.provisioning.recovery_rejected',
       {
         eventId: record.id,
-        subgroupChatId: payload.subgroupChatId,
+        ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
         generation: payload.generation,
         attempt: payload.attempt,
         status: result.status,
@@ -1337,22 +1857,116 @@ async function recoverFailedEventProvisioning(
     )];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const retry = await enqueueAndAdvanceEventProvisioningRecoveryCursor(
-      context,
-      db,
-      record,
-      payload,
-      new Date()
-    );
-    if (retry) {
-      const stage = isManagedCommunitySubgroupProvisioningError(error)
-        ? error.stage
+    const failedAt = new Date();
+    const preCreateError = isManagedCommunitySubgroupPreCreateError(error)
+      ? error
+      : undefined;
+    const postCreateError = isManagedCommunitySubgroupProvisioningError(error)
+      ? error
+      : undefined;
+    let retry: Awaited<ReturnType<typeof enqueueAndAdvanceEventProvisioningRecoveryCursor>> = undefined;
+    let preCreateRetryLimitReached = false;
+    if (payload.subgroupChatId) {
+      retry = await enqueueAndAdvanceEventProvisioningRecoveryCursor(
+        context,
+        db,
+        record,
+        payload,
+        failedAt
+      );
+    } else {
+      const latestAfterAttempt = getEvent(db, record.id);
+      const checkpointedCursor = latestAfterAttempt
+        ? eventProvisioningRecoveryCursor(latestAfterAttempt)
         : undefined;
+      if (
+        latestAfterAttempt?.subgroupChatId &&
+        checkpointedCursor?.nextRunAt &&
+        checkpointedCursor.generation === payload.generation &&
+        checkpointedCursor.attempt === payload.attempt + 1
+      ) {
+        const runAt = await enqueuePersistedEventProvisioningRecovery(
+          context,
+          latestAfterAttempt,
+          { ...checkpointedCursor, nextRunAt: checkpointedCursor.nextRunAt }
+        );
+        retry = {
+          record: latestAfterAttempt,
+          cursor: { ...checkpointedCursor, nextRunAt: checkpointedCursor.nextRunAt },
+          runAt
+        };
+      } else if (preCreateError?.retryableWithoutCheckpoint) {
+        const nextAttempt = payload.attempt + 1;
+        const runAt = eventProvisioningRecoveryRunAt(nextAttempt, failedAt);
+        const retryWithinCleanup = eventPreCreateEligibleBeforeCleanup(record, runAt);
+        preCreateRetryLimitReached = nextAttempt > EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+        if (retryWithinCleanup && !preCreateRetryLimitReached) {
+          const rearmed = rearmClaimedEventPreCreateProvisioningAttempt(db, {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            generation: payload.generation,
+            expectedAttempt: payload.attempt,
+            nextAttempt,
+            nextRunAt: runAt.toISOString(),
+            reason,
+            rearmedAt: failedAt.toISOString()
+          });
+          const rearmedRecord = rearmed ? getEvent(db, record.id) : undefined;
+          const rearmedCursor = rearmedRecord
+            ? eventProvisioningRecoveryCursor(rearmedRecord)
+            : undefined;
+          if (rearmedRecord && rearmedCursor?.nextRunAt) {
+            await enqueuePersistedEventProvisioningRecovery(
+              context,
+              rearmedRecord,
+              { ...rearmedCursor, nextRunAt: rearmedCursor.nextRunAt }
+            );
+            retry = {
+              record: rearmedRecord,
+              cursor: { ...rearmedCursor, nextRunAt: rearmedCursor.nextRunAt },
+              runAt
+            };
+          }
+        } else if (!retryWithinCleanup) {
+          markClaimedEventPreCreateProvisioningMissed(db, {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            generation: payload.generation,
+            expectedAttempt: payload.attempt,
+            expectedCleanupAt: record.cleanupAt,
+            reason: 'Event subgroup creation retries reached the cleanup deadline.',
+            missedAt: failedAt.toISOString()
+          });
+        } else {
+          haltClaimedEventPreCreateProvisioning(db, {
+            eventId: record.id,
+            scopeId: record.scopeId,
+            generation: payload.generation,
+            expectedAttempt: payload.attempt,
+            reason: `Event subgroup creation reached the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts: ${reason}`,
+            haltedAt: failedAt.toISOString()
+          });
+        }
+      } else {
+        haltClaimedEventPreCreateProvisioning(db, {
+          eventId: record.id,
+          scopeId: record.scopeId,
+          generation: payload.generation,
+          expectedAttempt: payload.attempt,
+          reason,
+          haltedAt: failedAt.toISOString()
+        });
+      }
+    }
+    if (retry) {
+      const stage = postCreateError?.stage ?? preCreateError?.stage;
       appendEventLog(db, {
         eventId: record.id,
         action: 'events.provisioning.recovery_scheduled',
         metadata: {
-          subgroupChatId: payload.subgroupChatId,
+          ...(retry.record.subgroupChatId
+            ? { subgroupChatId: retry.record.subgroupChatId }
+            : {}),
           generation: payload.generation,
           failedAttempt: payload.attempt,
           attempt: retry.cursor.attempt,
@@ -1364,7 +1978,9 @@ async function recoverFailedEventProvisioning(
       return [
         audit('events.provisioning.recovery_retry_scheduled', {
           eventId: record.id,
-          subgroupChatId: payload.subgroupChatId,
+          ...(retry.record.subgroupChatId
+            ? { subgroupChatId: retry.record.subgroupChatId }
+            : {}),
           generation: payload.generation,
           failedAttempt: payload.attempt,
           attempt: retry.cursor.attempt,
@@ -1414,16 +2030,22 @@ async function recoverFailedEventProvisioning(
       eventId: record.id,
       action: 'events.provisioning.recovery_failed',
       metadata: {
-        subgroupChatId: payload.subgroupChatId,
+        ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
         generation: payload.generation,
         attempt: payload.attempt,
         reason,
-        retryable: isManagedCommunitySubgroupProvisioningError(error)
+        retryable: Boolean(payload.subgroupChatId) ||
+          (preCreateError?.retryableWithoutCheckpoint === true && !preCreateRetryLimitReached) ||
+          Boolean(postCreateError),
+        ...(preCreateRetryLimitReached ? {
+          retryLimitReached: true,
+          maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS
+        } : {})
       }
     });
     return [audit('events.provisioning.recovery_failed', {
       eventId: record.id,
-      subgroupChatId: payload.subgroupChatId,
+      ...(payload.subgroupChatId ? { subgroupChatId: payload.subgroupChatId } : {}),
       generation: payload.generation,
       attempt: payload.attempt,
       reason
@@ -1471,10 +2093,13 @@ async function enqueueAndAdvanceEventProvisioningRecoveryCursor(
   runAt: Date;
 } | undefined> {
   const latest = getEvent(db, record.id) ?? record;
+  const retrySubgroupChatId = payload.subgroupChatId;
   if (
     latest.eventStatus !== 'failed' ||
     latest.groupLifecycleStatus !== 'none' ||
-    latest.subgroupChatId !== payload.subgroupChatId
+    (retrySubgroupChatId
+      ? latest.subgroupChatId !== retrySubgroupChatId
+      : Boolean(latest.subgroupChatId))
   ) {
     return undefined;
   }
@@ -1493,27 +2118,13 @@ async function enqueueAndAdvanceEventProvisioningRecoveryCursor(
     attempt: nextAttempt,
     nextRunAt: runAt.toISOString()
   };
-  await enqueuePluginJob(context.queue, {
-    pluginId: EVENTS_PLUGIN_ID,
-    jobName: EVENTS_JOBS.provisioningRecovery,
-    scopeId: latest.scopeId,
-    ...(latest.groupId ? { groupId: latest.groupId } : {}),
-    ...(latest.groupWid ? { groupWid: latest.groupWid } : {}),
-    runAt,
-    payload: {
-      eventId: latest.id,
-      subgroupChatId: payload.subgroupChatId,
-      generation: payload.generation,
-      attempt: nextAttempt
-    } satisfies EventProvisioningRecoveryPayload,
-    dedupeKey: eventProvisioningRecoveryDedupeKey(latest, nextCursor)
-  });
   const advanced = advanceEventProvisioningRecovery(db, {
     eventId: latest.id,
     scopeId: latest.scopeId,
-    subgroupChatId: payload.subgroupChatId,
+    ...(retrySubgroupChatId ? { subgroupChatId: retrySubgroupChatId } : {}),
     generation: payload.generation,
     expectedAttempt: payload.attempt,
+    expectedNextRunAt: currentCursor.nextRunAt,
     nextAttempt,
     nextRunAt: runAt.toISOString(),
     updatedAt: now.toISOString()
@@ -1533,6 +2144,21 @@ async function enqueueAndAdvanceEventProvisioningRecoveryCursor(
   ) {
     return undefined;
   }
+  await enqueuePluginJob(context.queue, {
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.provisioningRecovery,
+    scopeId: advancedRecord.scopeId,
+    ...(advancedRecord.groupId ? { groupId: advancedRecord.groupId } : {}),
+    ...(advancedRecord.groupWid ? { groupWid: advancedRecord.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: advancedRecord.id,
+      ...(retrySubgroupChatId ? { subgroupChatId: retrySubgroupChatId } : {}),
+      generation: payload.generation,
+      attempt: nextAttempt
+    } satisfies EventProvisioningRecoveryPayload,
+    dedupeKey: eventProvisioningRecoveryDedupeKey(advancedRecord, nextCursor)
+  });
   return {
     record: advancedRecord,
     cursor: {
@@ -1543,27 +2169,67 @@ async function enqueueAndAdvanceEventProvisioningRecoveryCursor(
   };
 }
 
+async function enqueuePersistedEventProvisioningRecovery(
+  context: PluginRuntimeContext,
+  record: StoredEventRecord,
+  cursor: EventProvisioningRecoveryCursor & { nextRunAt: string }
+): Promise<Date> {
+  const runAt = new Date(cursor.nextRunAt);
+  if (!Number.isFinite(runAt.getTime())) {
+    throw new Error(`Event ${record.id} has an invalid persisted provisioning retry time.`);
+  }
+  await enqueuePluginJob(context.queue, {
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.provisioningRecovery,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: record.id,
+      ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
+      generation: cursor.generation,
+      attempt: cursor.attempt
+    } satisfies EventProvisioningRecoveryPayload,
+    dedupeKey: eventProvisioningRecoveryDedupeKey(record, cursor)
+  });
+  return runAt;
+}
+
 function eventProvisioningRecoveryPayload(payload: unknown): EventProvisioningRecoveryPayload | undefined {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return undefined;
   }
   const candidate = payload as Record<string, unknown>;
   const eventId = typeof candidate.eventId === 'string' ? candidate.eventId.trim() : '';
-  const subgroupChatId = typeof candidate.subgroupChatId === 'string'
+  const hasSubgroupChatId = Object.prototype.hasOwnProperty.call(candidate, 'subgroupChatId');
+  const subgroupChatId = hasSubgroupChatId && typeof candidate.subgroupChatId === 'string'
     ? candidate.subgroupChatId.trim().toLowerCase()
-    : '';
+    : undefined;
   const generation = typeof candidate.generation === 'string' ? candidate.generation.trim() : '';
   const attempt = candidate.attempt;
   if (
     !eventId ||
-    !subgroupChatId.endsWith('@g.us') ||
+    (hasSubgroupChatId && !subgroupChatId?.endsWith('@g.us')) ||
     !generation ||
     !Number.isInteger(attempt) ||
     Number(attempt) < 1
   ) {
     return undefined;
   }
-  return { eventId, subgroupChatId, generation, attempt: Number(attempt) };
+  return {
+    eventId,
+    ...(subgroupChatId ? { subgroupChatId } : {}),
+    generation,
+    attempt: Number(attempt)
+  };
+}
+
+function eventPreCreateEligibleBeforeCleanup(record: StoredEventRecord, now: Date): boolean {
+  const cleanupAt = new Date(record.cleanupAt);
+  return Number.isFinite(now.getTime()) &&
+    Number.isFinite(cleanupAt.getTime()) &&
+    now.getTime() < cleanupAt.getTime();
 }
 
 function unplannedEventFinalizationPayload(
@@ -1587,9 +2253,6 @@ function eventProvisioningRecoveryAction(
   cursor: EventProvisioningRecoveryCursor & { nextRunAt: string }
 ): PluginEnqueueJobAction {
   const subgroupChatId = record.subgroupChatId;
-  if (!subgroupChatId) {
-    throw new Error(`Event ${record.id} does not have an exact subgroup recovery target.`);
-  }
   return {
     type: 'plugin.enqueueJob',
     pluginId: EVENTS_PLUGIN_ID,
@@ -1598,7 +2261,7 @@ function eventProvisioningRecoveryAction(
     runAt: new Date(cursor.nextRunAt),
     payload: {
       eventId: record.id,
-      subgroupChatId,
+      ...(subgroupChatId ? { subgroupChatId } : {}),
       generation: cursor.generation,
       attempt: cursor.attempt
     } satisfies EventProvisioningRecoveryPayload,
@@ -2112,29 +2775,36 @@ function effectiveCloseAt(record: StoredEventRecord, config: ReturnType<typeof p
 function persistEffectiveCloseAt(
   db: ReturnType<typeof eventsDatabase>,
   record: StoredEventRecord,
-  closeAt: Date
-): void {
+  closeAt: Date,
+  now: Date = new Date()
+): StoredEventRecord {
   if (!Number.isFinite(closeAt.getTime())) {
-    return;
+    return record;
   }
   const closeAtIso = closeAt.toISOString();
   if (record.closeAt === closeAtIso) {
-    return;
+    return record;
   }
-  const updatedAt = new Date().toISOString();
-  updateEventCloseAt(db, {
+  const updatedAt = now.toISOString();
+  const updated = updateEventCloseAt(db, {
     eventId: record.id,
+    scopeId: record.scopeId,
+    expectedUpdatedAt: record.updatedAt,
     closeAt: closeAtIso,
     updatedAt
   });
-  appendEventLog(db, {
-    eventId: record.id,
-    action: 'events.close.rescheduled',
-    metadata: {
-      previousCloseAt: record.closeAt,
-      effectiveCloseAt: closeAtIso
-    }
-  });
+  const refreshed = getEvent(db, record.id) ?? record;
+  if (updated) {
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.close.rescheduled',
+      metadata: {
+        previousCloseAt: record.closeAt,
+        effectiveCloseAt: closeAtIso
+      }
+    });
+  }
+  return refreshed;
 }
 
 async function markStartupEventMissed(
@@ -2149,7 +2819,17 @@ async function markStartupEventMissed(
   const scheduledLocalDate = eventScheduledLocalDate(record) ?? 'unknown';
   const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : record.closeAt;
   const reason = `Startup recovery found the poll close due at ${closeAtIso} after the scheduled event date ${scheduledLocalDate}.`;
-  markEventMissed(db, record.id, reason, missedAt);
+  const missed = markUnclaimedEventPreCreateProvisioningMissed(db, {
+    eventId: record.id,
+    scopeId: record.scopeId,
+    expectedUpdatedAt: record.updatedAt,
+    expectedCleanupAt: record.cleanupAt,
+    reason,
+    missedAt
+  });
+  if (!missed) {
+    return;
+  }
   appendEventLog(db, {
     eventId: record.id,
     action: 'events.close.missed',

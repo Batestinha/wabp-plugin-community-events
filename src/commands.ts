@@ -2627,8 +2627,7 @@ async function publishConfirmedEvent(input: {
       method: DOAS_POLL_PUBLISH_METHOD,
       scopeId: input.draft.scopeId,
       actorIdentityId: input.draft.actorIdentityId,
-      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
-      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
+      groupWid: input.announcementGroupWid,
       input: {
         groupWid: input.announcementGroupWid,
         question: materialized.pollQuestion,

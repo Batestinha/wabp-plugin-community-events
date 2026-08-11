@@ -1,9 +1,13 @@
 import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import type {
+  CreatedGroup,
+  CreatedGroupParticipantResult
+} from '../../../platform/transport/transportTypes';
 import {
   COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
   COMMUNITY_SUBGROUPS_COMPLETE_METHOD,
   COMMUNITY_SUBGROUPS_CONFIGURE_METHOD,
+  COMMUNITY_SUBGROUPS_RECONCILE_CREATOR_METHOD,
   COMMUNITY_SUBGROUPS_SERVICE_ID,
   type CommunitySubgroupCandidateOutput,
   type CommunitySubgroupCompleteOutput,
@@ -39,6 +43,34 @@ export async function createEventCommunitySubgroupCandidate(input: {
     input: {
       title: input.title,
       parentCommunityWid
+    }
+  });
+}
+
+export async function reconcileEventCommunitySubgroupCreator(input: {
+  context: EventSubgroupContext;
+  scopeId: string;
+  actorIdentityId: string;
+  subgroupChatId: string;
+  subgroupTitle: string;
+  participants: Record<string, CreatedGroupParticipantResult>;
+  parentCommunityWid: string;
+}): Promise<{ created: CreatedGroup }> {
+  if (!input.context.services) {
+    throw new Error('Plugin runtime does not expose plugin services.');
+  }
+  await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
+  return input.context.services.call<{ created: CreatedGroup }>({
+    serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
+    method: COMMUNITY_SUBGROUPS_RECONCILE_CREATOR_METHOD,
+    scopeId: input.scopeId,
+    actorIdentityId: input.actorIdentityId,
+    groupWid: input.parentCommunityWid,
+    input: {
+      chatId: input.subgroupChatId,
+      title: input.subgroupTitle,
+      participants: input.participants,
+      parentCommunityWid: input.parentCommunityWid
     }
   });
 }

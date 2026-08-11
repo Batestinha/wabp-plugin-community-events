@@ -27,13 +27,16 @@ import {
   eventCalendarPublicationConfigFingerprint,
   writePublishAndRecordScopeCalendar
 } from './calendarStatus';
+import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { eventCleanupJobRequest } from './cleanupScheduling';
 import { repairEventEdit } from './editRepair';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
   completeEventCommunitySubgroup,
   configureEventCommunitySubgroup,
-  createEventCommunitySubgroupCandidate
+  createEventCommunitySubgroupCandidate,
+  reconcileEventCommunitySubgroupCreator
 } from './subgroups';
 import {
   eventWeatherForecastJobAction,
@@ -54,6 +57,7 @@ import {
   claimScheduledEventPreCreateProvisioningAttempt,
   ensureEventCalendarPublicationConfiguration,
   eventsDatabase,
+  expireKnownChildEventProvisioningForCleanup,
   getEvent,
   getUnplannedEventFinalization,
   getEventByEquivalentPoll,
@@ -76,10 +80,11 @@ import {
   claimEventCleanup,
   completeUnplannedEventFinalization,
   initializeEventProvisioningRecovery,
-  markEventCleanupFailed,
   markClaimedEventCleaned,
+  markClaimedEventCleanupFailed,
   markEventCleaned,
   markClaimedEventReadyForCommunityLink,
+  nextEventRevisionTimestamp,
   completeClaimedEventCommunityLink,
   haltInterruptedEventPreCreateClaimAtStartup,
   markUnclaimedEventFailed,
@@ -91,6 +96,8 @@ import {
   releaseExpiredEventCleanupClaims,
   resolvedEventCalendarId,
   renewEventCleanupClaim,
+  renewClaimedEventCommunityLinkLease,
+  renewClaimedKnownChildEventProvisioningLease,
   haltClaimedEventPreCreateProvisioning,
   haltClaimedKnownChildEventProvisioning,
   markClaimedEventPreCreateProvisioningMissed,
@@ -124,6 +131,10 @@ import {
 } from './suggestionConversion';
 import { registerEventFlowCompletionHandlers } from './commands';
 import { registerEventCreationFlowDefinitionResolver } from './eventCreationFlowStarter';
+import {
+  eventCreatorMembershipPauseKindForFailure,
+  notifyEventCreatorMembershipPaused
+} from './creatorMembershipNotice';
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
@@ -362,6 +373,15 @@ export async function recoverEventProvisioningJobs(
   let enqueued = 0;
   for (const candidate of records) {
     let record = candidate;
+    if (record.subgroupChatId) {
+      // Repair the deadline job independently of whether provisioning itself
+      // is scheduled, claimed, or durably halted. This is what makes a lost
+      // initial Redis enqueue recoverable without reopening provisioning.
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        ...eventCleanupJobRequest(record)
+      });
+    }
     if (record.subgroupChatId && !eventProvisioningRecoveryCursor(record)) {
       const initialized = initializeEventProvisioningRecovery(db, {
         eventId: record.id,
@@ -407,6 +427,28 @@ export async function recoverEventProvisioningJobs(
             runAt: cursor?.nextRunAt
           }
         });
+      }
+    }
+    if (record.subgroupChatId) {
+      const cleanupTransfer = transferKnownChildProvisioningToCleanup(db, record, now);
+      if (cleanupTransfer.status === 'expired') {
+        enqueued += 1;
+        continue;
+      }
+      if (cleanupTransfer.status === 'deferred') {
+        await enqueuePluginJob(context.queue, {
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.cleanup,
+          scopeId: record.scopeId,
+          runAt: cleanupTransfer.runAt,
+          payload: { eventId: record.id, attempt: 0 },
+          dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:provisioning-lease:${cleanupTransfer.runAt.toISOString()}`
+        });
+        enqueued += 1;
+        continue;
+      }
+      if (cleanupTransfer.status === 'changed') {
+        continue;
       }
     }
     if (!cursor?.nextRunAt) {
@@ -1109,11 +1151,70 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     if (!subgroupChatId || !subgroupTitle || !preCreateClaim) {
       throw new Error(`Event ${record.id} has no exact claimed subgroup candidate.`);
     }
+    const checkpointedEvent = getEvent(db, record.id);
+    if (!checkpointedEvent || checkpointedEvent.subgroupChatId !== subgroupChatId) {
+      throw new Error(`Event ${record.id} lost its exact claimed subgroup candidate ${subgroupChatId}.`);
+    }
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      ...eventCleanupJobRequest(checkpointedEvent)
+    });
     parentCommunityWid ??= await context.communityGroupWidForScope?.(record.scopeId);
     if (!parentCommunityWid) {
       throw new Error(`No parent community is mapped for scope ${record.scopeId}.`);
     }
+    const creatorLeaseEvent = getEvent(db, record.id);
+    if (!creatorLeaseEvent || creatorLeaseEvent.subgroupChatId !== subgroupChatId) {
+      throw new Error(`Event ${record.id} lost its exact claimed subgroup before creator reconciliation.`);
+    }
+    const creatorLeaseRenewedAt = nextEventRevisionTimestamp(creatorLeaseEvent.updatedAt);
+    if (!renewClaimedKnownChildEventProvisioningLease(db, {
+      eventId: creatorLeaseEvent.id,
+      scopeId: creatorLeaseEvent.scopeId,
+      subgroupChatId,
+      expectedEventStatus: creatorLeaseEvent.eventStatus,
+      expectedGroupLifecycleStatus: creatorLeaseEvent.groupLifecycleStatus,
+      expectedUpdatedAt: creatorLeaseEvent.updatedAt,
+      generation: preCreateClaim.generation,
+      attempt: preCreateClaim.attempt,
+      renewedAt: creatorLeaseRenewedAt
+    })) {
+      throw new Error(
+        `Event ${record.id} lost its claimed creator-reconciliation lease before provider reconciliation.`
+      );
+    }
     let participantOutcomes = storedParticipantOutcomes(db, record.id);
+    const creatorResult = await reconcileEventCommunitySubgroupCreator({
+      context,
+      scopeId: record.scopeId,
+      actorIdentityId: requireHookEventActorIdentityId(record),
+      subgroupChatId,
+      subgroupTitle,
+      participants: participantOutcomes,
+      parentCommunityWid
+    });
+    if (creatorResult.created.chatId.trim().toLowerCase() !== subgroupChatId.trim().toLowerCase()) {
+      throw new Error(
+        `Event ${record.id} creator reconciliation returned ${creatorResult.created.chatId}; expected ${subgroupChatId}.`
+      );
+    }
+    subgroupTitle = creatorResult.created.title.trim() || subgroupTitle;
+    participantOutcomes = creatorResult.created.participants;
+    const creatorCheckpointed = checkpointClaimedEventParticipantOutcomes(db, {
+      eventId: record.id,
+      scopeId: record.scopeId,
+      subgroupChatId,
+      subgroupTitle,
+      participants: participantOutcomes,
+      recoveryGeneration: preCreateClaim.generation,
+      recoveryAttempt: preCreateClaim.attempt,
+      checkpointedAt: nextEventRevisionTimestamp(creatorLeaseRenewedAt)
+    });
+    if (!creatorCheckpointed) {
+      throw new Error(
+        `Event ${record.id} changed before creator membership was checkpointed.`
+      );
+    }
     await configureEventCommunitySubgroup({
       context,
       scopeId: record.scopeId,
@@ -1136,6 +1237,33 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     });
     if (!fenced) {
       throw new Error(`Event ${record.id} changed before its community-link fence was persisted.`);
+    }
+    const linkReadyEvent = getEvent(db, record.id);
+    if (!linkReadyEvent) {
+      throw new Error(`Event ${record.id} disappeared after its community-link fence was persisted.`);
+    }
+    await publishEventCalendarBeforeCommunityLink({
+      context,
+      config,
+      event: linkReadyEvent
+    });
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      ...eventCleanupJobRequest(linkReadyEvent)
+    });
+    const linkLeaseRenewedAt = nextEventRevisionTimestamp(linkReadyEvent.updatedAt);
+    if (!renewClaimedEventCommunityLinkLease(db, {
+      eventId: linkReadyEvent.id,
+      scopeId: linkReadyEvent.scopeId,
+      subgroupChatId,
+      expectedUpdatedAt: linkReadyEvent.updatedAt,
+      generation: preCreateClaim.generation,
+      attempt: preCreateClaim.attempt,
+      renewedAt: linkLeaseRenewedAt
+    })) {
+      throw new Error(
+        `Event ${record.id} lost its claimed community-link lease before provider completion.`
+      );
     }
     const result = await completeEventCommunitySubgroup({
       context,
@@ -1306,6 +1434,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     let failureMetadata: Record<string, unknown> = { reason };
     let failedSubgroupChatId: string | undefined;
     let provisioningRecoveryAction: PluginEnqueueJobAction | undefined;
+    let cleanupDeadlineAction: PluginEnqueueJobAction | undefined;
     let failurePersisted = true;
     if (isManagedCommunitySubgroupPreCreateError(error)) {
       const { provisioning, stage } = error;
@@ -1394,6 +1523,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     } else if (isManagedCommunitySubgroupProvisioningError(error)) {
       const { created, provisioning, stage } = error;
       const retryableDisposition = error.recoveryDisposition === 'verify_only' ||
+        error.recoveryDisposition === 'creator_membership_verify_only' ||
         error.recoveryDisposition === 'mutation_allowed';
       const operatorRequired = !retryableDisposition;
       failedSubgroupChatId = created.chatId;
@@ -1492,6 +1622,15 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
               updatedAt: failedAt
             }));
       }
+      if (checkpointPersisted) {
+        const checkpointedEvent = getEvent(db, record.id);
+        if (checkpointedEvent?.subgroupChatId === created.chatId) {
+          await enqueuePluginJob(context.queue, {
+            pluginId: EVENTS_PLUGIN_ID,
+            ...eventCleanupJobRequest(checkpointedEvent)
+          });
+        }
+      }
       failurePersisted = checkpointPersisted;
       failureMetadata = {
         reason,
@@ -1570,6 +1709,12 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
             reason,
             failedAt
           });
+          if (failurePersisted) {
+            const failedRecord = getEvent(db, latest.id);
+            if (failedRecord?.subgroupChatId === latest.subgroupChatId) {
+              cleanupDeadlineAction = closeCleanupAction(failedRecord);
+            }
+          }
         } else if (
           latest?.subgroupChatId &&
           latest.eventStatus === 'failed' &&
@@ -1631,6 +1776,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         reason: 'event state changed or subgroup creation is already claimed'
       })];
     }
+    await notifyCreatorAboutMembershipPause(context, db, record.id, error);
     appendEventLog(db, {
       eventId: record.id,
       action: 'events.close.failed',
@@ -1646,6 +1792,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       metadata: failureMetadata
     });
     return [
+      ...(cleanupDeadlineAction ? [cleanupDeadlineAction] : []),
       ...(provisioningRecoveryAction ? [provisioningRecoveryAction] : []),
       audit('events.close.failed', { eventId: record.id, ...failureMetadata })
     ];
@@ -1863,8 +2010,48 @@ async function recoverFailedEventProvisioning(
       reason: 'stale provisioning recovery cursor'
     })];
   }
-  const claimedAt = new Date();
+  const claimedAt = job.receivedAt;
   if (payload.subgroupChatId) {
+    const cleanupTransfer = transferKnownChildProvisioningToCleanup(db, record, claimedAt);
+    if (cleanupTransfer.status === 'expired') {
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        ...eventCleanupJobRequest(cleanupTransfer.event)
+      });
+      return [audit('events.provisioning.cleanup_deadline_reached', {
+        eventId: record.id,
+        subgroupChatId: payload.subgroupChatId,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        cleanupAt: record.cleanupAt
+      })];
+    }
+    if (cleanupTransfer.status === 'deferred') {
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.cleanup,
+        scopeId: record.scopeId,
+        runAt: cleanupTransfer.runAt,
+        payload: { eventId: record.id, attempt: 0 },
+        dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:provisioning-lease:${cleanupTransfer.runAt.toISOString()}`
+      });
+      return [audit('events.provisioning.cleanup_waiting_for_claim', {
+        eventId: record.id,
+        subgroupChatId: payload.subgroupChatId,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        runAt: cleanupTransfer.runAt.toISOString()
+      })];
+    }
+    if (cleanupTransfer.status === 'changed') {
+      return [audit('events.provisioning.recovery_skipped', {
+        eventId: record.id,
+        subgroupChatId: payload.subgroupChatId,
+        generation: payload.generation,
+        attempt: payload.attempt,
+        reason: 'event changed while transferring expired provisioning to cleanup'
+      })];
+    }
     const claimed = claimScheduledKnownChildEventProvisioningAttempt(db, {
       eventId: record.id,
       scopeId: record.scopeId,
@@ -2147,6 +2334,7 @@ async function recoverFailedEventProvisioning(
       ? error
       : undefined;
     const retryableLinkDisposition = postCreateError?.recoveryDisposition === 'verify_only' ||
+      postCreateError?.recoveryDisposition === 'creator_membership_verify_only' ||
       postCreateError?.recoveryDisposition === 'mutation_allowed';
     let operatorRequired = Boolean(payload.subgroupChatId) && !retryableLinkDisposition;
     let recoverySubgroupChatId = payload.subgroupChatId;
@@ -2322,6 +2510,7 @@ async function recoverFailedEventProvisioning(
         });
       }
     }
+    await notifyCreatorAboutMembershipPause(context, db, record.id, error);
     if (retry) {
       const stage = postCreateError?.stage ?? preCreateError?.stage;
       appendEventLog(db, {
@@ -2619,6 +2808,87 @@ function eventPreCreateEligibleBeforeCleanup(record: StoredEventRecord, now: Dat
     now.getTime() < cleanupAt.getTime();
 }
 
+const EVENT_PROVISIONING_CLEANUP_DEADLINE_REASON =
+  'Event subgroup provisioning reached its cleanup deadline before the community link completed.';
+
+type KnownChildCleanupTransfer =
+  | { status: 'not_applicable' | 'not_due' | 'changed' }
+  | { status: 'deferred'; runAt: Date }
+  | { status: 'expired'; event: StoredEventRecord };
+
+function transferKnownChildProvisioningToCleanup(
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  now: Date
+): KnownChildCleanupTransfer {
+  const cleanupAt = new Date(record.cleanupAt);
+  if (!Number.isFinite(cleanupAt.getTime()) || cleanupAt.getTime() > now.getTime()) {
+    return { status: 'not_due' };
+  }
+  const cursor = eventProvisioningRecoveryCursor(record);
+  if (
+    record.eventStatus !== 'failed' ||
+    (record.groupLifecycleStatus !== 'none' && record.groupLifecycleStatus !== 'poll_closed') ||
+    !record.subgroupChatId ||
+    !cursor
+  ) {
+    return { status: 'not_applicable' };
+  }
+  if (!cursor.nextRunAt && !record.provisioningRecoveryHaltedAt) {
+    const claimedAt = new Date(record.updatedAt);
+    const runAt = Number.isFinite(claimedAt.getTime())
+      ? new Date(claimedAt.getTime() + EVENT_CLEANUP_CLAIM_LEASE_MS)
+      : now;
+    if (runAt.getTime() > now.getTime()) {
+      return { status: 'deferred', runAt };
+    }
+  }
+  const expiredAt = now.toISOString();
+  const expired = expireKnownChildEventProvisioningForCleanup(db, {
+    eventId: record.id,
+    scopeId: record.scopeId,
+    subgroupChatId: record.subgroupChatId,
+    expectedUpdatedAt: record.updatedAt,
+    expectedCleanupAt: record.cleanupAt,
+    generation: cursor.generation,
+    attempt: cursor.attempt,
+    expectedNextRunAt: cursor.nextRunAt ?? null,
+    expectedHaltedAt: record.provisioningRecoveryHaltedAt ?? null,
+    reason: EVENT_PROVISIONING_CLEANUP_DEADLINE_REASON,
+    expiredAt
+  });
+  if (!expired) {
+    return { status: 'changed' };
+  }
+  const event = getEvent(db, record.id);
+  if (!event) {
+    return { status: 'changed' };
+  }
+  appendEventLog(db, {
+    eventId: event.id,
+    action: 'events.provisioning.cleanup_deadline_reached',
+    metadata: {
+      subgroupChatId: event.subgroupChatId,
+      generation: cursor.generation,
+      attempt: cursor.attempt,
+      cleanupAt: event.cleanupAt
+    }
+  });
+  return { status: 'expired', event };
+}
+
+function cleanupDeferAction(record: StoredEventRecord, runAt: Date, reason: string): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.cleanup,
+    scopeId: record.scopeId,
+    runAt,
+    payload: { eventId: record.id, attempt: 0 },
+    dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:${reason}:${runAt.toISOString()}`
+  };
+}
+
 function unplannedEventFinalizationPayload(
   payload: unknown
 ): UnplannedEventFinalizationPayload | undefined {
@@ -2672,7 +2942,8 @@ async function publishClosedEventCalendar(
       db: input.db,
       config: input.config,
       scopeId: input.record.scopeId,
-      calendarId: input.calendarId
+      calendarId: input.calendarId,
+      requestGeneration: false
     });
     if (publication && !publication.ok) {
       return recordCalendarPublicationFailure(
@@ -2769,15 +3040,11 @@ async function recordPostCloseFailure(
 }
 
 function closeCleanupAction(record: StoredEventRecord): PluginEnqueueJobAction {
+  const request = eventCleanupJobRequest(record);
   return {
     type: 'plugin.enqueueJob',
     pluginId: EVENTS_PLUGIN_ID,
-    jobName: EVENTS_JOBS.cleanup,
-    scopeId: record.scopeId,
-    ...(record.groupId ? { groupId: record.groupId } : {}),
-    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
-    runAt: new Date(record.cleanupAt),
-    payload: { eventId: record.id, attempt: 0 }
+    ...request
   };
 }
 
@@ -2884,12 +3151,22 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
   if (!eventId) {
     return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
   }
-  const record = getEvent(db, eventId);
+  let record = getEvent(db, eventId);
   if (!record || record.groupLifecycleStatus === 'cleaned') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or already cleaned' })];
   }
-  if ((record.eventStatus !== 'active' && record.eventStatus !== 'completed') ||
-      (record.groupLifecycleStatus !== 'poll_closed' && record.groupLifecycleStatus !== 'cleanup_failed')) {
+  const ordinaryCleanup = (record.eventStatus === 'active' || record.eventStatus === 'completed') &&
+    (record.groupLifecycleStatus === 'poll_closed' || record.groupLifecycleStatus === 'cleanup_failed');
+  const pausedKnownChild = record.eventStatus === 'failed' &&
+    (record.groupLifecycleStatus === 'none' || record.groupLifecycleStatus === 'poll_closed') &&
+    Boolean(record.subgroupChatId) &&
+    Boolean(eventProvisioningRecoveryCursor(record));
+  const expiredKnownChild = record.eventStatus === 'failed' &&
+    record.groupLifecycleStatus === 'cleanup_failed' &&
+    Boolean(record.subgroupChatId) &&
+    !eventProvisioningRecoveryCursor(record) &&
+    !record.provisioningRecoveryHaltedAt;
+  if (!ordinaryCleanup && !pausedKnownChild && !expiredKnownChild) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: `event lifecycle is ${record.eventStatus}/${record.groupLifecycleStatus}` })];
   }
 
@@ -2908,6 +3185,55 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
       payload: { eventId: record.id, attempt: 0 },
       dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:deferred:${record.cleanupAt}`
     }];
+  }
+
+  if (pausedKnownChild) {
+    let cleanupTransfer = transferKnownChildProvisioningToCleanup(db, record, now);
+    if (cleanupTransfer.status === 'changed') {
+      record = getEvent(db, eventId);
+      if (!record || record.groupLifecycleStatus === 'cleaned') {
+        return [audit('events.job.skipped', {
+          jobName: job.jobName,
+          eventId,
+          reason: 'event changed while cleanup claimed expired provisioning'
+        })];
+      }
+      cleanupTransfer = transferKnownChildProvisioningToCleanup(db, record, now);
+    }
+    if (cleanupTransfer.status === 'deferred') {
+      return [audit('events.cleanup.provisioning_claim_active', {
+        eventId: record.id,
+        subgroupChatId: record.subgroupChatId,
+        runAt: cleanupTransfer.runAt.toISOString()
+      }), cleanupDeferAction(record, cleanupTransfer.runAt, 'provisioning-lease')];
+    }
+    if (cleanupTransfer.status === 'expired') {
+      record = cleanupTransfer.event;
+    } else if (cleanupTransfer.status !== 'not_applicable') {
+      return [audit('events.job.skipped', {
+        jobName: job.jobName,
+        eventId,
+        reason: `expired provisioning cleanup transfer ${cleanupTransfer.status}`
+      })];
+    }
+  }
+
+  const cleanupEligibleAfterTransfer = (
+    (record.eventStatus === 'active' || record.eventStatus === 'completed') &&
+    (record.groupLifecycleStatus === 'poll_closed' || record.groupLifecycleStatus === 'cleanup_failed')
+  ) || (
+    record.eventStatus === 'failed' &&
+    record.groupLifecycleStatus === 'cleanup_failed' &&
+    Boolean(record.subgroupChatId) &&
+    !eventProvisioningRecoveryCursor(record) &&
+    !record.provisioningRecoveryHaltedAt
+  );
+  if (!cleanupEligibleAfterTransfer) {
+    return [audit('events.job.skipped', {
+      jobName: job.jobName,
+      eventId,
+      reason: `event lifecycle changed to ${record.eventStatus}/${record.groupLifecycleStatus}`
+    })];
   }
 
   const config = parseEventsConfig(await context.configFor(record.scopeId));
@@ -3037,26 +3363,18 @@ async function cleanupFailed(
   config: ReturnType<typeof parseEventsConfig>,
   attempt: number,
   reason: string,
-  metadata: Record<string, unknown> = {},
-  cleanupClaimId?: string | undefined
+  metadata: Record<string, unknown>,
+  cleanupClaimId: string
 ): Promise<PluginAction[]> {
-  if (cleanupClaimId && !releaseEventCleanupClaim(db, {
-    eventId: record.id,
-    claimId: cleanupClaimId
-  })) {
-    return [audit('events.job.skipped', {
-      jobName: EVENTS_JOBS.cleanup,
-      eventId: record.id,
-      reason: 'cleanup claim changed while recording cleanup failure'
-    })];
-  }
   const failedAt = new Date().toISOString();
-  if (!markEventCleanupFailed(db, {
+  const failed = markClaimedEventCleanupFailed(db, {
     eventId: record.id,
+    claimId: cleanupClaimId,
     expectedUpdatedAt: record.updatedAt,
     reason,
     failedAt
-  })) {
+  });
+  if (!failed) {
     return [audit('events.job.skipped', {
       jobName: EVENTS_JOBS.cleanup,
       eventId: record.id,
@@ -3389,9 +3707,56 @@ function storedParticipantOutcomes(
       ...(participant.statusCode !== undefined ? { statusCode: participant.statusCode } : {}),
       ...(participant.message ? { message: participant.message } : {}),
       isGroupCreator: participant.isGroupCreator,
-      isInviteV4Sent: participant.isInviteV4Sent
+      isInviteV4Sent: participant.isInviteV4Sent,
+      ...(participant.requiredCreatorMembershipStatus
+        ? { requiredCreatorMembershipStatus: participant.requiredCreatorMembershipStatus }
+        : {})
     }
   ]));
+}
+
+async function notifyCreatorAboutMembershipPause(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string,
+  error: unknown
+): Promise<void> {
+  const kind = eventCreatorMembershipPauseKindForFailure(error);
+  if (!kind) {
+    return;
+  }
+  const event = getEvent(db, eventId);
+  if (!event?.subgroupChatId) {
+    return;
+  }
+  try {
+    const notice = await notifyEventCreatorMembershipPaused({ context, event, kind });
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.creator_membership_notice_sent',
+      metadata: {
+        subgroupChatId: event.subgroupChatId,
+        kind,
+        idempotencyKey: notice.idempotencyKey,
+        groupJoinUrlIncluded: Boolean(notice.groupJoinUrl)
+      }
+    });
+  } catch (noticeError) {
+    const reason = noticeError instanceof Error ? noticeError.message : String(noticeError);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.creator_membership_notice_failed',
+      metadata: {
+        subgroupChatId: event.subgroupChatId,
+        kind,
+        reason
+      }
+    });
+    context.logger.warn(
+      { error: noticeError, eventId: event.id, subgroupChatId: event.subgroupChatId, kind },
+      'Unable to deliver event creator membership pause notice'
+    );
+  }
 }
 
 async function appendJsonLog(

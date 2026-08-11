@@ -215,6 +215,7 @@ export interface StoredCreatedGroupParticipant {
   message?: string | undefined;
   isGroupCreator: boolean;
   isInviteV4Sent: boolean;
+  requiredCreatorMembershipStatus?: CreatedGroupParticipantResult['requiredCreatorMembershipStatus'];
   createdAt: string;
 }
 
@@ -890,8 +891,8 @@ export function insertEvent(
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
-      provisioning_recovery_next_run_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      provisioning_recovery_next_run_at, provisioning_recovery_halted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -941,7 +942,8 @@ export function insertEvent(
     event.error ?? null,
     event.provisioningRecoveryGeneration ?? null,
     event.provisioningRecoveryAttempt ?? null,
-    event.provisioningRecoveryNextRunAt ?? null
+    event.provisioningRecoveryNextRunAt ?? null,
+    event.provisioningRecoveryHaltedAt ?? null
   );
 }
 
@@ -1214,8 +1216,18 @@ export function listCancellableEvents(db: PluginDatabase, scopeId: string): Stor
 export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
-      WHERE event_status IN ('active', 'completed')
-        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+      WHERE (
+          event_status IN ('active', 'completed')
+          AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        ) OR (
+          event_status = 'failed'
+          AND group_lifecycle_status = 'cleanup_failed'
+          AND subgroup_chat_id IS NOT NULL
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND provisioning_recovery_halted_at IS NULL
+        )
       ORDER BY cleanup_at ASC, id ASC`
   ).map(eventFromRow);
 }
@@ -1298,7 +1310,7 @@ export function markClaimedEventReadyForCommunityLink(db: PluginDatabase, input:
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'poll_closed',
-            calendar_status = 'hidden',
+            calendar_status = 'included',
             subgroup_title = ?,
             closed_at = COALESCE(closed_at, ?),
             error = 'Community subgroup link is pending.',
@@ -1328,6 +1340,71 @@ export function markClaimedEventReadyForCommunityLink(db: PluginDatabase, input:
   return result.changes === 1;
 }
 
+/**
+ * Makes an already-configured, exact claimed child calendar-visible before its
+ * physical community link is attempted. This is deliberately idempotent for
+ * the same claim so crash recovery can repair the hidden poll_closed state
+ * left by an interrupted older attempt without replaying subgroup settings.
+ *
+ * Migration 029's event_records trigger durably advances the calendar
+ * publication generation in the same transaction as hidden -> included.
+ */
+export function includeClaimedEventCalendarBeforeCommunityLink(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  recoveryGeneration: string;
+  recoveryAttempt: number;
+  includedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const included = db.run(
+      `UPDATE event_records
+          SET calendar_status = 'included',
+              error = 'Community subgroup link is pending.',
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'poll_closed'
+          AND calendar_status = 'hidden'
+          AND subgroup_chat_id = ?
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_halted_at IS NULL
+          AND provisioning_recovery_next_run_at IS NULL`,
+      input.includedAt,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId,
+      input.recoveryGeneration,
+      input.recoveryAttempt
+    );
+    if (included.changes === 1) {
+      return true;
+    }
+    return Boolean(db.get<{ id: string }>(
+      `SELECT id
+         FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'failed'
+          AND group_lifecycle_status = 'poll_closed'
+          AND calendar_status = 'included'
+          AND subgroup_chat_id = ?
+          AND provisioning_recovery_generation = ?
+          AND provisioning_recovery_attempt = ?
+          AND provisioning_recovery_halted_at IS NULL
+          AND provisioning_recovery_next_run_at IS NULL`,
+      input.eventId,
+      input.scopeId,
+      input.subgroupChatId,
+      input.recoveryGeneration,
+      input.recoveryAttempt
+    ));
+  });
+}
+
 export function completeClaimedEventCommunityLink(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
@@ -1346,7 +1423,7 @@ export function completeClaimedEventCommunityLink(db: PluginDatabase, input: {
           AND scope_id = ?
           AND event_status = 'failed'
           AND group_lifecycle_status = 'poll_closed'
-          AND calendar_status = 'hidden'
+          AND calendar_status = 'included'
           AND subgroup_chat_id = ?
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1379,7 +1456,7 @@ export function completeClaimedEventCommunityLink(db: PluginDatabase, input: {
           AND scope_id = ?
           AND event_status = 'failed'
           AND group_lifecycle_status = 'poll_closed'
-          AND calendar_status = 'hidden'
+          AND calendar_status = 'included'
           AND subgroup_chat_id = ?
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1417,8 +1494,11 @@ export function checkpointClaimedEventParticipantOutcomes(db: PluginDatabase, in
          FROM event_records
         WHERE id = ?
           AND scope_id = ?
-          AND event_status = 'failed'
-          AND group_lifecycle_status IN ('none', 'poll_closed')
+          AND (
+            (event_status = 'active' AND group_lifecycle_status = 'poll_open')
+            OR
+            (event_status = 'failed' AND group_lifecycle_status IN ('none', 'poll_closed'))
+          )
           AND subgroup_chat_id = ?
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1442,8 +1522,11 @@ export function checkpointClaimedEventParticipantOutcomes(db: PluginDatabase, in
               updated_at = ?
         WHERE id = ?
           AND scope_id = ?
-          AND event_status = 'failed'
-          AND group_lifecycle_status IN ('none', 'poll_closed')
+          AND (
+            (event_status = 'active' AND group_lifecycle_status = 'poll_open')
+            OR
+            (event_status = 'failed' AND group_lifecycle_status IN ('none', 'poll_closed'))
+          )
           AND subgroup_chat_id = ?
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1483,6 +1566,7 @@ export function resumeHaltedKnownChildEventProvisioning(db: PluginDatabase, inpu
         AND event_status = 'failed'
         AND group_lifecycle_status IN ('none', 'poll_closed')
         AND subgroup_chat_id = ?
+        AND cleanup_at > ?
         AND provisioning_recovery_generation = ?
         AND provisioning_recovery_attempt = ?
         AND provisioning_recovery_next_run_at IS NULL
@@ -1491,6 +1575,7 @@ export function resumeHaltedKnownChildEventProvisioning(db: PluginDatabase, inpu
     input.eventId,
     input.scopeId,
     input.subgroupChatId,
+    input.resumedAt,
     input.generation,
     input.attempt,
     input.expectedHaltedAt
@@ -1546,7 +1631,7 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
           AND origin = 'unplanned'
           AND event_status = 'failed'
           AND group_lifecycle_status = 'poll_closed'
-          AND calendar_status = 'hidden'
+          AND calendar_status = 'included'
           AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1586,7 +1671,7 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
           AND origin = 'unplanned'
           AND event_status = 'failed'
           AND group_lifecycle_status = 'poll_closed'
-          AND calendar_status = 'hidden'
+          AND calendar_status = 'included'
           AND (subgroup_chat_id IS NULL OR subgroup_chat_id = ?)
           AND provisioning_recovery_generation = ?
           AND provisioning_recovery_attempt = ?
@@ -1799,10 +1884,24 @@ export function markEventCleaned(db: PluginDatabase, input: {
             group_lifecycle_status = 'cleaned',
             cleaned_at = ?,
             error = NULL,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
+            provisioning_recovery_halted_at = NULL,
             updated_at = ?
       WHERE id = ?
-        AND event_status IN ('active', 'completed')
-        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        AND (
+          (event_status IN ('active', 'completed')
+            AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+          OR
+          (event_status = 'failed'
+            AND group_lifecycle_status = 'cleanup_failed'
+            AND subgroup_chat_id IS NOT NULL
+            AND provisioning_recovery_generation IS NULL
+            AND provisioning_recovery_attempt IS NULL
+            AND provisioning_recovery_next_run_at IS NULL
+            AND provisioning_recovery_halted_at IS NULL)
+        )
         AND updated_at = ?`,
     input.cleanedAt,
     input.cleanedAt,
@@ -1831,8 +1930,18 @@ export function claimEventCleanup(db: PluginDatabase, input: {
      SELECT id, ?, updated_at, cleanup_at, ?, ?
        FROM event_records
       WHERE id = ?
-        AND event_status IN ('active', 'completed')
-        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+        AND (
+          (event_status IN ('active', 'completed')
+            AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+          OR
+          (event_status = 'failed'
+            AND group_lifecycle_status = 'cleanup_failed'
+            AND subgroup_chat_id IS NOT NULL
+            AND provisioning_recovery_generation IS NULL
+            AND provisioning_recovery_attempt IS NULL
+            AND provisioning_recovery_next_run_at IS NULL
+            AND provisioning_recovery_halted_at IS NULL)
+        )
         AND updated_at = ?
         AND cleanup_at = ?
         AND cleanup_at <= ?
@@ -1929,10 +2038,24 @@ export function markClaimedEventCleaned(db: PluginDatabase, input: {
               group_lifecycle_status = 'cleaned',
               cleaned_at = ?,
               error = NULL,
+              provisioning_recovery_generation = NULL,
+              provisioning_recovery_attempt = NULL,
+              provisioning_recovery_next_run_at = NULL,
+              provisioning_recovery_halted_at = NULL,
               updated_at = ?
         WHERE id = ?
-          AND event_status IN ('active', 'completed')
-          AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+          AND (
+            (event_status IN ('active', 'completed')
+              AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+            OR
+            (event_status = 'failed'
+              AND group_lifecycle_status = 'cleanup_failed'
+              AND subgroup_chat_id IS NOT NULL
+              AND provisioning_recovery_generation IS NULL
+              AND provisioning_recovery_attempt IS NULL
+              AND provisioning_recovery_next_run_at IS NULL
+              AND provisioning_recovery_halted_at IS NULL)
+          )
           AND updated_at = ?
           AND EXISTS (
             SELECT 1
@@ -1956,6 +2079,62 @@ export function markClaimedEventCleaned(db: PluginDatabase, input: {
     });
     if (!released) {
       throw new Error(`Cleanup claim ${input.claimId} disappeared while completing event ${input.eventId}.`);
+    }
+    return true;
+  });
+}
+
+export function markClaimedEventCleanupFailed(db: PluginDatabase, input: {
+  eventId: string;
+  claimId: string;
+  expectedUpdatedAt: string;
+  reason: string;
+  failedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const result = db.run(
+      `UPDATE event_records
+          SET group_lifecycle_status = 'cleanup_failed',
+              error = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND (
+            (event_status IN ('active', 'completed')
+              AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+            OR
+            (event_status = 'failed'
+              AND group_lifecycle_status = 'cleanup_failed'
+              AND subgroup_chat_id IS NOT NULL
+              AND provisioning_recovery_generation IS NULL
+              AND provisioning_recovery_attempt IS NULL
+              AND provisioning_recovery_next_run_at IS NULL
+              AND provisioning_recovery_halted_at IS NULL)
+          )
+          AND updated_at = ?
+          AND EXISTS (
+            SELECT 1
+              FROM event_cleanup_claims
+             WHERE event_cleanup_claims.event_id = event_records.id
+               AND event_cleanup_claims.claim_id = ?
+               AND event_cleanup_claims.expected_event_updated_at = event_records.updated_at
+          )`,
+      input.reason,
+      input.failedAt,
+      input.eventId,
+      input.expectedUpdatedAt,
+      input.claimId
+    );
+    if (result.changes !== 1) {
+      return false;
+    }
+    const released = releaseEventCleanupClaim(db, {
+      eventId: input.eventId,
+      claimId: input.claimId
+    });
+    if (!released) {
+      throw new Error(
+        `Cleanup claim ${input.claimId} disappeared while recording event ${input.eventId} failure.`
+      );
     }
     return true;
   });
@@ -2865,27 +3044,6 @@ export function markEventAnnouncementMessageDeleteFailed(
   );
 }
 
-export function markEventCleanupFailed(db: PluginDatabase, input: {
-  eventId: string;
-  expectedUpdatedAt: string;
-  reason: string;
-  failedAt: string;
-}): boolean {
-  const result = db.run(
-    `UPDATE event_records
-        SET group_lifecycle_status = 'cleanup_failed', error = ?, updated_at = ?
-      WHERE id = ?
-        AND event_status IN ('active', 'completed')
-        AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
-        AND updated_at = ?`,
-    input.reason,
-    input.failedAt,
-    input.eventId,
-    input.expectedUpdatedAt
-  );
-  return result.changes === 1;
-}
-
 export function markUnclaimedEventFailed(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
@@ -2992,6 +3150,7 @@ export function claimInitialBoundPlannedEventProvisioningAttempt(db: PluginDatab
         AND actor_identity_id IS NOT NULL
         AND trim(actor_identity_id) <> ''
         AND updated_at = ?
+        AND cleanup_at > ?
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
         AND provisioning_recovery_next_run_at IS NULL
@@ -3002,7 +3161,8 @@ export function claimInitialBoundPlannedEventProvisioningAttempt(db: PluginDatab
     input.eventId,
     input.scopeId,
     input.subgroupChatId,
-    input.expectedUpdatedAt
+    input.expectedUpdatedAt,
+    input.claimedAt
   );
   return result.changes === 1;
 }
@@ -3538,6 +3698,189 @@ export function initializeEventProvisioningRecovery(db: PluginDatabase, input: {
 }
 
 /**
+ * Transfers one exact known-child provisioning cursor to cleanup ownership.
+ *
+ * The cursor and event revision are part of the compare-and-swap so a cleanup
+ * worker can never overtake a newer recovery attempt. Clearing every recovery
+ * field is the terminal fence: stale recovery deliveries can no longer claim,
+ * checkpoint, configure, link, or advance this child.
+ */
+export function expireKnownChildEventProvisioningForCleanup(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  expectedUpdatedAt: string;
+  expectedCleanupAt: string;
+  generation: string;
+  attempt: number;
+  expectedNextRunAt: string | null;
+  expectedHaltedAt: string | null;
+  reason: string;
+  expiredAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET event_status = 'failed',
+            group_lifecycle_status = 'cleanup_failed',
+            error = ?,
+            provisioning_recovery_generation = NULL,
+            provisioning_recovery_attempt = NULL,
+            provisioning_recovery_next_run_at = NULL,
+            provisioning_recovery_halted_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status IN ('none', 'poll_closed')
+        AND subgroup_chat_id = ?
+        AND cleanup_at = ?
+        AND cleanup_at <= ?
+        AND updated_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND ((? IS NULL AND provisioning_recovery_next_run_at IS NULL)
+          OR provisioning_recovery_next_run_at = ?)
+        AND ((? IS NULL AND provisioning_recovery_halted_at IS NULL)
+          OR provisioning_recovery_halted_at = ?)
+        AND NOT EXISTS (
+          SELECT 1
+            FROM event_cleanup_claims
+           WHERE event_cleanup_claims.event_id = event_records.id
+        )`,
+    input.reason,
+    input.expiredAt,
+    input.eventId,
+    input.scopeId,
+    input.subgroupChatId,
+    input.expectedCleanupAt,
+    input.expiredAt,
+    input.expectedUpdatedAt,
+    input.generation,
+    input.attempt,
+    input.expectedNextRunAt,
+    input.expectedNextRunAt,
+    input.expectedHaltedAt,
+    input.expectedHaltedAt
+  );
+  return result.changes === 1;
+}
+
+export function renewClaimedEventCommunityLinkLease(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  expectedUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  renewedAt: string;
+}): boolean {
+  const expectedTime = new Date(input.expectedUpdatedAt).getTime();
+  const renewedTime = new Date(input.renewedAt).getTime();
+  if (
+    !Number.isFinite(expectedTime) ||
+    !Number.isFinite(renewedTime) ||
+    renewedTime <= expectedTime
+  ) {
+    return false;
+  }
+  return db.run(
+    `UPDATE event_records
+        SET updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'poll_closed'
+        AND calendar_status = 'included'
+        AND subgroup_chat_id = ?
+        AND cleanup_at > ?
+        AND updated_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_halted_at IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.renewedAt,
+    input.eventId,
+    input.scopeId,
+    input.subgroupChatId,
+    input.renewedAt,
+    input.expectedUpdatedAt,
+    input.generation,
+    input.attempt
+  ).changes === 1;
+}
+
+/**
+ * Renews one exact claimed known-child provisioning lease before entering a
+ * provider operation. The event state is part of the compare-and-swap so a
+ * stale worker cannot cross a cleanup transfer, a newer recovery claim, or a
+ * lifecycle transition and then mutate the preserved child.
+ */
+export function renewClaimedKnownChildEventProvisioningLease(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  subgroupChatId: string;
+  expectedEventStatus: EventStatus;
+  expectedGroupLifecycleStatus: EventGroupLifecycleStatus;
+  expectedUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  renewedAt: string;
+}): boolean {
+  const validState = (
+    input.expectedEventStatus === 'active' &&
+    input.expectedGroupLifecycleStatus === 'poll_open'
+  ) || (
+    input.expectedEventStatus === 'failed' &&
+    (input.expectedGroupLifecycleStatus === 'none' ||
+      input.expectedGroupLifecycleStatus === 'poll_closed')
+  );
+  const expectedTime = new Date(input.expectedUpdatedAt).getTime();
+  const renewedTime = new Date(input.renewedAt).getTime();
+  if (
+    !validState ||
+    !Number.isFinite(expectedTime) ||
+    !Number.isFinite(renewedTime) ||
+    renewedTime <= expectedTime
+  ) {
+    return false;
+  }
+  return db.run(
+    `UPDATE event_records
+        SET updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = ?
+        AND group_lifecycle_status = ?
+        AND subgroup_chat_id = ?
+        AND cleanup_at > ?
+        AND updated_at = ?
+        AND provisioning_recovery_generation = ?
+        AND provisioning_recovery_attempt = ?
+        AND provisioning_recovery_halted_at IS NULL
+        AND provisioning_recovery_next_run_at IS NULL`,
+    input.renewedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedEventStatus,
+    input.expectedGroupLifecycleStatus,
+    input.subgroupChatId,
+    input.renewedAt,
+    input.expectedUpdatedAt,
+    input.generation,
+    input.attempt
+  ).changes === 1;
+}
+
+export function nextEventRevisionTimestamp(expectedUpdatedAt: string, now: Date = new Date()): string {
+  const expectedTime = new Date(expectedUpdatedAt).getTime();
+  const nowTime = now.getTime();
+  if (!Number.isFinite(expectedTime) || !Number.isFinite(nowTime)) {
+    throw new Error(`Cannot advance invalid event revision ${expectedUpdatedAt}.`);
+  }
+  return new Date(Math.max(nowTime, expectedTime + 1)).toISOString();
+}
+
+/**
  * Claims one exact, scheduled known-child recovery delivery before any
  * provider operation runs. A crash after this fence leaves an explicit claimed
  * cursor that startup recovery may redeliver through the transport's durable
@@ -3562,6 +3905,7 @@ export function claimScheduledKnownChildEventProvisioningAttempt(db: PluginDatab
         AND event_status = 'failed'
         AND group_lifecycle_status IN ('none', 'poll_closed')
         AND subgroup_chat_id = ?
+        AND cleanup_at > ?
         AND provisioning_recovery_generation = ?
         AND provisioning_recovery_attempt = ?
         AND provisioning_recovery_halted_at IS NULL
@@ -3570,6 +3914,7 @@ export function claimScheduledKnownChildEventProvisioningAttempt(db: PluginDatab
     input.eventId,
     input.scopeId,
     input.subgroupChatId,
+    input.claimedAt,
     input.generation,
     input.attempt,
     input.expectedNextRunAt
@@ -3601,6 +3946,7 @@ export function rearmClaimedKnownChildEventProvisioningForStartup(db: PluginData
         AND event_status = 'failed'
         AND group_lifecycle_status IN ('none', 'poll_closed')
         AND subgroup_chat_id = ?
+        AND cleanup_at > ?
         AND provisioning_recovery_generation = ?
         AND provisioning_recovery_attempt = ?
         AND provisioning_recovery_halted_at IS NULL
@@ -3610,6 +3956,7 @@ export function rearmClaimedKnownChildEventProvisioningForStartup(db: PluginData
     input.eventId,
     input.scopeId,
     input.subgroupChatId,
+    input.rearmedAt,
     input.generation,
     input.attempt
   );
@@ -3716,6 +4063,7 @@ export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
       WHERE id = ?
         AND scope_id = ?
         AND event_status = 'failed'
+        AND cleanup_at > ?
         AND (
           (? IS NULL AND group_lifecycle_status = 'none' AND subgroup_chat_id IS NULL)
           OR (? IS NOT NULL AND group_lifecycle_status IN ('none', 'poll_closed') AND subgroup_chat_id = ?)
@@ -3730,6 +4078,7 @@ export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
     input.updatedAt,
     input.eventId,
     input.scopeId,
+    input.updatedAt,
     input.subgroupChatId ?? null,
     input.subgroupChatId ?? null,
     input.subgroupChatId ?? null,
@@ -3833,22 +4182,32 @@ export function listCreatedGroupParticipants(
     message: string | null;
     is_group_creator: number;
     is_invite_v4_sent: number;
+    required_creator_membership_status: string | null;
     created_at: string;
   }>(
-    `SELECT event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent, created_at
+    `SELECT event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent,
+            required_creator_membership_status, created_at
        FROM event_group_participants
       WHERE event_id = ?
       ORDER BY wid ASC`,
     eventId
-  ).map((row) => ({
-    eventId: row.event_id,
-    wid: row.wid,
-    ...(row.status_code !== null ? { statusCode: row.status_code } : {}),
-    ...(row.message ? { message: row.message } : {}),
-    isGroupCreator: row.is_group_creator === 1,
-    isInviteV4Sent: row.is_invite_v4_sent === 1,
-    createdAt: row.created_at
-  }));
+  ).map((row) => {
+    const creatorMembershipStatus = requiredCreatorMembershipStatus(
+      row.required_creator_membership_status
+    );
+    return {
+      eventId: row.event_id,
+      wid: row.wid,
+      ...(row.status_code !== null ? { statusCode: row.status_code } : {}),
+      ...(row.message ? { message: row.message } : {}),
+      isGroupCreator: row.is_group_creator === 1,
+      isInviteV4Sent: row.is_invite_v4_sent === 1,
+      ...(creatorMembershipStatus
+        ? { requiredCreatorMembershipStatus: creatorMembershipStatus }
+        : {}),
+      createdAt: row.created_at
+    };
+  });
 }
 
 export function saveCreatedGroupParticipants(
@@ -3869,13 +4228,18 @@ function writeCreatedGroupParticipants(
 ): void {
   const insert = db.prepare(
     `INSERT INTO event_group_participants (
-       event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent,
+       required_creator_membership_status, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_id, wid) DO UPDATE SET
        status_code = excluded.status_code,
        message = excluded.message,
        is_group_creator = excluded.is_group_creator,
-       is_invite_v4_sent = excluded.is_invite_v4_sent`
+       is_invite_v4_sent = excluded.is_invite_v4_sent,
+       required_creator_membership_status = COALESCE(
+         excluded.required_creator_membership_status,
+         event_group_participants.required_creator_membership_status
+       )`
   );
   for (const [wid, participant] of Object.entries(participants)) {
     insert.run(
@@ -3885,8 +4249,26 @@ function writeCreatedGroupParticipants(
       participant.message ?? null,
       participant.isGroupCreator ? 1 : 0,
       participant.isInviteV4Sent ? 1 : 0,
+      participant.requiredCreatorMembershipStatus ?? null,
       createdAt
     );
+  }
+}
+
+function requiredCreatorMembershipStatus(
+  value: string | null
+): CreatedGroupParticipantResult['requiredCreatorMembershipStatus'] {
+  switch (value) {
+    case 'initial_create_missing':
+    case 'direct_add_pending':
+    case 'invite_pending':
+    case 'manual_join_pending':
+    case 'membership_confirmed':
+      return value;
+    case null:
+      return undefined;
+    default:
+      throw new Error(`Invalid persisted required creator membership status: ${value}`);
   }
 }
 

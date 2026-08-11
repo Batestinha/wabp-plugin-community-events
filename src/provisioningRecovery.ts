@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import {
-  isManagedCommunitySubgroupProvisioningError
+  isManagedCommunitySubgroupProvisioningError,
+  type ManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { CreatedGroupParticipantResult, OutboundSendResult } from '../../../platform/transport/transportTypes';
@@ -14,13 +15,20 @@ import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
   completeEventCommunitySubgroup,
   configureEventCommunitySubgroup,
-  createEventCommunitySubgroupCandidate
+  createEventCommunitySubgroupCandidate,
+  reconcileEventCommunitySubgroupCreator
 } from './subgroups';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
+import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { eventCleanupJobRequest } from './cleanupScheduling';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { sendEventCalendarHint } from './calendarHint';
 import { eventWeatherForecastJobRequest } from './weather';
+import {
+  eventCreatorMembershipPauseKindForFailure,
+  notifyEventCreatorMembershipPaused
+} from './creatorMembershipNotice';
 import {
   appendEventLog,
   advanceEventProvisioningRecovery,
@@ -35,10 +43,14 @@ import {
   getEvent,
   getUnplannedEventFinalization,
   haltClaimedKnownChildEventProvisioning,
+  includeClaimedEventCalendarBeforeCommunityLink,
   initializeEventPreCreateProvisioningRecovery,
   listCreatedGroupParticipants,
   listVotes,
   markClaimedEventReadyForCommunityLink,
+  nextEventRevisionTimestamp,
+  renewClaimedEventCommunityLinkLease,
+  renewClaimedKnownChildEventProvisioningLease,
   completeClaimedEventCommunityLink,
   resolvedEventCalendarId,
   resumeHaltedKnownChildEventProvisioning,
@@ -49,6 +61,7 @@ import {
 export const EVENT_PROVISIONING_RECOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
 export const EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS = EVENT_PROVISIONING_RECOVERY_DELAYS_MS.length;
 export const EVENT_PROVISIONING_LINK_VERIFY_ONLY_DELAY_MS = 15_000;
+export const EVENT_PROVISIONING_CREATOR_MEMBERSHIP_DELAYS_MS = [60_000, 120_000, 300_000] as const;
 export const EVENT_PROVISIONING_LINK_MUTATION_ALLOWED_DELAY_MS = 30_000;
 export const UNPLANNED_EVENT_FINALIZATION_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
 
@@ -334,7 +347,10 @@ export type OperatorResumeEventProvisioningResult = ResumeEventProvisioningResul
       status: 'recovery_scheduled';
       event: StoredEventRecord;
       cursor: EventProvisioningRecoveryCursor & { nextRunAt: string };
-      recoveryDisposition: 'verify_only' | 'mutation_allowed';
+      recoveryDisposition:
+        | 'verify_only'
+        | 'creator_membership_verify_only'
+        | 'mutation_allowed';
       reason: string;
       enqueued: boolean;
     }
@@ -426,6 +442,13 @@ export async function resumeEventProvisioningFromOperator(
       error.created.chatId.trim().toLowerCase() === subgroupChatId
       ? error
       : undefined;
+    if (managedFailure) {
+      await notifyOperatorRecoveryCreatorAboutMembershipPause(
+        input.context,
+        getEvent(db, eventId) ?? before,
+        managedFailure
+      );
+    }
     return settleOperatorKnownChildProvisioningClaim({
       context: input.context,
       before,
@@ -437,6 +460,48 @@ export async function resumeEventProvisioningFromOperator(
         ? { recoveryDisposition: managedFailure.recoveryDisposition }
         : {})
     });
+  }
+}
+
+async function notifyOperatorRecoveryCreatorAboutMembershipPause(
+  context: PluginRuntimeContext,
+  event: StoredEventRecord,
+  error: ManagedCommunitySubgroupProvisioningError
+): Promise<void> {
+  const kind = eventCreatorMembershipPauseKindForFailure(error);
+  if (!kind || !event.subgroupChatId) {
+    return;
+  }
+  const db = eventsDatabase(context.databases);
+  try {
+    const notice = await notifyEventCreatorMembershipPaused({ context, event, kind });
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.creator_membership_notice_sent',
+      metadata: {
+        subgroupChatId: event.subgroupChatId,
+        kind,
+        idempotencyKey: notice.idempotencyKey,
+        groupJoinUrlIncluded: Boolean(notice.groupJoinUrl),
+        source: 'operator_resume'
+      }
+    });
+  } catch (noticeError) {
+    const reason = noticeError instanceof Error ? noticeError.message : String(noticeError);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.creator_membership_notice_failed',
+      metadata: {
+        subgroupChatId: event.subgroupChatId,
+        kind,
+        reason,
+        source: 'operator_resume'
+      }
+    });
+    context.logger.warn(
+      { error: noticeError, eventId: event.id, subgroupChatId: event.subgroupChatId, kind },
+      'Unable to deliver operator-recovery creator membership pause notice'
+    );
   }
 }
 
@@ -452,6 +517,7 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
   const db = eventsDatabase(input.context.databases);
   const failedAt = input.failedAt.toISOString();
   const retryableDisposition = input.recoveryDisposition === 'verify_only' ||
+    input.recoveryDisposition === 'creator_membership_verify_only' ||
     input.recoveryDisposition === 'mutation_allowed'
     ? input.recoveryDisposition
     : undefined;
@@ -641,6 +707,15 @@ export async function retryEventProvisioningCreation(input: {
           source: 'precreate_recovery'
         }
       });
+      if (checkpointed) {
+        const checkpointedEvent = getEvent(db, event.id);
+        if (checkpointedEvent?.subgroupChatId === error.created.chatId) {
+          await enqueuePluginJob(input.context.queue, {
+            pluginId: EVENTS_PLUGIN_ID,
+            ...eventCleanupJobRequest(checkpointedEvent)
+          });
+        }
+      }
     }
     throw error;
   }
@@ -671,6 +746,16 @@ export async function retryEventProvisioningCreation(input: {
       participantOutcomeCount: Object.keys(created.participants).length,
       source: 'precreate_recovery'
     }
+  });
+  const checkpointedEvent = getEvent(db, event.id);
+  if (!checkpointedEvent || checkpointedEvent.subgroupChatId !== created.chatId) {
+    throw new Error(
+      `Event ${event.id} lost newly checkpointed subgroup ${created.chatId} before cleanup was scheduled.`
+    );
+  }
+  await enqueuePluginJob(input.context.queue, {
+    pluginId: EVENTS_PLUGIN_ID,
+    ...eventCleanupJobRequest(checkpointedEvent)
   });
   return resumeEventProvisioning({
     context: input.context,
@@ -740,7 +825,8 @@ export async function finalizeUnplannedEventLifecycle(input: {
         db,
         config: input.config,
         scopeId: event.scopeId,
-        calendarId
+        calendarId,
+        requestGeneration: false
       });
       await appendFinalizationJsonLog(input.context, {
         action: 'calendar.exported',
@@ -1317,7 +1403,7 @@ export async function resumeEventProvisioning(
 
   let attendeeWids: string[];
   if (event.origin === 'unplanned') {
-    attendeeWids = [event.actorWid].filter(Boolean);
+    attendeeWids = [];
   } else {
     attendeeWids = voterWidsForResponseBehavior(
       event,
@@ -1336,13 +1422,38 @@ export async function resumeEventProvisioning(
     listCreatedGroupParticipants(db, event.id),
     input.participants
   );
-  const resumedAt = (input.now ?? new Date()).toISOString();
-  // poll_closed is the durable required-settings fence. Once it is persisted,
-  // link verification and mutation retries must remain link-only.
-  const configurationPending = event.groupLifecycleStatus === 'poll_open' ||
-    event.groupLifecycleStatus === 'none';
-  if (configurationPending) {
-    await configureEventCommunitySubgroup({
+  // poll_closed is the durable required-settings fence. calendar=included is
+  // then persisted and published before COMPLETE may attempt the physical
+  // link. Creator membership remains a hard precondition on every known-child
+  // attempt, while settings are never replayed after poll_closed.
+  try {
+    const creatorLeaseEvent = getEvent(db, event.id);
+    if (!creatorLeaseEvent || creatorLeaseEvent.subgroupChatId !== subgroupChatId) {
+      return rejected(
+        creatorLeaseEvent ?? event,
+        `Event ${event.id} lost its exact claimed subgroup before creator reconciliation.`
+      );
+    }
+    const creatorLeaseRenewedAt = nextEventRevisionTimestamp(creatorLeaseEvent.updatedAt);
+    if (!renewClaimedKnownChildEventProvisioningLease(db, {
+      eventId: creatorLeaseEvent.id,
+      scopeId: creatorLeaseEvent.scopeId,
+      subgroupChatId,
+      expectedEventStatus: creatorLeaseEvent.eventStatus,
+      expectedGroupLifecycleStatus: creatorLeaseEvent.groupLifecycleStatus,
+      expectedUpdatedAt: creatorLeaseEvent.updatedAt,
+      generation: recoveryCursor!.generation,
+      attempt: recoveryCursor!.attempt,
+      renewedAt: creatorLeaseRenewedAt
+    })) {
+      return rejected(
+        getEvent(db, event.id) ?? event,
+        `Event ${event.id} lost its claimed creator-reconciliation lease before provider reconciliation.`
+      );
+    }
+    const configurationPending = creatorLeaseEvent.groupLifecycleStatus === 'poll_open' ||
+      creatorLeaseEvent.groupLifecycleStatus === 'none';
+    const creatorResult = await reconcileEventCommunitySubgroupCreator({
       context: input.context,
       scopeId,
       actorIdentityId: requireRecoveryActorIdentityId(event),
@@ -1351,26 +1462,108 @@ export async function resumeEventProvisioning(
       participants: participantOutcomes,
       parentCommunityWid: parentCommunityChatId
     });
-    const preparedAt = (input.now ?? new Date()).toISOString();
-    const fenced = markClaimedEventReadyForCommunityLink(db, {
+    const reconciledSubgroupChatId = creatorResult.created.chatId.trim().toLowerCase();
+    if (reconciledSubgroupChatId !== subgroupChatId) {
+      throw new Error(
+        `Subgroup creator reconciliation returned ${reconciledSubgroupChatId}; expected ${subgroupChatId}.`
+      );
+    }
+    subgroupTitle = creatorResult.created.title.trim() || subgroupTitle;
+    participantOutcomes = mergeParticipantOutcomeRecords(
+      participantOutcomes,
+      creatorResult.created.participants
+    );
+    const creatorCheckpointed = checkpointClaimedEventParticipantOutcomes(db, {
       eventId: event.id,
       scopeId,
       subgroupChatId,
       subgroupTitle,
+      participants: participantOutcomes,
       recoveryGeneration: recoveryCursor!.generation,
       recoveryAttempt: recoveryCursor!.attempt,
-      closedAt: preparedAt,
-      preparedAt
+      checkpointedAt: nextEventRevisionTimestamp(creatorLeaseRenewedAt)
     });
-    if (!fenced) {
+    if (!creatorCheckpointed) {
       const changedEvent = getEvent(db, event.id) ?? event;
       return rejected(
         changedEvent,
-        `Event ${event.id} changed before its community-link fence was persisted.`
+        `Event ${event.id} changed before creator membership was checkpointed.`
       );
     }
-  }
-  try {
+    if (configurationPending) {
+      await configureEventCommunitySubgroup({
+        context: input.context,
+        scopeId,
+        actorIdentityId: requireRecoveryActorIdentityId(event),
+        subgroupChatId,
+        subgroupTitle,
+        participants: participantOutcomes,
+        parentCommunityWid: parentCommunityChatId
+      });
+      const preparedAt = (input.now ?? new Date()).toISOString();
+      const fenced = markClaimedEventReadyForCommunityLink(db, {
+        eventId: event.id,
+        scopeId,
+        subgroupChatId,
+        subgroupTitle,
+        recoveryGeneration: recoveryCursor!.generation,
+        recoveryAttempt: recoveryCursor!.attempt,
+        closedAt: preparedAt,
+        preparedAt
+      });
+      if (!fenced) {
+        const changedEvent = getEvent(db, event.id) ?? event;
+        return rejected(
+          changedEvent,
+          `Event ${event.id} changed before its community-link fence was persisted.`
+        );
+      }
+    }
+    const calendarIncluded = includeClaimedEventCalendarBeforeCommunityLink(db, {
+      eventId: event.id,
+      scopeId,
+      subgroupChatId,
+      recoveryGeneration: recoveryCursor!.generation,
+      recoveryAttempt: recoveryCursor!.attempt,
+      includedAt: (input.now ?? new Date()).toISOString()
+    });
+    const linkReadyEvent = getEvent(db, event.id);
+    if (
+      !calendarIncluded ||
+      !linkReadyEvent ||
+      linkReadyEvent.eventStatus !== 'failed' ||
+      linkReadyEvent.groupLifecycleStatus !== 'poll_closed' ||
+      linkReadyEvent.calendarStatus !== 'included' ||
+      linkReadyEvent.subgroupChatId !== subgroupChatId
+    ) {
+      return rejected(
+        linkReadyEvent ?? event,
+        `Event ${event.id} changed before its calendar-visible community-link fence was verified.`
+      );
+    }
+    await publishEventCalendarBeforeCommunityLink({
+      context: input.context,
+      config,
+      event: linkReadyEvent
+    });
+    await enqueuePluginJob(input.context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      ...eventCleanupJobRequest(linkReadyEvent)
+    });
+    const linkLeaseRenewedAt = nextEventRevisionTimestamp(linkReadyEvent.updatedAt);
+    if (!renewClaimedEventCommunityLinkLease(db, {
+      eventId: linkReadyEvent.id,
+      scopeId: linkReadyEvent.scopeId,
+      subgroupChatId,
+      expectedUpdatedAt: linkReadyEvent.updatedAt,
+      generation: recoveryCursor!.generation,
+      attempt: recoveryCursor!.attempt,
+      renewedAt: linkLeaseRenewedAt
+    })) {
+      throw new Error(
+        `Event ${event.id} lost its claimed community-link lease before provider completion.`
+      );
+    }
     const result = await completeEventCommunitySubgroup({
       context: input.context,
       scopeId,
@@ -1430,6 +1623,7 @@ export async function resumeEventProvisioning(
     throw error;
   }
 
+  const resumedAt = new Date().toISOString();
   if (event.origin === 'unplanned') {
     const actorIdentityId = requireRecoveryActorIdentityId(event);
     const resolvedLocale = await input.context.i18n.resolveIdentityLocale(
@@ -1643,7 +1837,8 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
         db,
         config: input.config,
         scopeId: event.scopeId,
-        calendarId
+        calendarId,
+        requestGeneration: false
       });
       if (publication && !publication.ok) {
         failures.push(`calendar: ${publication.error || 'publication failed'}`);
@@ -1749,6 +1944,13 @@ export function eventCommunityLinkRecoveryRunAt(
   switch (disposition) {
     case 'verify_only':
       return new Date(now.getTime() + EVENT_PROVISIONING_LINK_VERIFY_ONLY_DELAY_MS);
+    case 'creator_membership_verify_only': {
+      const delay = EVENT_PROVISIONING_CREATOR_MEMBERSHIP_DELAYS_MS[Math.min(
+        EVENT_PROVISIONING_CREATOR_MEMBERSHIP_DELAYS_MS.length - 1,
+        Math.max(0, fallbackAttempt - 2)
+      )]!;
+      return new Date(now.getTime() + delay);
+    }
     case 'mutation_allowed':
       return new Date(now.getTime() + EVENT_PROVISIONING_LINK_MUTATION_ALLOWED_DELAY_MS);
     case 'operator_required':
@@ -1826,7 +2028,10 @@ function mergedParticipantOutcomes(
       ...(participant.statusCode !== undefined ? { statusCode: participant.statusCode } : {}),
       ...(participant.message ? { message: participant.message } : {}),
       isGroupCreator: participant.isGroupCreator,
-      isInviteV4Sent: participant.isInviteV4Sent
+      isInviteV4Sent: participant.isInviteV4Sent,
+      ...(participant.requiredCreatorMembershipStatus
+        ? { requiredCreatorMembershipStatus: participant.requiredCreatorMembershipStatus }
+        : {})
     }
   ]));
   return mergeParticipantOutcomeRecords(persisted, supplied ?? {});
@@ -1843,7 +2048,13 @@ function mergeParticipantOutcomeRecords(
         ...(outcome.statusCode !== undefined ? { statusCode: outcome.statusCode } : {}),
         ...(outcome.message ? { message: outcome.message } : {}),
         isGroupCreator: previous?.isGroupCreator === true || outcome.isGroupCreator,
-        isInviteV4Sent: outcome.isInviteV4Sent
+        isInviteV4Sent: outcome.isInviteV4Sent,
+        ...(outcome.requiredCreatorMembershipStatus ?? previous?.requiredCreatorMembershipStatus
+          ? {
+              requiredCreatorMembershipStatus:
+                outcome.requiredCreatorMembershipStatus ?? previous?.requiredCreatorMembershipStatus
+            }
+          : {})
       };
     }
   }

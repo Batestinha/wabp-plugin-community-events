@@ -51,6 +51,74 @@ export interface EventCleanupClaim {
   leaseExpiresAt: string;
 }
 
+export interface RejectedEventChildReplacementExpectation {
+  eventId: string;
+  scopeId: string;
+  rejectedSubgroupChatId: string;
+  expectedUpdatedAt: string;
+  expectedProvisioningGeneration: string;
+  expectedProvisioningAttempt: number;
+  expectedProvisioningHaltedAt: string;
+  operationId: string;
+  failureKind: 'community_link_rejected';
+  reason: string;
+  actorWid: string;
+  actorLabel: string;
+}
+
+export type RejectedEventChildReplacementClaimResult =
+  | {
+      status: 'claimed';
+      event: StoredEventRecord;
+      claim: EventCleanupClaim;
+      creator: PersistedRequiredCreatorReference;
+      replayed: boolean;
+    }
+  | {
+      status: 'in_progress';
+      event: StoredEventRecord;
+      claim: EventCleanupClaim;
+    }
+  | {
+      status: 'already_scheduled';
+      event: StoredEventRecord;
+      replacementGeneration: string;
+    }
+  | {
+      status: 'already_expired';
+      event: StoredEventRecord;
+    }
+  | {
+      status: 'not_found' | 'rejected';
+      reason: string;
+      event?: StoredEventRecord | undefined;
+    };
+
+export type RejectedEventChildReplacementOperationStatus =
+  | {
+      status: 'already_scheduled';
+      event: StoredEventRecord;
+      replacementGeneration: string;
+    }
+  | {
+      status: 'already_expired';
+      event: StoredEventRecord;
+    }
+  | {
+      status: 'in_progress';
+      event: StoredEventRecord;
+      claim: EventCleanupClaim;
+    }
+  | {
+      status: 'dismantle_authorized';
+      event: StoredEventRecord;
+    }
+  | {
+      status: 'aborted';
+      event: StoredEventRecord;
+      reason: string;
+    };
+
 export interface EventAnnouncementDeliveryIntent {
   scopeId: string;
   kind: EventAnnouncementDeliveryKind;
@@ -1283,7 +1351,7 @@ export function listInterruptedEventPreCreateClaims(db: PluginDatabase): StoredE
           OR
           (event_status = 'failed'
             AND group_lifecycle_status = 'none'
-            AND calendar_status = 'hidden'
+            AND calendar_status IN ('hidden', 'included')
             AND (
               (origin IN ('created', 'adopted_poll') AND poll_wa_msg_id IS NOT NULL)
               OR (origin = 'unplanned' AND poll_wa_msg_id IS NULL)
@@ -2041,6 +2109,788 @@ export function releaseEventCleanupClaim(db: PluginDatabase, input: {
     input.eventId,
     input.claimId
   ).changes === 1;
+}
+
+/**
+ * Exclusively fences one rejected, halted community-link candidate before the
+ * operator dismantles it. The structured operator-required log is the failure
+ * classification; provider error text is deliberately not inspected.
+ */
+export function getRejectedEventChildReplacementOperationStatus(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation,
+  observedAt: string = new Date().toISOString()
+): RejectedEventChildReplacementOperationStatus | undefined {
+  const event = getEvent(db, input.eventId);
+  if (!event || event.scopeId !== input.scopeId) {
+    return undefined;
+  }
+  const child = input.rejectedSubgroupChatId.trim().toLowerCase();
+  const scheduled = db.get<{ replacement_generation: string }>(
+    `SELECT json_extract(metadata_json, '$.replacementGeneration') AS replacement_generation
+       FROM event_logs
+      WHERE event_id = ?
+        AND action = 'events.provisioning.legacy_child_replacement_scheduled'
+        AND json_extract(metadata_json, '$.operationId') = ?
+        AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+      ORDER BY rowid DESC
+      LIMIT 1`,
+    input.eventId,
+    input.operationId,
+    child
+  );
+  if (scheduled?.replacement_generation?.trim()) {
+    return {
+      status: 'already_scheduled',
+      event,
+      replacementGeneration: scheduled.replacement_generation
+    };
+  }
+  const expired = db.get<{ id: string }>(
+    `SELECT id
+       FROM event_logs
+      WHERE event_id = ?
+        AND action = 'events.provisioning.legacy_child_replacement_expired'
+        AND json_extract(metadata_json, '$.operationId') = ?
+        AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+      ORDER BY rowid DESC
+      LIMIT 1`,
+    input.eventId,
+    input.operationId,
+    child
+  );
+  if (expired) {
+    return { status: 'already_expired', event };
+  }
+  const aborted = db.get<{ reason: string | null }>(
+    `SELECT json_extract(metadata_json, '$.reason') AS reason
+       FROM event_logs
+      WHERE event_id = ?
+        AND action = 'events.provisioning.legacy_child_replacement_aborted'
+        AND json_extract(metadata_json, '$.operationId') = ?
+        AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+      ORDER BY rowid DESC
+      LIMIT 1`,
+    input.eventId,
+    input.operationId,
+    child
+  );
+  if (aborted) {
+    return {
+      status: 'aborted',
+      event,
+      reason: aborted.reason ?? 'Rejected-child replacement was aborted before dismantle.'
+    };
+  }
+  const claim = getEventCleanupClaim(db, input.eventId);
+  if (
+    claim &&
+    claim.expectedEventUpdatedAt === event.updatedAt &&
+    new Date(claim.leaseExpiresAt).getTime() > new Date(observedAt).getTime() &&
+    event.eventStatus === 'failed' &&
+    event.groupLifecycleStatus === 'cleanup_failed' &&
+    event.calendarStatus === 'included' &&
+    event.subgroupChatId?.toLowerCase() === child
+  ) {
+    const claimLog = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_logs
+        WHERE event_id = ?
+          AND action IN (
+            'events.provisioning.legacy_child_replacement_claimed',
+            'events.provisioning.legacy_child_replacement_reclaimed'
+          )
+          AND json_extract(metadata_json, '$.operationId') = ?
+          AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+          AND json_extract(metadata_json, '$.expectedUpdatedAt') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningGeneration') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningAttempt') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningHaltedAt') = ?
+        ORDER BY rowid DESC
+        LIMIT 1`,
+      input.eventId,
+      input.operationId,
+      child,
+      input.expectedUpdatedAt,
+      input.expectedProvisioningGeneration,
+      input.expectedProvisioningAttempt,
+      input.expectedProvisioningHaltedAt
+    );
+    if (claimLog) {
+      return { status: 'in_progress', event, claim };
+    }
+  }
+  const authorized = db.get<{ id: string }>(
+    `SELECT id
+       FROM event_logs
+      WHERE event_id = ?
+        AND action = 'events.provisioning.legacy_child_replacement_dismantle_authorized'
+        AND json_extract(metadata_json, '$.operationId') = ?
+        AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+        AND json_extract(metadata_json, '$.expectedUpdatedAt') = ?
+        AND json_extract(metadata_json, '$.expectedProvisioningGeneration') = ?
+        AND json_extract(metadata_json, '$.expectedProvisioningAttempt') = ?
+        AND json_extract(metadata_json, '$.expectedProvisioningHaltedAt') = ?
+      ORDER BY rowid DESC
+      LIMIT 1`,
+    input.eventId,
+    input.operationId,
+    child,
+    input.expectedUpdatedAt,
+    input.expectedProvisioningGeneration,
+    input.expectedProvisioningAttempt,
+    input.expectedProvisioningHaltedAt
+  );
+  if (authorized) {
+    return { status: 'dismantle_authorized', event };
+  }
+  return undefined;
+}
+
+export function claimRejectedEventChildReplacement(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation & {
+    claimedAt: string;
+    leaseExpiresAt?: string | undefined;
+  }
+): RejectedEventChildReplacementClaimResult {
+  const eventId = requiredTrimmedValue(input.eventId, 'replacement event ID');
+  const scopeId = requiredTrimmedValue(input.scopeId, 'replacement scope ID');
+  const rejectedSubgroupChatId = requiredTrimmedValue(
+    input.rejectedSubgroupChatId,
+    'rejected subgroup chat ID'
+  ).toLowerCase();
+  const operationId = requiredTrimmedValue(input.operationId, 'replacement operation ID');
+  const reason = requiredTrimmedValue(input.reason, 'replacement reason');
+  const actorWid = requiredTrimmedValue(input.actorWid, 'replacement actor WID');
+  const actorLabel = requiredTrimmedValue(input.actorLabel, 'replacement actor label');
+  const claimedTime = new Date(input.claimedAt).getTime();
+  if (!Number.isFinite(claimedTime)) {
+    return { status: 'rejected', reason: `Invalid replacement claim time ${input.claimedAt}.` };
+  }
+  if (!Number.isInteger(input.expectedProvisioningAttempt) || input.expectedProvisioningAttempt < 1) {
+    return { status: 'rejected', reason: 'Replacement provisioning attempt must be a positive integer.' };
+  }
+
+  return db.transaction(() => {
+    releaseExpiredEventCleanupClaims(db, input.claimedAt);
+    let event = getEvent(db, eventId);
+    if (!event || event.scopeId !== scopeId) {
+      return {
+        status: 'not_found',
+        reason: `Unknown event ${eventId} in scope ${scopeId}.`
+      };
+    }
+
+    const scheduledLog = db.get<{ id: string; replacement_generation: string }>(
+      `SELECT id,
+              json_extract(metadata_json, '$.replacementGeneration') AS replacement_generation
+         FROM event_logs
+        WHERE event_id = ?
+          AND action = 'events.provisioning.legacy_child_replacement_scheduled'
+          AND json_extract(metadata_json, '$.operationId') = ?
+          AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+        ORDER BY rowid DESC
+        LIMIT 1`,
+      eventId,
+      operationId,
+      rejectedSubgroupChatId
+    );
+    if (scheduledLog?.replacement_generation?.trim()) {
+      return {
+        status: 'already_scheduled',
+        event,
+        replacementGeneration: scheduledLog.replacement_generation
+      };
+    }
+    const expiredLog = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_logs
+        WHERE event_id = ?
+          AND action = 'events.provisioning.legacy_child_replacement_expired'
+          AND json_extract(metadata_json, '$.operationId') = ?
+          AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+        ORDER BY rowid DESC
+        LIMIT 1`,
+      eventId,
+      operationId,
+      rejectedSubgroupChatId
+    );
+    if (
+      expiredLog &&
+      event.eventStatus === 'completed' &&
+      event.groupLifecycleStatus === 'cleaned'
+    ) {
+      return { status: 'already_expired', event };
+    }
+
+    const priorClaimLog = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_logs
+        WHERE event_id = ?
+          AND action IN (
+            'events.provisioning.legacy_child_replacement_claimed',
+            'events.provisioning.legacy_child_replacement_reclaimed'
+          )
+          AND json_extract(metadata_json, '$.operationId') = ?
+          AND lower(json_extract(metadata_json, '$.rejectedSubgroupChatId')) = ?
+          AND json_extract(metadata_json, '$.expectedUpdatedAt') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningGeneration') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningAttempt') = ?
+          AND json_extract(metadata_json, '$.expectedProvisioningHaltedAt') = ?
+          AND json_extract(metadata_json, '$.failureKind') = 'community_link_rejected'
+        ORDER BY rowid DESC
+        LIMIT 1`,
+      eventId,
+      operationId,
+      rejectedSubgroupChatId,
+      input.expectedUpdatedAt,
+      input.expectedProvisioningGeneration,
+      input.expectedProvisioningAttempt,
+      input.expectedProvisioningHaltedAt
+    );
+    const replayed = Boolean(priorClaimLog);
+    const existingClaim = getEventCleanupClaim(db, eventId);
+    if (existingClaim) {
+      if (
+        replayed &&
+        event.eventStatus === 'failed' &&
+        event.groupLifecycleStatus === 'cleanup_failed' &&
+        event.calendarStatus === 'included' &&
+        event.subgroupChatId?.toLowerCase() === rejectedSubgroupChatId &&
+        existingClaim.expectedEventUpdatedAt === event.updatedAt
+      ) {
+        return { status: 'in_progress', event, claim: existingClaim };
+      }
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} already has an unrelated cleanup/replacement claim.`,
+        event
+      };
+    }
+
+    let failureEvidence = 'structured_link_parent';
+    if (!replayed) {
+      const exactOperatorFailure = db.get<{
+        id: string;
+        stage: string | null;
+        source: string | null;
+      }>(
+        `SELECT id,
+                json_extract(metadata_json, '$.stage') AS stage,
+                json_extract(metadata_json, '$.source') AS source
+           FROM event_logs
+          WHERE event_id = ?
+            AND action = 'events.provisioning.operator_required'
+            AND lower(json_extract(metadata_json, '$.subgroupChatId')) = ?
+            AND json_extract(metadata_json, '$.generation') = ?
+            AND json_extract(metadata_json, '$.attempt') = ?
+            AND json_extract(metadata_json, '$.recoveryDisposition') = 'operator_required'
+            AND (
+              json_extract(metadata_json, '$.stage') = 'link_parent'
+              OR (
+                json_extract(metadata_json, '$.stage') IS NULL
+                AND json_extract(metadata_json, '$.source') = 'operator_resume'
+              )
+            )
+          ORDER BY rowid DESC
+          LIMIT 1`,
+        eventId,
+        rejectedSubgroupChatId,
+        input.expectedProvisioningGeneration,
+        input.expectedProvisioningAttempt
+      );
+      if (!exactOperatorFailure) {
+        return {
+          status: 'rejected',
+          reason: `Event ${eventId} has no structured rejected community-link checkpoint for the expected child and epoch.`,
+          event
+        };
+      }
+      if (
+        exactOperatorFailure.stage === null &&
+        exactOperatorFailure.source === 'operator_resume'
+      ) {
+        failureEvidence = 'legacy_operator_resume_stage_unavailable';
+      }
+      if (
+        event.eventStatus !== 'failed' ||
+        event.groupLifecycleStatus !== 'poll_closed' ||
+        event.calendarStatus !== 'included' ||
+        event.subgroupChatId?.toLowerCase() !== rejectedSubgroupChatId ||
+        event.updatedAt !== input.expectedUpdatedAt ||
+        event.provisioningRecoveryGeneration !== input.expectedProvisioningGeneration ||
+        event.provisioningRecoveryAttempt !== input.expectedProvisioningAttempt ||
+        event.provisioningRecoveryNextRunAt !== undefined ||
+        event.provisioningRecoveryHaltedAt !== input.expectedProvisioningHaltedAt
+      ) {
+        return {
+          status: 'rejected',
+          reason: `Event ${eventId} no longer matches the exact halted rejected-child checkpoint.`,
+          event
+        };
+      }
+    } else if (
+      event.eventStatus !== 'failed' ||
+      event.groupLifecycleStatus !== 'cleanup_failed' ||
+      event.calendarStatus !== 'included' ||
+      event.subgroupChatId?.toLowerCase() !== rejectedSubgroupChatId ||
+      event.provisioningRecoveryGeneration !== undefined ||
+      event.provisioningRecoveryAttempt !== undefined ||
+      event.provisioningRecoveryNextRunAt !== undefined ||
+      event.provisioningRecoveryHaltedAt !== undefined
+    ) {
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} is not at the durable rejected-child replacement fence.`,
+        event
+      };
+    }
+
+    const cleanupTime = new Date(event.cleanupAt).getTime();
+    if (!Number.isFinite(cleanupTime) || claimedTime >= cleanupTime) {
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} has reached or has an invalid cleanup deadline.`,
+        event
+      };
+    }
+    const actorIdentityId = event.actorIdentityId?.trim();
+    if (!actorIdentityId) {
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} has no authoritative creator identity.`,
+        event
+      };
+    }
+    const creator = getEventRequiredCreatorReference(db, eventId, actorIdentityId);
+    if (!creator) {
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} has no authoritative required-creator checkpoint.`,
+        event
+      };
+    }
+
+    const fencedAt = nextEventRevisionTimestamp(event.updatedAt, new Date(input.claimedAt));
+    const fenced = db.run(
+      `UPDATE event_records
+          SET event_status = 'failed',
+              group_lifecycle_status = 'cleanup_failed',
+              error = ?,
+              provisioning_recovery_generation = NULL,
+              provisioning_recovery_attempt = NULL,
+              provisioning_recovery_next_run_at = NULL,
+              provisioning_recovery_halted_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND scope_id = ?
+          AND updated_at = ?
+          AND subgroup_chat_id = ?
+          AND cleanup_at > ?`,
+      `Rejected legacy subgroup replacement ${operationId} is dismantling ${rejectedSubgroupChatId}.`,
+      fencedAt,
+      eventId,
+      scopeId,
+      event.updatedAt,
+      event.subgroupChatId!,
+      fencedAt
+    ).changes === 1;
+    if (!fenced) {
+      return {
+        status: 'rejected',
+        reason: `Event ${eventId} changed while its rejected child was being fenced.`,
+        event: getEvent(db, eventId) ?? event
+      };
+    }
+
+    const claimId = `evtreplace-${randomUUID()}`;
+    const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
+      new Date(fencedAt).getTime() + EVENT_CLEANUP_CLAIM_LEASE_MS
+    ).toISOString();
+    const inserted = db.run(
+      `INSERT INTO event_cleanup_claims (
+         event_id, claim_id, expected_event_updated_at, claimed_cleanup_at, claimed_at, lease_expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+      eventId,
+      claimId,
+      fencedAt,
+      event.cleanupAt,
+      fencedAt,
+      leaseExpiresAt
+    ).changes === 1;
+    if (!inserted) {
+      throw new Error(`Unable to persist rejected-child replacement claim ${claimId}.`);
+    }
+    appendEventLog(db, {
+      eventId,
+      action: replayed
+        ? 'events.provisioning.legacy_child_replacement_reclaimed'
+        : 'events.provisioning.legacy_child_replacement_claimed',
+      metadata: {
+        operationId,
+        failureKind: input.failureKind,
+        reason,
+        actorWid,
+        actorLabel,
+        rejectedSubgroupChatId,
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        expectedProvisioningGeneration: input.expectedProvisioningGeneration,
+        expectedProvisioningAttempt: input.expectedProvisioningAttempt,
+        expectedProvisioningHaltedAt: input.expectedProvisioningHaltedAt,
+        creatorIdentityId: creator.identityId,
+        creatorParticipantWid: creator.participantWid,
+        ...(creator.evidenceDigest ? { creatorEvidenceDigest: creator.evidenceDigest } : {}),
+        claimId,
+        fencedAt,
+        failureEvidence
+      }
+    });
+    event = getEvent(db, eventId) ?? event;
+    return {
+      status: 'claimed',
+      event,
+      claim: {
+        eventId,
+        claimId,
+        expectedEventUpdatedAt: fencedAt,
+        claimedCleanupAt: event.cleanupAt,
+        claimedAt: fencedAt,
+        leaseExpiresAt
+      },
+      creator,
+      replayed
+    };
+  });
+}
+
+export type CompleteRejectedEventChildReplacementResult =
+  | { status: 'scheduled'; event: StoredEventRecord }
+  | { status: 'expired_cleaned'; event: StoredEventRecord }
+  | { status: 'stale'; event?: StoredEventRecord | undefined };
+
+export function authorizeClaimedRejectedEventChildDismantle(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation & {
+    claim: EventCleanupClaim;
+    authorizedAt: string;
+    probe: unknown;
+  }
+): boolean {
+  return db.transaction(() => {
+    const event = getEvent(db, input.eventId);
+    const claim = getEventCleanupClaim(db, input.eventId);
+    if (
+      !event ||
+      event.scopeId !== input.scopeId ||
+      event.eventStatus !== 'failed' ||
+      event.groupLifecycleStatus !== 'cleanup_failed' ||
+      event.calendarStatus !== 'included' ||
+      event.subgroupChatId?.toLowerCase() !== input.rejectedSubgroupChatId.toLowerCase() ||
+      event.updatedAt !== input.claim.expectedEventUpdatedAt ||
+      !claim ||
+      claim.claimId !== input.claim.claimId ||
+      claim.expectedEventUpdatedAt !== event.updatedAt
+    ) {
+      return false;
+    }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.legacy_child_replacement_dismantle_authorized',
+      metadata: {
+        operationId: input.operationId,
+        failureKind: input.failureKind,
+        rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        expectedProvisioningGeneration: input.expectedProvisioningGeneration,
+        expectedProvisioningAttempt: input.expectedProvisioningAttempt,
+        expectedProvisioningHaltedAt: input.expectedProvisioningHaltedAt,
+        claimId: input.claim.claimId,
+        authorizedAt: input.authorizedAt,
+        probe: input.probe
+      }
+    });
+    return true;
+  });
+}
+
+/** Restores the exact halted cursor when the final pre-provider probe fails. */
+export function abortClaimedRejectedEventChildReplacementBeforeDismantle(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation & {
+    claim: EventCleanupClaim;
+    abortReason: string;
+    abortedAt: string;
+  }
+): boolean {
+  return db.transaction(() => {
+    const event = getEvent(db, input.eventId);
+    const claim = getEventCleanupClaim(db, input.eventId);
+    if (
+      !event ||
+      event.scopeId !== input.scopeId ||
+      event.eventStatus !== 'failed' ||
+      event.groupLifecycleStatus !== 'cleanup_failed' ||
+      event.calendarStatus !== 'included' ||
+      event.subgroupChatId?.toLowerCase() !== input.rejectedSubgroupChatId.toLowerCase() ||
+      event.updatedAt !== input.claim.expectedEventUpdatedAt ||
+      !claim ||
+      claim.claimId !== input.claim.claimId ||
+      claim.expectedEventUpdatedAt !== event.updatedAt
+    ) {
+      return false;
+    }
+    const abortedAt = nextEventRevisionTimestamp(event.updatedAt, new Date(input.abortedAt));
+    const restored = db.run(
+      `UPDATE event_records
+          SET event_status = 'failed',
+              group_lifecycle_status = 'poll_closed',
+              error = ?,
+              provisioning_recovery_generation = ?,
+              provisioning_recovery_attempt = ?,
+              provisioning_recovery_next_run_at = NULL,
+              provisioning_recovery_halted_at = ?,
+              updated_at = ?
+        WHERE id = ? AND updated_at = ?`,
+      input.abortReason,
+      input.expectedProvisioningGeneration,
+      input.expectedProvisioningAttempt,
+      input.expectedProvisioningHaltedAt,
+      abortedAt,
+      event.id,
+      event.updatedAt
+    ).changes === 1;
+    if (!restored || !releaseEventCleanupClaim(db, {
+      eventId: event.id,
+      claimId: input.claim.claimId
+    })) {
+      throw new Error(`Unable to abort replacement claim ${input.claim.claimId}.`);
+    }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.legacy_child_replacement_aborted',
+      metadata: {
+        operationId: input.operationId,
+        failureKind: input.failureKind,
+        rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+        expectedProvisioningGeneration: input.expectedProvisioningGeneration,
+        expectedProvisioningAttempt: input.expectedProvisioningAttempt,
+        expectedProvisioningHaltedAt: input.expectedProvisioningHaltedAt,
+        reason: input.abortReason,
+        abortedAt
+      }
+    });
+    return true;
+  });
+}
+
+export function completeClaimedRejectedEventChildReplacement(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation & {
+    claim: EventCleanupClaim;
+    replacementGeneration: string;
+    completedAt: string;
+  }
+): CompleteRejectedEventChildReplacementResult {
+  const completedTime = new Date(input.completedAt).getTime();
+  if (!Number.isFinite(completedTime)) {
+    throw new Error(`Invalid rejected-child replacement completion time ${input.completedAt}.`);
+  }
+  return db.transaction(() => {
+    const event = getEvent(db, input.eventId);
+    const exactClaim = getEventCleanupClaim(db, input.eventId);
+    if (
+      !event ||
+      event.scopeId !== input.scopeId ||
+      event.eventStatus !== 'failed' ||
+      event.groupLifecycleStatus !== 'cleanup_failed' ||
+      event.calendarStatus !== 'included' ||
+      event.subgroupChatId?.toLowerCase() !== input.rejectedSubgroupChatId.toLowerCase() ||
+      event.updatedAt !== input.claim.expectedEventUpdatedAt ||
+      event.provisioningRecoveryGeneration !== undefined ||
+      event.provisioningRecoveryAttempt !== undefined ||
+      event.provisioningRecoveryNextRunAt !== undefined ||
+      event.provisioningRecoveryHaltedAt !== undefined ||
+      !exactClaim ||
+      exactClaim.claimId !== input.claim.claimId ||
+      exactClaim.expectedEventUpdatedAt !== event.updatedAt
+    ) {
+      return { status: 'stale', ...(event ? { event } : {}) };
+    }
+    const cleanupTime = new Date(event.cleanupAt).getTime();
+    const completedAt = nextEventRevisionTimestamp(event.updatedAt, new Date(input.completedAt));
+    if (!Number.isFinite(cleanupTime) || completedTime >= cleanupTime) {
+      const cleaned = db.run(
+        `UPDATE event_records
+            SET event_status = 'completed',
+                group_lifecycle_status = 'cleaned',
+                cleaned_at = ?,
+                error = NULL,
+                updated_at = ?
+          WHERE id = ? AND updated_at = ?`,
+        completedAt,
+        completedAt,
+        event.id,
+        event.updatedAt
+      ).changes === 1;
+      if (!cleaned || !releaseEventCleanupClaim(db, {
+        eventId: event.id,
+        claimId: input.claim.claimId
+      })) {
+        throw new Error(`Unable to terminalize expired replacement ${input.operationId}.`);
+      }
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.provisioning.legacy_child_replacement_expired',
+        metadata: {
+          operationId: input.operationId,
+          rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+          cleanedAt: completedAt
+        }
+      });
+      return { status: 'expired_cleaned', event: getEvent(db, event.id)! };
+    }
+
+    const generation = requiredTrimmedValue(
+      input.replacementGeneration,
+      'replacement provisioning generation'
+    );
+    db.run(
+      `DELETE FROM event_group_participants
+        WHERE event_id = ?
+          AND NOT (
+            identity_id = ?
+            AND required_creator_membership_status IS NOT NULL
+          )`,
+      event.id,
+      event.actorIdentityId!
+    );
+    db.run(
+      `UPDATE event_group_participants
+          SET status_code = NULL,
+              message = NULL,
+              is_group_creator = 0,
+              is_invite_v4_sent = 0,
+              required_creator_membership_status = 'initial_create_missing',
+              created_at = ?
+        WHERE event_id = ?
+          AND identity_id = ?
+          AND required_creator_membership_status IS NOT NULL`,
+      completedAt,
+      event.id,
+      event.actorIdentityId!
+    );
+    db.run('DELETE FROM unplanned_event_finalizations WHERE event_id = ?', event.id);
+    const scheduled = db.run(
+      `UPDATE event_records
+          SET event_status = 'failed',
+              group_lifecycle_status = 'none',
+              subgroup_chat_id = NULL,
+              subgroup_title = NULL,
+              error = ?,
+              provisioning_recovery_generation = ?,
+              provisioning_recovery_attempt = 1,
+              provisioning_recovery_next_run_at = ?,
+              provisioning_recovery_halted_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND updated_at = ?
+          AND subgroup_chat_id = ?`,
+      `Rejected legacy subgroup ${input.rejectedSubgroupChatId} was retired; replacement provisioning is scheduled.`,
+      generation,
+      completedAt,
+      completedAt,
+      event.id,
+      event.updatedAt,
+      event.subgroupChatId!
+    ).changes === 1;
+    if (!scheduled || !releaseEventCleanupClaim(db, {
+      eventId: event.id,
+      claimId: input.claim.claimId
+    })) {
+      throw new Error(`Unable to schedule replacement provisioning for event ${event.id}.`);
+    }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.legacy_child_retired',
+      metadata: {
+        operationId: input.operationId,
+        rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+        retiredAt: completedAt
+      }
+    });
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.legacy_child_replacement_scheduled',
+      metadata: {
+        operationId: input.operationId,
+        failureKind: input.failureKind,
+        rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+        replacementGeneration: generation,
+        replacementAttempt: 1,
+        runAt: completedAt,
+        calendarStatus: event.calendarStatus,
+        creatorIdentityId: event.actorIdentityId
+      }
+    });
+    return { status: 'scheduled', event: getEvent(db, event.id)! };
+  });
+}
+
+export function failClaimedRejectedEventChildReplacement(
+  db: PluginDatabase,
+  input: RejectedEventChildReplacementExpectation & {
+    claim: EventCleanupClaim;
+    failureReason: string;
+    failedAt: string;
+  }
+): boolean {
+  return db.transaction(() => {
+    const event = getEvent(db, input.eventId);
+    const claim = getEventCleanupClaim(db, input.eventId);
+    if (
+      !event ||
+      event.scopeId !== input.scopeId ||
+      event.eventStatus !== 'failed' ||
+      event.groupLifecycleStatus !== 'cleanup_failed' ||
+      event.calendarStatus !== 'included' ||
+      event.subgroupChatId?.toLowerCase() !== input.rejectedSubgroupChatId.toLowerCase() ||
+      event.updatedAt !== input.claim.expectedEventUpdatedAt ||
+      !claim ||
+      claim.claimId !== input.claim.claimId ||
+      claim.expectedEventUpdatedAt !== event.updatedAt
+    ) {
+      return false;
+    }
+    const failedAt = nextEventRevisionTimestamp(event.updatedAt, new Date(input.failedAt));
+    const failed = db.run(
+      `UPDATE event_records
+          SET error = ?, updated_at = ?
+        WHERE id = ? AND updated_at = ?`,
+      input.failureReason,
+      failedAt,
+      event.id,
+      event.updatedAt
+    ).changes === 1;
+    if (!failed || !releaseEventCleanupClaim(db, {
+      eventId: event.id,
+      claimId: input.claim.claimId
+    })) {
+      throw new Error(`Unable to release failed replacement claim ${input.claim.claimId}.`);
+    }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.legacy_child_replacement_dismantle_failed',
+      metadata: {
+        operationId: input.operationId,
+        failureKind: input.failureKind,
+        rejectedSubgroupChatId: input.rejectedSubgroupChatId,
+        reason: input.failureReason,
+        failedAt
+      }
+    });
+    return true;
+  });
 }
 
 export function markClaimedEventCleaned(db: PluginDatabase, input: {
@@ -3128,7 +3978,7 @@ export function claimInitialEventPreCreateProvisioningAttempt(db: PluginDatabase
           (origin = 'unplanned'
             AND event_status = 'failed'
             AND group_lifecycle_status = 'none'
-            AND calendar_status = 'hidden'
+            AND calendar_status IN ('hidden', 'included')
             AND poll_wa_msg_id IS NULL)
         )`,
     input.generation,
@@ -3198,7 +4048,6 @@ export function haltInterruptedEventPreCreateClaimAtStartup(db: PluginDatabase, 
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'none',
-            calendar_status = 'hidden',
             error = ?,
             provisioning_recovery_halted_at = ?,
             updated_at = ?
@@ -3218,7 +4067,7 @@ export function haltInterruptedEventPreCreateClaimAtStartup(db: PluginDatabase, 
           OR
           (event_status = 'failed'
             AND group_lifecycle_status = 'none'
-            AND calendar_status = 'hidden'
+            AND calendar_status IN ('hidden', 'included')
             AND (
               (origin IN ('created', 'adopted_poll') AND poll_wa_msg_id IS NOT NULL)
               OR (origin = 'unplanned' AND poll_wa_msg_id IS NULL)
@@ -3253,7 +4102,7 @@ export function claimScheduledEventPreCreateProvisioningAttempt(db: PluginDataba
         AND scope_id = ?
         AND event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND calendar_status = 'hidden'
+        AND calendar_status IN ('hidden', 'included')
         AND subgroup_chat_id IS NULL
         AND cleanup_at > ?
         AND provisioning_recovery_generation = ?
@@ -3284,7 +4133,6 @@ export function rearmClaimedEventPreCreateProvisioningAttempt(db: PluginDatabase
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'none',
-            calendar_status = 'hidden',
             error = ?,
             provisioning_recovery_attempt = ?,
             provisioning_recovery_next_run_at = ?,
@@ -3371,7 +4219,6 @@ export function checkpointClaimedEventProvisioningChild(db: PluginDatabase, inpu
       `UPDATE event_records
           SET event_status = 'failed',
               group_lifecycle_status = 'none',
-              calendar_status = 'hidden',
               subgroup_chat_id = ?,
               subgroup_title = ?,
               error = ?,
@@ -3575,7 +4422,6 @@ export function haltClaimedEventPreCreateProvisioning(db: PluginDatabase, input:
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'none',
-            calendar_status = 'hidden',
             error = ?,
             provisioning_recovery_halted_at = ?,
             updated_at = ?
@@ -3612,7 +4458,6 @@ export function markClaimedEventPreCreateProvisioningMissed(db: PluginDatabase, 
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'missed',
-            calendar_status = 'hidden',
             error = ?,
             provisioning_recovery_generation = NULL,
             provisioning_recovery_attempt = NULL,
@@ -3654,7 +4499,6 @@ export function markScheduledEventPreCreateProvisioningMissed(db: PluginDatabase
     `UPDATE event_records
         SET event_status = 'failed',
             group_lifecycle_status = 'missed',
-            calendar_status = 'hidden',
             error = ?,
             provisioning_recovery_generation = NULL,
             provisioning_recovery_attempt = NULL,
@@ -4039,7 +4883,7 @@ export function initializeEventPreCreateProvisioningRecovery(db: PluginDatabase,
         AND scope_id = ?
         AND event_status = 'failed'
         AND group_lifecycle_status = 'none'
-        AND calendar_status = 'hidden'
+        AND calendar_status IN ('hidden', 'included')
         AND subgroup_chat_id IS NULL
         AND actor_identity_id IS NOT NULL
         AND trim(actor_identity_id) <> ''

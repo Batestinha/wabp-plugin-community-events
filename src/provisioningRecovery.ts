@@ -463,7 +463,11 @@ export async function resumeEventProvisioningFromOperator(
       reason,
       failedAt: input.now ?? new Date(),
       ...(managedFailure
-        ? { recoveryDisposition: managedFailure.recoveryDisposition }
+        ? {
+            recoveryDisposition: managedFailure.recoveryDisposition,
+            stage: managedFailure.stage,
+            mutationDisposition: managedFailure.mutationDisposition
+          }
         : {})
     });
   }
@@ -519,6 +523,8 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
   reason: string;
   failedAt: Date;
   recoveryDisposition?: TransportCommunityLinkRecoveryDisposition | undefined;
+  stage?: ManagedCommunitySubgroupProvisioningError['stage'] | undefined;
+  mutationDisposition?: ManagedCommunitySubgroupProvisioningError['mutationDisposition'] | undefined;
 }): Promise<OperatorResumeEventProvisioningResult> {
   const db = eventsDatabase(input.context.databases);
   const failedAt = input.failedAt.toISOString();
@@ -552,6 +558,10 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
         generation: input.cursor.generation,
         attempt: input.cursor.attempt,
         source: 'operator_resume',
+        ...(input.stage ? { stage: input.stage } : {}),
+        ...(input.mutationDisposition
+          ? { mutationDisposition: input.mutationDisposition }
+          : {}),
         recoveryDisposition: input.recoveryDisposition ?? 'unclassified',
         reason: input.reason
       }
@@ -783,7 +793,7 @@ function isNoChildProvisioningRecoveryRecord(event: StoredEventRecord): boolean 
   if (
     event.eventStatus !== 'failed' ||
     event.groupLifecycleStatus !== 'none' ||
-    event.calendarStatus !== 'hidden' ||
+    (event.calendarStatus !== 'hidden' && event.calendarStatus !== 'included') ||
     event.subgroupChatId ||
     !event.actorIdentityId?.trim()
   ) {

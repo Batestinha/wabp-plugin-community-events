@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import type {
+  CreatedGroupParticipantResult,
+  PersistedRequiredCreatorReference
+} from '../../../platform/transport/transportTypes';
 import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { CalendarPublicationOutcome } from './calendarPublication';
@@ -211,12 +214,24 @@ export interface StoredEventVote {
 export interface StoredCreatedGroupParticipant {
   eventId: string;
   wid: string;
+  identityId?: string | undefined;
+  evidenceDigest?: string | undefined;
   statusCode?: number | undefined;
   message?: string | undefined;
   isGroupCreator: boolean;
   isInviteV4Sent: boolean;
   requiredCreatorMembershipStatus?: CreatedGroupParticipantResult['requiredCreatorMembershipStatus'];
   createdAt: string;
+}
+
+/**
+ * Stable creator principal paired with the exact observed/provider WID whose
+ * outcome is being checkpointed. The WID is evidence, never the principal.
+ */
+export interface EventCreatorParticipantPrincipal {
+  identityId: string;
+  participantWid: string;
+  evidenceDigest?: string | undefined;
 }
 
 export interface StoredCalendarPublicationStatus {
@@ -1411,6 +1426,7 @@ export function completeClaimedEventCommunityLink(db: PluginDatabase, input: {
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   recoveryGeneration: string;
   recoveryAttempt: number;
   completedAt: string;
@@ -1439,7 +1455,7 @@ export function completeClaimedEventCommunityLink(db: PluginDatabase, input: {
       return false;
     }
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.completedAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.completedAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET event_status = 'active',
@@ -1483,6 +1499,7 @@ export function checkpointClaimedEventParticipantOutcomes(db: PluginDatabase, in
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   recoveryGeneration: string;
   recoveryAttempt: number;
   checkpointedAt: string;
@@ -1514,7 +1531,7 @@ export function checkpointClaimedEventParticipantOutcomes(db: PluginDatabase, in
       return false;
     }
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.checkpointedAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.checkpointedAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET subgroup_title = ?,
@@ -1617,6 +1634,7 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   recoveryGeneration: string;
   recoveryAttempt: number;
   recoveryNextRunAt: string | null;
@@ -1651,7 +1669,7 @@ export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
     }
 
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.completedAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.completedAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET event_status = 'active',
@@ -3314,6 +3332,7 @@ export function checkpointClaimedEventProvisioningChild(db: PluginDatabase, inpu
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   checkpointedAt: string;
   haltedAt?: string | undefined;
   reason?: string | undefined;
@@ -3347,7 +3366,7 @@ export function checkpointClaimedEventProvisioningChild(db: PluginDatabase, inpu
       return false;
     }
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.checkpointedAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.checkpointedAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET event_status = 'failed',
@@ -3394,6 +3413,7 @@ export function bindClaimedInitialPlannedEventProvisioningChild(db: PluginDataba
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   boundAt: string;
 }): boolean {
   return db.transaction(() => {
@@ -3418,7 +3438,7 @@ export function bindClaimedInitialPlannedEventProvisioningChild(db: PluginDataba
       return false;
     }
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.boundAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.boundAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET subgroup_chat_id = ?,
@@ -3462,6 +3482,7 @@ export function failClaimedBoundPlannedEventProvisioningChild(db: PluginDatabase
   subgroupChatId: string;
   subgroupTitle: string;
   participants: Record<string, CreatedGroupParticipantResult>;
+  creator?: EventCreatorParticipantPrincipal | undefined;
   generation: string;
   expectedAttempt: number;
   nextAttempt: number;
@@ -3499,7 +3520,7 @@ export function failClaimedBoundPlannedEventProvisioningChild(db: PluginDatabase
       return false;
     }
     db.run('DELETE FROM event_group_participants WHERE event_id = ?', input.eventId);
-    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.failedAt);
+    writeCreatedGroupParticipants(db, input.eventId, input.participants, input.failedAt, input.creator);
     const result = db.run(
       `UPDATE event_records
           SET event_status = 'failed',
@@ -4178,6 +4199,8 @@ export function listCreatedGroupParticipants(
   return db.all<{
     event_id: string;
     wid: string;
+    identity_id: string | null;
+    evidence_digest: string | null;
     status_code: number | null;
     message: string | null;
     is_group_creator: number;
@@ -4185,7 +4208,7 @@ export function listCreatedGroupParticipants(
     required_creator_membership_status: string | null;
     created_at: string;
   }>(
-    `SELECT event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent,
+    `SELECT event_id, wid, identity_id, evidence_digest, status_code, message, is_group_creator, is_invite_v4_sent,
             required_creator_membership_status, created_at
        FROM event_group_participants
       WHERE event_id = ?
@@ -4198,6 +4221,8 @@ export function listCreatedGroupParticipants(
     return {
       eventId: row.event_id,
       wid: row.wid,
+      ...(row.identity_id ? { identityId: row.identity_id } : {}),
+      ...(row.evidence_digest ? { evidenceDigest: row.evidence_digest } : {}),
       ...(row.status_code !== null ? { statusCode: row.status_code } : {}),
       ...(row.message ? { message: row.message } : {}),
       isGroupCreator: row.is_group_creator === 1,
@@ -4210,13 +4235,55 @@ export function listCreatedGroupParticipants(
   });
 }
 
+/**
+ * Reads the required creator by its persisted platform principal. This never
+ * infers PN/LID equivalence from participant keys; legacy rows are eligible
+ * only after migration explicitly bound them to the event actor identity.
+ */
+export function getEventRequiredCreatorReference(
+  db: PluginDatabase,
+  eventId: string,
+  actorIdentityId: string
+): PersistedRequiredCreatorReference | undefined {
+  const identityId = requiredTrimmedValue(actorIdentityId, 'event actor identity ID');
+  const rows = db.all<{
+    wid: string;
+    identity_id: string;
+    evidence_digest: string | null;
+  }>(
+    `SELECT wid, identity_id, evidence_digest
+       FROM event_group_participants
+      WHERE event_id = ?
+        AND identity_id = ?
+        AND required_creator_membership_status IS NOT NULL
+      ORDER BY created_at DESC, wid ASC`,
+    eventId,
+    identityId
+  );
+  if (rows.length > 1) {
+    throw new Error(
+      `Event ${eventId} has multiple required creator outcomes for identity ${identityId}.`
+    );
+  }
+  const row = rows[0];
+  if (!row) {
+    return undefined;
+  }
+  return {
+    identityId: row.identity_id,
+    participantWid: row.wid,
+    ...(row.evidence_digest ? { evidenceDigest: row.evidence_digest } : {})
+  };
+}
+
 export function saveCreatedGroupParticipants(
   db: PluginDatabase,
   eventId: string,
-  participants: Record<string, CreatedGroupParticipantResult>
+  participants: Record<string, CreatedGroupParticipantResult>,
+  creator?: EventCreatorParticipantPrincipal | undefined
 ): void {
   db.transaction(() => {
-    writeCreatedGroupParticipants(db, eventId, participants, new Date().toISOString());
+    writeCreatedGroupParticipants(db, eventId, participants, new Date().toISOString(), creator);
   });
 }
 
@@ -4224,14 +4291,47 @@ function writeCreatedGroupParticipants(
   db: PluginDatabase,
   eventId: string,
   participants: Record<string, CreatedGroupParticipantResult>,
-  createdAt: string
+  createdAt: string,
+  creator?: EventCreatorParticipantPrincipal | undefined
 ): void {
+  const creatorBinding = validatedCreatorParticipantBinding(participants, creator);
+  if (creatorBinding) {
+    const existing = db.get<{ identity_id: string | null }>(
+      `SELECT identity_id
+         FROM event_group_participants
+        WHERE event_id = ? AND wid = ?`,
+      eventId,
+      creatorBinding.participantWid
+    );
+    if (existing?.identity_id && existing.identity_id !== creatorBinding.identityId) {
+      throw new Error(
+        `Participant ${creatorBinding.participantWid} is already bound to conflicting identity ${existing.identity_id}.`
+      );
+    }
+    db.run(
+      `DELETE FROM event_group_participants
+        WHERE event_id = ?
+          AND identity_id = ?
+          AND wid <> ?`,
+      eventId,
+      creatorBinding.identityId,
+      creatorBinding.participantWid
+    );
+  }
   const insert = db.prepare(
     `INSERT INTO event_group_participants (
-       event_id, wid, status_code, message, is_group_creator, is_invite_v4_sent,
+       event_id, wid, identity_id, evidence_digest, status_code, message, is_group_creator, is_invite_v4_sent,
        required_creator_membership_status, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_id, wid) DO UPDATE SET
+       identity_id = COALESCE(
+         excluded.identity_id,
+         event_group_participants.identity_id
+       ),
+       evidence_digest = COALESCE(
+         excluded.evidence_digest,
+         event_group_participants.evidence_digest
+       ),
        status_code = excluded.status_code,
        message = excluded.message,
        is_group_creator = excluded.is_group_creator,
@@ -4242,9 +4342,13 @@ function writeCreatedGroupParticipants(
        )`
   );
   for (const [wid, participant] of Object.entries(participants)) {
+    const normalizedWid = requiredTrimmedValue(wid, 'participant WID');
+    const isCreator = creatorBinding?.participantWid === normalizedWid;
     insert.run(
       eventId,
-      wid,
+      normalizedWid,
+      isCreator ? creatorBinding.identityId : null,
+      isCreator ? creatorBinding.evidenceDigest ?? null : null,
       participant.statusCode ?? null,
       participant.message ?? null,
       participant.isGroupCreator ? 1 : 0,
@@ -4255,14 +4359,71 @@ function writeCreatedGroupParticipants(
   }
 }
 
+function validatedCreatorParticipantBinding(
+  participants: Record<string, CreatedGroupParticipantResult>,
+  creator: EventCreatorParticipantPrincipal | undefined
+): EventCreatorParticipantPrincipal | undefined {
+  const creatorOutcomes = Object.entries(participants).filter(([, participant]) =>
+    participant.requiredCreatorMembershipStatus !== undefined);
+  if (creatorOutcomes.length === 0) {
+    if (creator) {
+      throw new Error('A creator participant principal requires one explicit creator membership outcome.');
+    }
+    return undefined;
+  }
+  if (!creator) {
+    throw new Error('A required creator membership outcome requires an explicit creator identity principal.');
+  }
+  if (creatorOutcomes.length !== 1) {
+    throw new Error('An event may persist exactly one required creator membership outcome.');
+  }
+  const identityId = requiredTrimmedValue(creator.identityId, 'creatorIdentityId');
+  const participantWid = requiredTrimmedValue(creator.participantWid, 'creatorParticipantWid');
+  const evidenceDigest = creator.evidenceDigest === undefined
+    ? undefined
+    : requiredEvidenceDigest(creator.evidenceDigest);
+  const [outcomeWid] = creatorOutcomes[0]!;
+  if (requiredTrimmedValue(outcomeWid, 'creator outcome WID') !== participantWid) {
+    throw new Error(
+      `Creator participant ${participantWid} does not match the explicit creator outcome ${outcomeWid}.`
+    );
+  }
+  return {
+    identityId,
+    participantWid,
+    ...(evidenceDigest ? { evidenceDigest } : {})
+  };
+}
+
+function requiredEvidenceDigest(value: string): string {
+  const normalized = requiredTrimmedValue(value, 'creatorEvidenceDigest').toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    throw new Error('creatorEvidenceDigest must be a SHA-256 digest.');
+  }
+  return normalized;
+}
+
+function requiredTrimmedValue(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${label} is required.`);
+  }
+  return normalized;
+}
+
 function requiredCreatorMembershipStatus(
   value: string | null
 ): CreatedGroupParticipantResult['requiredCreatorMembershipStatus'] {
   switch (value) {
     case 'initial_create_missing':
+    case 'technical_retry_pending':
     case 'direct_add_pending':
     case 'invite_pending':
-    case 'manual_join_pending':
+    case 'privacy_invite_delivery_uncertain':
+    case 'privacy_action_required':
+    case 'provider_rejection':
+    case 'outcome_ambiguous':
+    case 'direct_add_not_observed':
     case 'membership_confirmed':
       return value;
     case null:

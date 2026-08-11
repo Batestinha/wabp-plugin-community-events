@@ -59,6 +59,7 @@ import {
   eventsDatabase,
   expireKnownChildEventProvisioningForCleanup,
   getEvent,
+  getEventRequiredCreatorReference,
   getUnplannedEventFinalization,
   getEventByEquivalentPoll,
   getLiveEventBySubgroup,
@@ -1140,6 +1141,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           subgroupChatId: candidate.chatId,
           subgroupTitle: candidate.title,
           participants: candidate.participants,
+          creator: candidate.requiredCreator,
           boundAt: checkpointedAt
         });
         if (!checkpointed) {
@@ -1184,12 +1186,21 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       );
     }
     let participantOutcomes = storedParticipantOutcomes(db, record.id);
+    const persistedRequiredCreator = getEventRequiredCreatorReference(
+      db,
+      record.id,
+      requireHookEventActorIdentityId(record)
+    );
+    if (!persistedRequiredCreator) {
+      throw new Error(`Event ${record.id} has no authoritative required creator checkpoint.`);
+    }
     const creatorResult = await reconcileEventCommunitySubgroupCreator({
       context,
       scopeId: record.scopeId,
       actorIdentityId: requireHookEventActorIdentityId(record),
       subgroupChatId,
       subgroupTitle,
+      requiredCreator: persistedRequiredCreator,
       participants: participantOutcomes,
       parentCommunityWid
     });
@@ -1206,6 +1217,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       subgroupChatId,
       subgroupTitle,
       participants: participantOutcomes,
+      creator: creatorResult.created.requiredCreator,
       recoveryGeneration: preCreateClaim.generation,
       recoveryAttempt: preCreateClaim.attempt,
       checkpointedAt: nextEventRevisionTimestamp(creatorLeaseRenewedAt)
@@ -1221,6 +1233,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       actorIdentityId: requireHookEventActorIdentityId(record),
       subgroupChatId,
       subgroupTitle,
+      requiredCreator: creatorResult.created.requiredCreator,
       participants: participantOutcomes,
       parentCommunityWid
     });
@@ -1271,6 +1284,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       actorIdentityId: requireHookEventActorIdentityId(record),
       subgroupChatId,
       subgroupTitle,
+      requiredCreator: creatorResult.created.requiredCreator,
       participantWids: attendeeWids,
       participants: participantOutcomes,
       parentCommunityWid
@@ -1284,6 +1298,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       subgroupChatId,
       subgroupTitle,
       participants: participantOutcomes,
+      creator: result.created.requiredCreator,
       recoveryGeneration: preCreateClaim.generation,
       recoveryAttempt: preCreateClaim.attempt,
       completedAt
@@ -1484,7 +1499,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         providerId: provisioning.providerId,
         certainty: provisioning.certainty,
         details: provisioning.details,
-        participantWids: provisioning.participantWids,
+        creatorIdentityId: provisioning.creatorIdentityId,
         claimGeneration: preCreateClaim?.generation,
         claimAttempt: preCreateClaim?.attempt,
         retryWithinCleanup,
@@ -1559,6 +1574,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           subgroupChatId: created.chatId,
           subgroupTitle: created.title,
           participants: created.participants,
+          creator: created.requiredCreator,
           checkpointedAt: failedAt,
           reason
         });
@@ -1574,6 +1590,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           subgroupChatId: created.chatId,
           subgroupTitle: created.title,
           participants: created.participants,
+          creator: created.requiredCreator,
           generation: preCreateClaim.generation,
           expectedAttempt: preCreateClaim.attempt,
           nextAttempt: operatorRequired ? preCreateClaim.attempt : nextAttempt,
@@ -1595,6 +1612,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           subgroupChatId: created.chatId,
           subgroupTitle: created.title,
           participants: created.participants,
+          creator: created.requiredCreator,
           recoveryGeneration: preCreateClaim.generation,
           recoveryAttempt: preCreateClaim.attempt,
           checkpointedAt: failedAt,
@@ -1696,12 +1714,18 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           latestCursor.attempt === preCreateClaim.attempt
         ) {
           failedSubgroupChatId = latest.subgroupChatId;
+          const requiredCreator = getEventRequiredCreatorReference(
+            db,
+            latest.id,
+            requireHookEventActorIdentityId(latest)
+          );
           failurePersisted = failClaimedBoundPlannedEventProvisioningChild(db, {
             eventId: latest.id,
             scopeId: latest.scopeId,
             subgroupChatId: latest.subgroupChatId,
             subgroupTitle: latest.subgroupTitle ?? latest.groupTitle,
             participants: storedParticipantOutcomes(db, latest.id),
+            ...(requiredCreator ? { creator: requiredCreator } : {}),
             generation: preCreateClaim.generation,
             expectedAttempt: preCreateClaim.attempt,
             nextAttempt: preCreateClaim.attempt,

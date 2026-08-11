@@ -5,7 +5,12 @@ import {
   type ManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { CreatedGroupParticipantResult, OutboundSendResult } from '../../../platform/transport/transportTypes';
+import type {
+  CreatedGroupParticipantResult,
+  ManagedCommunitySubgroup,
+  OutboundSendResult,
+  RequiredCreatorBinding
+} from '../../../platform/transport/transportTypes';
 import type { TransportCommunityLinkRecoveryDisposition } from '../../../platform/transport/transportErrors';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import { voterWidsForResponseBehavior } from './attendance';
@@ -41,6 +46,7 @@ import {
   eventsDatabase,
   getLiveEventBySubgroup,
   getEvent,
+  getEventRequiredCreatorReference,
   getUnplannedEventFinalization,
   haltClaimedKnownChildEventProvisioning,
   includeClaimedEventCalendarBeforeCommunityLink,
@@ -691,6 +697,7 @@ export async function retryEventProvisioningCreation(input: {
         subgroupChatId: error.created.chatId,
         subgroupTitle: error.created.title,
         participants: error.created.participants,
+        creator: error.created.requiredCreator,
         checkpointedAt,
         reason: error.message
       });
@@ -730,6 +737,7 @@ export async function retryEventProvisioningCreation(input: {
     subgroupChatId: created.chatId,
     subgroupTitle: created.title,
     participants: created.participants,
+    creator: created.requiredCreator,
     checkpointedAt
   });
   if (!checkpointed) {
@@ -1422,6 +1430,18 @@ export async function resumeEventProvisioning(
     listCreatedGroupParticipants(db, event.id),
     input.participants
   );
+  const persistedRequiredCreator = getEventRequiredCreatorReference(
+    db,
+    event.id,
+    requireRecoveryActorIdentityId(event)
+  );
+  if (!persistedRequiredCreator) {
+    return rejected(
+      event,
+      `Event ${event.id} has no authoritative required creator checkpoint.`
+    );
+  }
+  let requiredCreator: RequiredCreatorBinding | undefined;
   // poll_closed is the durable required-settings fence. calendar=included is
   // then persisted and published before COMPLETE may attempt the physical
   // link. Creator membership remains a hard precondition on every known-child
@@ -1459,6 +1479,7 @@ export async function resumeEventProvisioning(
       actorIdentityId: requireRecoveryActorIdentityId(event),
       subgroupChatId,
       subgroupTitle,
+      requiredCreator: persistedRequiredCreator,
       participants: participantOutcomes,
       parentCommunityWid: parentCommunityChatId
     });
@@ -1469,9 +1490,10 @@ export async function resumeEventProvisioning(
       );
     }
     subgroupTitle = creatorResult.created.title.trim() || subgroupTitle;
-    participantOutcomes = mergeParticipantOutcomeRecords(
+    requiredCreator = creatorResult.created.requiredCreator;
+    participantOutcomes = mergeManagedParticipantOutcomeRecords(
       participantOutcomes,
-      creatorResult.created.participants
+      creatorResult.created
     );
     const creatorCheckpointed = checkpointClaimedEventParticipantOutcomes(db, {
       eventId: event.id,
@@ -1479,6 +1501,7 @@ export async function resumeEventProvisioning(
       subgroupChatId,
       subgroupTitle,
       participants: participantOutcomes,
+      creator: requiredCreator,
       recoveryGeneration: recoveryCursor!.generation,
       recoveryAttempt: recoveryCursor!.attempt,
       checkpointedAt: nextEventRevisionTimestamp(creatorLeaseRenewedAt)
@@ -1497,6 +1520,7 @@ export async function resumeEventProvisioning(
         actorIdentityId: requireRecoveryActorIdentityId(event),
         subgroupChatId,
         subgroupTitle,
+        requiredCreator,
         participants: participantOutcomes,
         parentCommunityWid: parentCommunityChatId
       });
@@ -1570,6 +1594,7 @@ export async function resumeEventProvisioning(
       actorIdentityId: requireRecoveryActorIdentityId(event),
       subgroupChatId,
       subgroupTitle,
+      requiredCreator,
       participantWids: attendeeWids,
       participants: participantOutcomes,
       parentCommunityWid: parentCommunityChatId
@@ -1581,9 +1606,10 @@ export async function resumeEventProvisioning(
       );
     }
     subgroupTitle = result.created.title.trim() || subgroupTitle;
-    participantOutcomes = mergeParticipantOutcomeRecords(
+    requiredCreator = result.created.requiredCreator;
+    participantOutcomes = mergeManagedParticipantOutcomeRecords(
       participantOutcomes,
-      result.created.participants
+      result.created
     );
   } catch (error) {
     if (
@@ -1591,9 +1617,10 @@ export async function resumeEventProvisioning(
       error.created.chatId.trim().toLowerCase() === subgroupChatId
     ) {
       subgroupTitle = error.created.title.trim() || subgroupTitle;
-      participantOutcomes = mergeParticipantOutcomeRecords(
+      requiredCreator = error.created.requiredCreator;
+      participantOutcomes = mergeManagedParticipantOutcomeRecords(
         participantOutcomes,
-        error.created.participants
+        error.created
       );
       const checkpointed = checkpointClaimedEventParticipantOutcomes(db, {
         eventId: event.id,
@@ -1601,6 +1628,7 @@ export async function resumeEventProvisioning(
         subgroupChatId,
         subgroupTitle,
         participants: participantOutcomes,
+        creator: error.created.requiredCreator,
         recoveryGeneration: recoveryCursor!.generation,
         recoveryAttempt: recoveryCursor!.attempt,
         checkpointedAt: new Date().toISOString(),
@@ -1624,6 +1652,9 @@ export async function resumeEventProvisioning(
   }
 
   const resumedAt = new Date().toISOString();
+  if (!requiredCreator) {
+    throw new Error(`Event ${event.id} completed subgroup recovery without a strict creator binding.`);
+  }
   if (event.origin === 'unplanned') {
     const actorIdentityId = requireRecoveryActorIdentityId(event);
     const resolvedLocale = await input.context.i18n.resolveIdentityLocale(
@@ -1636,6 +1667,7 @@ export async function resumeEventProvisioning(
       subgroupChatId,
       subgroupTitle,
       participants: participantOutcomes,
+      creator: requiredCreator,
       recoveryGeneration: recoveryCursor!.generation,
       recoveryAttempt: recoveryCursor!.attempt,
       recoveryNextRunAt: null,
@@ -1740,6 +1772,7 @@ export async function resumeEventProvisioning(
     subgroupChatId,
     subgroupTitle,
     participants: participantOutcomes,
+    creator: requiredCreator,
     recoveryGeneration: recoveryCursor!.generation,
     recoveryAttempt: recoveryCursor!.attempt,
     completedAt: resumedAt
@@ -2059,6 +2092,27 @@ function mergeParticipantOutcomeRecords(
     }
   }
   return merged;
+}
+
+function mergeManagedParticipantOutcomeRecords(
+  previous: Record<string, CreatedGroupParticipantResult>,
+  created: ManagedCommunitySubgroup
+): Record<string, CreatedGroupParticipantResult> {
+  const creatorWid = created.requiredCreator.participantWid.trim();
+  const merged = mergeParticipantOutcomeRecords(previous, created.participants);
+  const creatorOutcome = created.participants[creatorWid];
+  if (!creatorWid || !creatorOutcome?.requiredCreatorMembershipStatus) {
+    throw new Error(
+      `Managed subgroup ${created.chatId} has no exact required creator outcome for ${creatorWid || 'missing WID'}.`
+    );
+  }
+  return Object.fromEntries(Object.entries(merged).map(([wid, participant]) => {
+    if (wid === creatorWid || participant.requiredCreatorMembershipStatus === undefined) {
+      return [wid, participant];
+    }
+    const { requiredCreatorMembershipStatus: _discarded, ...ordinaryParticipant } = participant;
+    return [wid, ordinaryParticipant];
+  }));
 }
 
 function provisioningProgress(input: {

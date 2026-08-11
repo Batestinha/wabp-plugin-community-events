@@ -1,7 +1,8 @@
 import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
 import type {
-  CreatedGroup,
-  CreatedGroupParticipantResult
+  CreatedGroupParticipantResult,
+  PersistedRequiredCreatorReference,
+  RequiredCreatorBinding
 } from '../../../platform/transport/transportTypes';
 import {
   COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
@@ -12,6 +13,7 @@ import {
   type CommunitySubgroupCandidateOutput,
   type CommunitySubgroupCompleteOutput,
   type CommunitySubgroupConfigureOutput,
+  type CommunitySubgroupReconcileCreatorOutput,
 } from '../community-subgroups/serviceApi';
 
 export interface EventSubgroupContext {
@@ -53,14 +55,15 @@ export async function reconcileEventCommunitySubgroupCreator(input: {
   actorIdentityId: string;
   subgroupChatId: string;
   subgroupTitle: string;
+  requiredCreator: PersistedRequiredCreatorReference;
   participants: Record<string, CreatedGroupParticipantResult>;
   parentCommunityWid: string;
-}): Promise<{ created: CreatedGroup }> {
+}): Promise<CommunitySubgroupReconcileCreatorOutput> {
   if (!input.context.services) {
     throw new Error('Plugin runtime does not expose plugin services.');
   }
   await input.context.ensureChatArchivePolicyForScope?.(input.scopeId);
-  return input.context.services.call<{ created: CreatedGroup }>({
+  return input.context.services.call<CommunitySubgroupReconcileCreatorOutput>({
     serviceId: COMMUNITY_SUBGROUPS_SERVICE_ID,
     method: COMMUNITY_SUBGROUPS_RECONCILE_CREATOR_METHOD,
     scopeId: input.scopeId,
@@ -69,6 +72,7 @@ export async function reconcileEventCommunitySubgroupCreator(input: {
     input: {
       chatId: input.subgroupChatId,
       title: input.subgroupTitle,
+      requiredCreator: input.requiredCreator,
       participants: input.participants,
       parentCommunityWid: input.parentCommunityWid
     }
@@ -81,6 +85,7 @@ export async function completeEventCommunitySubgroup(input: {
   actorIdentityId: string;
   subgroupChatId: string;
   subgroupTitle: string;
+  requiredCreator: RequiredCreatorBinding;
   participantWids: string[];
   participants: Record<string, CreatedGroupParticipantResult>;
   parentCommunityWid: string;
@@ -98,6 +103,7 @@ export async function completeEventCommunitySubgroup(input: {
     input: {
       chatId: input.subgroupChatId,
       title: input.subgroupTitle,
+      requiredCreator: input.requiredCreator,
       participantWids: input.participantWids,
       participants: input.participants,
       parentCommunityWid: input.parentCommunityWid
@@ -111,6 +117,7 @@ export async function configureEventCommunitySubgroup(input: {
   actorIdentityId: string;
   subgroupChatId: string;
   subgroupTitle: string;
+  requiredCreator: RequiredCreatorBinding;
   participants: Record<string, CreatedGroupParticipantResult>;
   parentCommunityWid: string;
 }): Promise<CommunitySubgroupConfigureOutput> {
@@ -127,6 +134,7 @@ export async function configureEventCommunitySubgroup(input: {
     input: {
       chatId: input.subgroupChatId,
       title: input.subgroupTitle,
+      requiredCreator: input.requiredCreator,
       participants: input.participants,
       parentCommunityWid: input.parentCommunityWid
     }

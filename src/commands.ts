@@ -3065,6 +3065,7 @@ async function provisionUnplannedEventSubgroup(input: {
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
       participants: created.participants,
+      creator: created.requiredCreator,
       checkpointedAt: boundAt
     });
     if (!bound) {
@@ -3107,6 +3108,7 @@ async function provisionUnplannedEventSubgroup(input: {
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
+      requiredCreator: created.requiredCreator,
       participants: created.participants,
       parentCommunityWid: created.intendedParentCommunityJid
     });
@@ -3118,7 +3120,8 @@ async function provisionUnplannedEventSubgroup(input: {
     created = {
       ...created,
       title: creatorResult.created.title.trim() || created.title,
-      participants: creatorResult.created.participants
+      participants: creatorResult.created.participants,
+      requiredCreator: creatorResult.created.requiredCreator
     };
     const creatorCheckpointed = checkpointClaimedEventParticipantOutcomes(input.db, {
       eventId: input.event.id,
@@ -3126,6 +3129,7 @@ async function provisionUnplannedEventSubgroup(input: {
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
       participants: created.participants,
+      creator: created.requiredCreator,
       recoveryGeneration: generation,
       recoveryAttempt: attempt,
       checkpointedAt: nextEventRevisionTimestamp(creatorLeaseRenewedAt)
@@ -3141,6 +3145,7 @@ async function provisionUnplannedEventSubgroup(input: {
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
+      requiredCreator: created.requiredCreator,
       participants: created.participants,
       parentCommunityWid: created.intendedParentCommunityJid
     });
@@ -3195,6 +3200,7 @@ async function provisionUnplannedEventSubgroup(input: {
       actorIdentityId: requireStoredEventActorIdentityId(input.event),
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
+      requiredCreator: created.requiredCreator,
       participantWids: [],
       participants: created.participants,
       parentCommunityWid: created.intendedParentCommunityJid
@@ -3202,7 +3208,8 @@ async function provisionUnplannedEventSubgroup(input: {
     created = {
       ...created,
       title: result.created.title,
-      participants: result.created.participants
+      participants: result.created.participants,
+      requiredCreator: result.created.requiredCreator
     };
     const completedAt = new Date().toISOString();
     const completed = completeUnplannedEventProvisioning(input.db, {
@@ -3211,6 +3218,7 @@ async function provisionUnplannedEventSubgroup(input: {
       subgroupChatId: created.chatId,
       subgroupTitle: created.title,
       participants: created.participants,
+      creator: created.requiredCreator,
       recoveryGeneration: generation,
       recoveryAttempt: attempt,
       recoveryNextRunAt: null,
@@ -3256,6 +3264,7 @@ async function provisionUnplannedEventSubgroup(input: {
           subgroupChatId: knownChild.chatId,
           subgroupTitle: knownChild.title,
           participants: knownChild.participants,
+          creator: knownChild.requiredCreator,
           checkpointedAt: failedAt.toISOString(),
           reason: error instanceof Error ? error.message : String(error),
           ...(operatorRequired ? { haltedAt: failedAt.toISOString() } : {})
@@ -3267,6 +3276,7 @@ async function provisionUnplannedEventSubgroup(input: {
           subgroupChatId: knownChild.chatId,
           subgroupTitle: knownChild.title,
           participants: knownChild.participants,
+          creator: knownChild.requiredCreator,
           recoveryGeneration: generation,
           recoveryAttempt: attempt,
           checkpointedAt: failedAt.toISOString(),

@@ -226,7 +226,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
   databases: eventsDatabases,
-  dataVersion: '10',
+  dataVersion: '11',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

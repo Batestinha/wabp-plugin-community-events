@@ -7,7 +7,11 @@ import type { StoredEventRecord } from './store';
 
 export type EventCreatorMembershipPauseKind =
   | 'invite_pending'
-  | 'manual_join_pending';
+  | 'privacy_action_required'
+  | 'privacy_invite_delivery_uncertain'
+  | 'provider_rejection'
+  | 'outcome_ambiguous'
+  | 'direct_add_not_observed';
 
 type EventCreatorMembershipNoticeContext = Pick<
   PluginRuntimeContext,
@@ -37,8 +41,20 @@ export function eventCreatorMembershipPauseKind(
   if (statuses.includes('invite_pending')) {
     return 'invite_pending';
   }
-  if (statuses.includes('manual_join_pending')) {
-    return 'manual_join_pending';
+  if (statuses.includes('privacy_action_required')) {
+    return 'privacy_action_required';
+  }
+  if (statuses.includes('privacy_invite_delivery_uncertain')) {
+    return 'privacy_invite_delivery_uncertain';
+  }
+  if (statuses.includes('provider_rejection')) {
+    return 'provider_rejection';
+  }
+  if (statuses.includes('outcome_ambiguous')) {
+    return 'outcome_ambiguous';
+  }
+  if (statuses.includes('direct_add_not_observed')) {
+    return 'direct_add_not_observed';
   }
   return undefined;
 }
@@ -56,11 +72,18 @@ export function eventCreatorMembershipPauseKindForFailure(
   if (error.preconditionReason === 'invite_pending' && persistedKind === 'invite_pending') {
     return persistedKind;
   }
-  if (
-    error.preconditionReason === 'creator_action_required' &&
-    persistedKind === 'manual_join_pending'
-  ) {
-    return persistedKind;
+  if (error.preconditionReason === 'creator_action_required') {
+    switch (persistedKind) {
+      case 'privacy_action_required':
+      case 'privacy_invite_delivery_uncertain':
+      case 'provider_rejection':
+      case 'outcome_ambiguous':
+      case 'direct_add_not_observed':
+        return persistedKind;
+      case 'invite_pending':
+      case undefined:
+        return undefined;
+    }
   }
   return undefined;
 }
@@ -74,7 +97,7 @@ export async function renderEventCreatorMembershipNotice(input: {
   kind: EventCreatorMembershipPauseKind;
 }): Promise<RenderedEventCreatorMembershipNotice> {
   const groupJoinUrl = await eventCreatorGroupJoinUrl(input.context, input.subgroupChatId);
-  if (input.kind === 'manual_join_pending' && !groupJoinUrl) {
+  if (input.kind !== 'invite_pending' && !groupJoinUrl) {
     throw new Error(
       `No reusable group link is available for creator manual join in event ${input.eventId}.`
     );
@@ -84,13 +107,7 @@ export async function renderEventCreatorMembershipNotice(input: {
     eventId: input.eventId,
     ...(groupJoinUrl ? { groupJoinUrl } : {})
   };
-  const messageKey = groupJoinUrl
-    ? input.kind === 'invite_pending'
-      ? 'official.community-events.creatorMembershipPaused.joinLink.invitePending'
-      : 'official.community-events.creatorMembershipPaused.joinLink.manualJoin'
-    : input.kind === 'invite_pending'
-      ? 'official.community-events.creatorMembershipPaused.privateInvite'
-      : 'official.community-events.creatorMembershipPaused.joinLink.manualJoin';
+  const messageKey = creatorMembershipNoticeMessageKey(input.kind, Boolean(groupJoinUrl));
   return {
     kind: input.kind,
     text: input.t(messageKey, variables),
@@ -101,6 +118,28 @@ export async function renderEventCreatorMembershipNotice(input: {
     ),
     ...(groupJoinUrl ? { groupJoinUrl } : {})
   };
+}
+
+function creatorMembershipNoticeMessageKey(
+  kind: EventCreatorMembershipPauseKind,
+  hasGroupJoinUrl: boolean
+): string {
+  switch (kind) {
+    case 'invite_pending':
+      return hasGroupJoinUrl
+        ? 'official.community-events.creatorMembershipPaused.nativeInvite.sentWithJoinLink'
+        : 'official.community-events.creatorMembershipPaused.nativeInvite.sent';
+    case 'privacy_action_required':
+      return 'official.community-events.creatorMembershipPaused.privacyRestriction.joinLink';
+    case 'privacy_invite_delivery_uncertain':
+      return 'official.community-events.creatorMembershipPaused.privacyInviteDeliveryUncertain.joinLink';
+    case 'provider_rejection':
+      return 'official.community-events.creatorMembershipPaused.providerRejection.joinLink';
+    case 'outcome_ambiguous':
+      return 'official.community-events.creatorMembershipPaused.outcomeAmbiguous.joinLink';
+    case 'direct_add_not_observed':
+      return 'official.community-events.creatorMembershipPaused.directAddNotObserved.joinLink';
+  }
 }
 
 export async function notifyEventCreatorMembershipPaused(input: {

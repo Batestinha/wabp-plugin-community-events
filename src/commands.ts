@@ -57,6 +57,10 @@ import {
   renderEventGroupAnnouncement
 } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
+import {
+  eventPollReplacementPublishIdempotencyKey,
+  runEventPollReplacement
+} from './pollReplacement';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
 import {
   eventCreatorMembershipPauseKindForFailure,
@@ -91,6 +95,7 @@ import {
 } from '../doas/serviceApi';
 import {
   appendEventLog,
+  beginEventPollReplacement,
   checkpointClaimedEventProvisioningChild,
   checkpointClaimedEventParticipantOutcomes,
   advanceEventProvisioningRecovery,
@@ -116,8 +121,9 @@ import {
   resolvedEventCalendarId,
   updateEventStructuredData,
   type EventAnnouncementDeliveryIntent,
-  type StoredEventLocation,
+  type EventEditRepairIntent,
   type NewStoredEventRecord,
+  type StoredEventLocation,
   type StoredEventRecord,
 } from './store';
 
@@ -212,6 +218,7 @@ interface EventTextTransport {
     text: string,
     options?: SendTextOptions | undefined
   ): Promise<OutboundSendResult>;
+  deleteMessage(messageId: string): Promise<void>;
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
@@ -541,16 +548,6 @@ async function startEventEditFlow(context: PluginCommandContext, ctx: CommandCon
 
   const event = matches[0]!;
   const creatorIdentityId = event.actorIdentityId;
-  if (event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open') {
-    return {
-      handled: true,
-      text: ctx.t('official.community-events.edit.pollOpen', {
-        title: eventDisplayTitle(event),
-        eventId: event.id
-      })
-    };
-  }
-
   return startEventUpdateFlow(context, ctx, {
     event,
     config,
@@ -850,13 +847,15 @@ async function beginEventUpdateFlow(
   }
 
   const timezone = input.event.timezone || input.config.timezone;
+  const replacesOpenPoll = input.event.eventStatus === 'active' &&
+    input.event.groupLifecycleStatus === 'poll_open';
   const prefill = eventUpdatePrefill(input.event, profile);
   const startedAt = new Date();
   const initialData = eventInitialFlowData([profile], prefill, {
     timezone,
     locale: input.locale,
     now: startedAt,
-    allowPast: true
+    allowPast: !replacesOpenPoll
   });
   const definition = createEventFlowDefinition({
     t: input.t,
@@ -868,11 +867,13 @@ async function beginEventUpdateFlow(
     askPrefilledQuestions: true,
     flowTypePrefix: 'official.community-events.update',
     flowInstanceId: eventUpdateFlowInstanceId(input.externalIdempotencyKey),
-    confirmMessageKey: 'official.community-events.update.confirm',
+    confirmMessageKey: replacesOpenPoll
+      ? 'official.community-events.update.confirmOpenPoll'
+      : 'official.community-events.update.confirm',
     pastCompletionConfirmMessageKey: input.event.eventStatus === 'active'
       ? 'official.community-events.update.confirmPastCompletion'
       : 'official.community-events.update.confirm',
-    allowPastStartsAt: true,
+    allowPastStartsAt: !replacesOpenPoll,
     now: () => startedAt,
     completeMessageKey: false
   });
@@ -1171,24 +1172,63 @@ async function completeEventUpdate(input: {
       calendars: input.draft.calendars,
       profiles: input.draft.profiles
     });
-    const outcome = await updateEventLifecycle({
-      context: input.context,
-      runtime: input.runtime,
-      activeTransport: input.activeTransport,
-      db,
-      event,
-      profile: input.draft.profile,
-      config,
-      materialized,
-      actorWid: input.draft.actorWid,
-      actorLabel: input.draft.actorLabel,
-      locale: input.draft.locale,
-      requestedTitle: input.draft.requestedTitle,
-      pastCompletionConfirmed: input.pastCompletionConfirmed,
-      now,
-      operationId: input.draft.flowSessionId,
-      sourcePluginId: input.draft.sourcePluginId
-    });
+    const openPollEdit = event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open';
+    if (openPollEdit && materialized.closeAt.getTime() <= now.getTime()) {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t('official.community-events.update.openPollPastUnsupported')
+      );
+      return;
+    }
+    const outcome = openPollEdit
+      ? await replaceOpenEventPollLifecycle({
+          context: input.context,
+          runtime: input.runtime,
+          activeTransport: input.activeTransport,
+          db,
+          event,
+          profile: input.draft.profile,
+          config,
+          materialized,
+          actorWid: input.draft.actorWid,
+          actorIdentityId: input.draft.actorIdentityId,
+          actorLabel: input.draft.actorLabel,
+          locale: input.draft.locale,
+          requestedTitle: input.draft.requestedTitle,
+          now,
+          operationId: input.draft.flowSessionId,
+          sourcePluginId: input.draft.sourcePluginId
+        })
+      : await updateEventLifecycle({
+          context: input.context,
+          runtime: input.runtime,
+          activeTransport: input.activeTransport,
+          db,
+          event,
+          profile: input.draft.profile,
+          config,
+          materialized,
+          actorWid: input.draft.actorWid,
+          actorLabel: input.draft.actorLabel,
+          locale: input.draft.locale,
+          requestedTitle: input.draft.requestedTitle,
+          pastCompletionConfirmed: input.pastCompletionConfirmed,
+          now,
+          operationId: input.draft.flowSessionId,
+          sourcePluginId: input.draft.sourcePluginId
+        });
+    if ('replacementStatus' in outcome && outcome.replacementStatus !== 'completed') {
+      await input.activeTransport.sendText(
+        input.responseChatId,
+        input.t(outcome.replacementStatus === 'pending'
+          ? 'official.community-events.update.replacementQueued'
+          : 'official.community-events.update.replacementExpired', {
+          title: materialized.groupTitle,
+          eventId: event.id
+        })
+      );
+      return;
+    }
     if (!outcome.changed) {
       await input.activeTransport.sendText(
         input.responseChatId,
@@ -1228,6 +1268,435 @@ async function completeEventUpdate(input: {
       ? input.t('official.community-events.update.invalid')
       : input.t('official.community-events.update.failed'));
   }
+}
+
+async function replaceOpenEventPollLifecycle(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  db: ReturnType<typeof eventsDatabase>;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  materialized: MaterializedEventLifecycle;
+  actorWid: string;
+  actorIdentityId: string;
+  actorLabel: string;
+  locale: string;
+  requestedTitle: string;
+  now: Date;
+  operationId: string;
+  sourcePluginId?: string | undefined;
+}): Promise<{
+  changed: boolean;
+  completedNow: false;
+  repairPending: boolean;
+  cleanupAt: Date;
+  replacementStatus: 'completed' | 'pending' | 'aborted';
+}> {
+  const timezone = input.event.timezone || input.config.timezone;
+  const cleanupAt = input.materialized.cleanupAt;
+  if (!eventStructuredDataChanged(input.event, {
+    materialized: input.materialized,
+    cleanupAt,
+    timezone
+  })) {
+    return {
+      changed: false,
+      completedNow: false,
+      repairPending: false,
+      cleanupAt,
+      replacementStatus: 'completed'
+    };
+  }
+  if (!input.event.pollWaMsgId) {
+    throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
+  }
+  const calendarId = resolvedEventCalendarId(input.event);
+  const liveSubgroupChatId = input.event.subgroupChatId;
+  if (liveSubgroupChatId) {
+    const capabilities = await input.context.botCapabilitiesFor?.(liveSubgroupChatId);
+    if (capabilities && (!capabilities.botIsAdmin || !capabilities.canChangeInfo || !capabilities.canSetSubject)) {
+      throw new Error('Bot cannot change the event subgroup subject.');
+    }
+  }
+  const prospectiveUpdatedAt = nextEventRevisionTimestamp(input.event.updatedAt, input.now);
+  const announcementGroupWid = input.profile.eventEditAnnouncement.enabled
+    ? input.event.announcementGroupWid?.trim()
+    : undefined;
+  let announcementIntent: EventAnnouncementDeliveryIntent | undefined;
+  if (input.profile.eventEditAnnouncement.enabled) {
+    if (!announcementGroupWid) {
+      throw new Error('Event edit announcement is enabled, but the event announcement group is unavailable.');
+    }
+    const prospectiveEvent: StoredEventRecord = {
+      ...input.event,
+      profileLabel: input.profile.label,
+      profileRevision: eventProfileQuestionSchemaRevision(input.profile),
+      pollGeneration: input.event.pollGeneration + 1,
+      pollQuestion: input.materialized.pollQuestion,
+      pollOptions: input.materialized.pollOptions,
+      responseClasses: input.materialized.responseClasses,
+      answers: input.materialized.answers,
+      eventLocation: input.materialized.eventLocation,
+      startsAt: input.materialized.startsAt.toISOString(),
+      startsAtUtc: input.materialized.startsAt.toISOString(),
+      timezone,
+      localDate: input.materialized.localDate,
+      localTime: input.materialized.localTime,
+      place: input.materialized.place,
+      closeAt: input.materialized.closeAt.toISOString(),
+      cleanupAt: cleanupAt.toISOString(),
+      groupTitle: input.materialized.groupTitle,
+      ...(liveSubgroupChatId ? { subgroupTitle: input.materialized.groupTitle } : {}),
+      calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+      calendarLocation: input.materialized.calendarLocation,
+      calendarDescription: input.materialized.calendarDescription,
+      updatedAt: prospectiveUpdatedAt
+    };
+    const text = renderEventEditAnnouncement({
+      template: input.profile.eventEditAnnouncement.template,
+      profile: input.profile,
+      event: prospectiveEvent,
+      previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
+      editorDisplayName: input.actorLabel || input.actorWid,
+      locale: input.locale
+    });
+    if (!text.trim()) {
+      throw new Error('Event edit announcement rendered empty.');
+    }
+    announcementIntent = {
+      scopeId: input.event.scopeId,
+      kind: 'event_edit',
+      deliveryKey: input.operationId,
+      chatId: announcementGroupWid,
+      text,
+      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+        eventId: input.event.id,
+        kind: 'event_edit',
+        deliveryKey: input.operationId
+      })
+    };
+  }
+  const repairIntent: EventEditRepairIntent = {
+    operationId: input.operationId,
+    scopeId: input.event.scopeId,
+    ...(liveSubgroupChatId ? { subgroupChatId: liveSubgroupChatId } : {}),
+    targetGroupTitle: input.materialized.groupTitle,
+    calendarId: calendarId ?? '',
+    ...(announcementIntent ? { announcementDeliveryKey: announcementIntent.deliveryKey } : {}),
+    ...(input.profile.calendar.hint.sendOnPollPublished && input.event.announcementGroupWid
+      ? {
+          calendarHintDeliveryKey: input.operationId,
+          calendarHintLocale: input.locale
+        }
+      : {})
+  };
+  beginEventPollReplacement(input.db, {
+    operationId: input.operationId,
+    eventId: input.event.id,
+    scopeId: input.event.scopeId,
+    expectedEventUpdatedAt: input.event.updatedAt,
+    expectedPollWaMsgId: input.event.pollWaMsgId,
+    expectedPollGeneration: input.event.pollGeneration,
+    target: {
+      profileLabel: input.profile.label,
+      profileRevision: eventProfileQuestionSchemaRevision(input.profile),
+      pollQuestion: input.materialized.pollQuestion,
+      pollOptions: input.materialized.pollOptions,
+      responseClasses: input.materialized.responseClasses,
+      answers: input.materialized.answers,
+      ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
+      startsAt: input.materialized.startsAt.toISOString(),
+      startsAtUtc: input.materialized.startsAt.toISOString(),
+      timezone,
+      localDate: input.materialized.localDate,
+      ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
+      ...(input.materialized.place ? { place: input.materialized.place } : {}),
+      closeAt: input.materialized.closeAt.toISOString(),
+      cleanupAt: cleanupAt.toISOString(),
+      groupTitle: input.materialized.groupTitle,
+      calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+      ...(input.materialized.calendarLocation
+        ? { calendarLocation: input.materialized.calendarLocation }
+        : {}),
+      ...(input.materialized.calendarDescription
+        ? { calendarDescription: input.materialized.calendarDescription }
+        : {}),
+      allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
+      ...(announcementIntent ? { announcementIntent } : {}),
+      repairIntent
+    },
+    editorIdentityId: input.actorIdentityId,
+    editorWid: input.actorWid,
+    editorLabel: input.actorLabel,
+    locale: input.locale,
+    sourcePluginId: input.sourcePluginId ?? EVENTS_PLUGIN_ID,
+    publishIdempotencyKey: eventPollReplacementPublishIdempotencyKey({
+      eventId: input.event.id,
+      operationId: input.operationId,
+      nextPollGeneration: input.event.pollGeneration + 1
+    }),
+    createdAt: input.now.toISOString()
+  });
+  const run = await runEventPollReplacement({
+    context: input.context,
+    db: input.db,
+    operationId: input.operationId,
+    deleteMessage: (messageId) => input.activeTransport.deleteMessage(messageId)
+  });
+  if (run.status === 'pending') {
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.pollReplacement,
+        scopeId: input.event.scopeId,
+        ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+        ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+        runAt: run.retryAt,
+        payload: { operationId: input.operationId },
+        dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:core:${run.replacement.failureCount}:${run.retryAt.toISOString()}`
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      appendEventLog(input.db, {
+        eventId: input.event.id,
+        action: 'events.poll_replacement.enqueue_failed',
+        metadata: {
+          operationId: input.operationId,
+          retryAt: run.retryAt.toISOString(),
+          reason
+        }
+      });
+      await appendEventJsonLog(input.context, {
+        action: 'event.poll_replacement_enqueue_failed',
+        scopeId: input.event.scopeId,
+        eventId: input.event.id,
+        actorWid: input.actorWid,
+        profileId: input.event.profileId,
+        pollWaMsgId: input.event.pollWaMsgId,
+        metadata: {
+          operationId: input.operationId,
+          retryAt: run.retryAt.toISOString(),
+          reason
+        }
+      });
+    }
+    return {
+      changed: true,
+      completedNow: false,
+      repairPending: true,
+      cleanupAt,
+      replacementStatus: 'pending'
+    };
+  }
+  if (run.status === 'aborted') {
+    const currentEvent = getEvent(input.db, input.event.id) ?? input.event;
+    const handoffFailures: string[] = [];
+    if (run.retirementPending) {
+      const followUpAt = run.replacement.nextAttemptAt
+        ? new Date(run.replacement.nextAttemptAt)
+        : new Date(input.now.getTime() + 5_000);
+      try {
+        await input.runtime.enqueuePluginJob({
+          jobName: EVENTS_JOBS.pollReplacement,
+          scopeId: run.replacement.scopeId,
+          ...(currentEvent.groupId ? { groupId: currentEvent.groupId } : {}),
+          ...(currentEvent.groupWid ? { groupWid: currentEvent.groupWid } : {}),
+          runAt: followUpAt,
+          payload: { operationId: input.operationId },
+          dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:retire:${run.replacement.retirementFailureCount}`
+        });
+      } catch (error) {
+        handoffFailures.push(`retirement: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const retry of run.receiptReleaseRetries) {
+      try {
+        await input.runtime.enqueuePluginJob({
+          jobName: EVENTS_JOBS.pollReplacement,
+          scopeId: retry.scopeId,
+          ...(currentEvent.groupId ? { groupId: currentEvent.groupId } : {}),
+          ...(currentEvent.groupWid ? { groupWid: currentEvent.groupWid } : {}),
+          runAt: retry.retryAt,
+          payload: { operationId: retry.operationId },
+          dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+        });
+      } catch (error) {
+        handoffFailures.push(
+          `receipt release ${retry.operationId}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+    if (handoffFailures.length > 0) {
+      appendEventLog(input.db, {
+        eventId: currentEvent.id,
+        action: 'events.poll_replacement.aborted_enqueue_failed',
+        metadata: { operationId: input.operationId, handoffFailures }
+      });
+      await appendEventJsonLog(input.context, {
+        action: 'event.poll_replacement_aborted_enqueue_failed',
+        scopeId: currentEvent.scopeId,
+        eventId: currentEvent.id,
+        actorWid: input.actorWid,
+        profileId: currentEvent.profileId,
+        ...(currentEvent.pollWaMsgId ? { pollWaMsgId: currentEvent.pollWaMsgId } : {}),
+        metadata: { operationId: input.operationId, handoffFailures }
+      });
+    }
+    return {
+      changed: false,
+      completedNow: false,
+      repairPending: false,
+      cleanupAt,
+      replacementStatus: 'aborted'
+    };
+  }
+
+  const repairFailures: string[] = [];
+  const updatedEvent = run.event;
+  let repairNeedsJob = false;
+  let repairRetryAt: Date | undefined;
+  try {
+    const repair = await repairEventEdit({
+      appConfig: input.runtime.config,
+      db: input.db,
+      operationId: input.operationId,
+      configFor: async () => input.config,
+      sender: input.activeTransport,
+      ...(input.context.getGroupInviteCode
+        ? { getGroupInviteCode: input.context.getGroupInviteCode }
+        : {}),
+      now: input.now
+    });
+    repairFailures.push(...repair.failures);
+    if (repair.status === 'pending') {
+      repairNeedsJob = true;
+      repairRetryAt = repair.retryAt;
+    }
+  } catch (error) {
+    repairNeedsJob = true;
+    repairFailures.push(`repair: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (repairNeedsJob) {
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.editRepair,
+        scopeId: updatedEvent.scopeId,
+        ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+        ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+        ...(repairRetryAt ? { runAt: repairRetryAt } : { delayMs: 5_000 }),
+        payload: { operationId: input.operationId, attempt: 0 },
+        dedupeKey: `${EVENTS_JOBS.editRepair}:${input.operationId}:initial`
+      });
+    } catch (error) {
+      repairFailures.push(`repair_job: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const closeAt = new Date(updatedEvent.closeAt);
+  try {
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.close,
+      scopeId: updatedEvent.scopeId,
+      ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+      ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+      ...(closeAt.getTime() > Date.now() ? { runAt: closeAt } : {}),
+      payload: {
+        eventId: updatedEvent.id,
+        pollGeneration: updatedEvent.pollGeneration,
+        pollWaMsgId: updatedEvent.pollWaMsgId
+      },
+      dedupeKey: `${EVENTS_JOBS.close}:${updatedEvent.id}:poll-generation:${updatedEvent.pollGeneration}`
+    });
+  } catch (error) {
+    repairFailures.push(`close_job: ${error instanceof Error ? error.message : String(error)}`);
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.pollReplacement,
+        scopeId: updatedEvent.scopeId,
+        ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+        ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+        delayMs: 5_000,
+        payload: { operationId: input.operationId },
+        dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:close-repair:${updatedEvent.pollGeneration}`
+      });
+    } catch (recoveryError) {
+      repairFailures.push(
+        `close_recovery_job: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`
+      );
+    }
+  }
+  if (run.retirementPending) {
+    const followUpAt = run.replacement.nextAttemptAt
+      ? new Date(run.replacement.nextAttemptAt)
+      : new Date(input.now.getTime() + 5_000);
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.pollReplacement,
+        scopeId: updatedEvent.scopeId,
+        ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+        ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+        runAt: followUpAt,
+        payload: { operationId: input.operationId },
+        dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:retire:${run.replacement.retirementFailureCount}`
+      });
+    } catch (error) {
+      repairFailures.push(`retirement_job: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  for (const retry of run.receiptReleaseRetries) {
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.pollReplacement,
+        scopeId: retry.scopeId,
+        ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+        ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+        runAt: retry.retryAt,
+        payload: { operationId: retry.operationId },
+        dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+      });
+    } catch (error) {
+      repairFailures.push(`receipt_release_job: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const repairPending = run.retirementPending || repairNeedsJob || repairFailures.length > 0;
+  appendEventLog(input.db, {
+    eventId: updatedEvent.id,
+    action: 'events.updated',
+    metadata: {
+      operationId: input.operationId,
+      replacement: true,
+      actorWid: input.actorWid,
+      actorLabel: input.actorLabel,
+      sourcePluginId: input.sourcePluginId,
+      requestedTitle: input.requestedTitle,
+      groupTitle: input.materialized.groupTitle,
+      pollGeneration: updatedEvent.pollGeneration,
+      retirementPending: run.retirementPending,
+      repairFailures
+    }
+  });
+  await appendEventJsonLog(input.context, {
+    action: 'event.updated',
+    scopeId: updatedEvent.scopeId,
+    eventId: updatedEvent.id,
+    actorWid: input.actorWid,
+    profileId: updatedEvent.profileId,
+    ...(updatedEvent.pollWaMsgId ? { pollWaMsgId: updatedEvent.pollWaMsgId } : {}),
+    metadata: {
+      replacement: true,
+      operationId: input.operationId,
+      pollGeneration: updatedEvent.pollGeneration,
+      retirementPending: run.retirementPending,
+      repairFailures
+    }
+  });
+  return {
+    changed: true,
+    completedNow: false,
+    repairPending,
+    cleanupAt,
+    replacementStatus: 'completed'
+  };
 }
 
 async function updateEventLifecycle(input: {
@@ -1665,10 +2134,17 @@ function registerEventCancelFlowCompletionHandler(
       actor: {
         wid: draft.actorWid,
         label: draft.actorLabel
-      }
+      },
+      deleteMessage: (messageId) => activeTransport.deleteMessage(messageId)
     });
     if (result.status === 'cancelled') {
-      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.done', {
+      const deletionIncomplete = Boolean(
+        result.announcementMessageDeletion?.skippedReason ||
+        result.announcementMessageDeletion?.failed.length
+      );
+      await activeTransport.sendText(responseChatId, t(deletionIncomplete
+        ? 'official.community-events.cancel.doneDeletionPending'
+        : 'official.community-events.cancel.done', {
         title: eventDisplayTitle(event),
         eventId: event.id
       }));
@@ -2179,12 +2655,6 @@ async function completeEventEditSelection(input: {
     creatorIdentityId: event.actorIdentityId
   })) {
     return terminal('official.community-events.update.permissionDenied');
-  }
-  if (event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open') {
-    return terminal('official.community-events.edit.pollOpen', {
-      title: eventDisplayTitle(event),
-      eventId: event.id
-    });
   }
   const config = parseEventsConfig(await input.runtime.configFor(
     input.pending.scopeId,
@@ -2714,7 +3184,7 @@ async function publishConfirmedEvent(input: {
       throw new Error('doas poll service did not return a message id');
     }
     const nowIso = now.toISOString();
-    const event: NewStoredEventRecord = {
+    const event: NewStoredEventRecord & StoredEventRecord = {
       id: eventId,
       scopeId: input.draft.scopeId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
@@ -2732,6 +3202,7 @@ async function publishConfirmedEvent(input: {
       actorLabel: input.draft.actorLabel,
       announcementGroupWid: input.announcementGroupWid,
       pollWaMsgId: sent.messageId,
+      pollGeneration: 1,
       pollQuestion: materialized.pollQuestion,
       pollOptions: materialized.pollOptions,
       responseClasses: materialized.responseClasses,
@@ -2827,7 +3298,7 @@ async function publishConfirmedEvent(input: {
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       runAt: materialized.closeAt,
-      payload: { eventId },
+      payload: { eventId, pollGeneration: 1, pollWaMsgId: sent.messageId },
       dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
     });
     await sendEventCalendarHint({
@@ -2911,7 +3382,7 @@ async function createUnplannedEventLifecycle(input: {
 }): Promise<CreateUnplannedEventLifecycleResult> {
   const creatorParticipantWid = eventCreatorParticipantWid(input.draft);
   const nowIso = input.now.toISOString();
-  const intent: NewStoredEventRecord = {
+  const intent: NewStoredEventRecord & StoredEventRecord = {
     id: input.eventId,
     scopeId: input.draft.scopeId,
     ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
@@ -2928,6 +3399,7 @@ async function createUnplannedEventLifecycle(input: {
     actorWid: input.draft.actorWid,
     actorLabel: input.draft.actorLabel,
     announcementGroupWid: input.announcementGroupWid,
+    pollGeneration: 1,
     pollOptions: [],
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,

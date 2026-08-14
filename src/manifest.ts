@@ -1,4 +1,5 @@
 import type { PluginManifest } from '../../../platform/pluginRuntime/manifest';
+import { POLL_HISTORY_OWNED_DATA_RESOURCE } from '../../../platform/pluginRuntime/pluginOwnedData';
 import { eventsConfigSchema } from './config';
 import { eventsMessages } from './messages';
 import {
@@ -17,7 +18,9 @@ export const EVENTS_JOBS = {
   provisioningRecovery: 'event.provisioningRecovery',
   unplannedFinalization: 'event.unplannedFinalization',
   cleanup: 'event.cleanup',
+  announcementDelivery: 'event.announcementDelivery',
   editRepair: 'event.editRepair',
+  pollReplacement: 'event.pollReplacement',
   weatherForecast: 'event.weatherForecast',
   questionKeyRenameRecovery: 'event.questionKeyRenameRecovery',
   suggestionReconcile: 'event.suggestionReconcile'
@@ -39,7 +42,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.8.4',
+  version: '0.9.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -146,13 +149,15 @@ export const eventsManifest: PluginManifest = {
   ],
   requiredBotCapabilities: [],
   configSchema: eventsConfigSchema,
-  dangerousActions: [],
+  dangerousActions: ['message.delete'],
   backgroundJobs: [
     EVENTS_JOBS.close,
     EVENTS_JOBS.provisioningRecovery,
     EVENTS_JOBS.unplannedFinalization,
     EVENTS_JOBS.cleanup,
+    EVENTS_JOBS.announcementDelivery,
     EVENTS_JOBS.editRepair,
+    EVENTS_JOBS.pollReplacement,
     EVENTS_JOBS.weatherForecast,
     EVENTS_JOBS.questionKeyRenameRecovery,
     EVENTS_JOBS.suggestionReconcile
@@ -220,13 +225,14 @@ export const eventsManifest: PluginManifest = {
     ]
   },
   dependencies: [
-    { pluginId: 'official.doas', versionRange: '>=0.1.0' },
+    { pluginId: 'official.doas', versionRange: '>=0.3.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '>=0.1.0' },
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
+  ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '11',
+  dataVersion: '12',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

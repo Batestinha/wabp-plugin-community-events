@@ -19,7 +19,8 @@ export const eventsPlugin: BotPlugin = {
   registerHooks(context) {
     return createEventsHooks(context, {
       recoverJobs: false,
-      recoverCalendarPublications: true
+      recoverCalendarPublications: true,
+      recoverJobHandoffs: true
     });
   },
   registerServices(context) {

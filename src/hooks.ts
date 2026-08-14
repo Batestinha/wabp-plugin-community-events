@@ -30,8 +30,18 @@ import {
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
 import { eventCleanupJobRequest } from './cleanupScheduling';
 import { repairEventEdit } from './editRepair';
+import { deleteEventArtifacts } from './eventArtifactDeletion';
+import {
+  eventAnnouncementTransportIdempotencyKey,
+  sendClaimedEventAnnouncement
+} from './announcementDelivery';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
+import {
+  releaseEligibleEventPollReplacementReceipts,
+  runEventPollReplacement,
+  type EventPollReceiptReleaseRetry
+} from './pollReplacement';
 import {
   completeEventCommunitySubgroup,
   configureEventCommunitySubgroup,
@@ -59,11 +69,14 @@ import {
   eventsDatabase,
   expireKnownChildEventProvisioningForCleanup,
   getEvent,
+  getEventAnnouncementDeliveryClaim,
   getEventRequiredCreatorReference,
   getUnplannedEventFinalization,
-  getEventByEquivalentPoll,
+  getOpenEventByEquivalentPoll,
   getLiveEventBySubgroup,
   getEventCleanupClaim,
+  getEventAnnouncementSendingLeaseExpiresAt,
+  getEventEditRepairExecutionLeaseExpiresAt,
   getEventWeatherDelivery,
   listCreatedGroupParticipants,
   listDirtyEventCalendarPublications,
@@ -74,6 +87,10 @@ import {
   listPendingUnplannedEventFinalizations,
   listPendingCleanupEvents,
   listPendingEventEditRepairs,
+  listRecoverableEventAnnouncementDeliveries,
+  listPendingEventPollReplacements,
+  listPendingEventPollReplacementRetirements,
+  listEligibleEventPollReplacementReceiptReleases,
   listRecoverableEventWeatherDeliveries,
   listUnassignedEventCalendarOwnership,
   listWeatherForecastCandidateEvents,
@@ -90,7 +107,7 @@ import {
   haltInterruptedEventPreCreateClaimAtStartup,
   markUnclaimedEventFailed,
   markUnclaimedEventPreCreateProvisioningMissed,
-  replaceVotes,
+  replaceVotesForOpenPollGeneration,
   rearmClaimedEventPreCreateProvisioningAttempt,
   rearmClaimedKnownChildEventProvisioningForStartup,
   releaseEventCleanupClaim,
@@ -104,9 +121,12 @@ import {
   markClaimedEventPreCreateProvisioningMissed,
   markScheduledEventPreCreateProvisioningMissed,
   supersedeEventWeatherDelivery,
+  supersedeEventAnnouncementDelivery,
   updateEventCloseAt,
-  upsertVote,
+  hasActiveEventPollReplacement,
+  upsertVoteForOpenPollGeneration,
   type EventCleanupClaim,
+  type StoredEventAnnouncementDeliveryClaim,
   type StoredEventRecord
 } from './store';
 import {
@@ -140,7 +160,9 @@ import {
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 
 const EVENT_EDIT_REPAIR_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
+const EVENT_ANNOUNCEMENT_DELIVERY_RETRY_MS = 60_000;
 export const EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS = 30_000;
+export const EVENT_QUEUE_HANDOFF_RECOVERY_SWEEP_MS = 30_000;
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
@@ -150,6 +172,7 @@ interface EventRecoveryOptions {
 interface EventsHooksOptions {
   recoverJobs?: boolean | undefined;
   recoverCalendarPublications?: boolean | undefined;
+  recoverJobHandoffs?: boolean | undefined;
 }
 
 export function createEventsHooks(context: PluginRuntimeContext, options: EventsHooksOptions = {}): PluginRuntimeHooks {
@@ -169,6 +192,9 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   }
   if (options.recoverCalendarPublications === true) {
     startEventCalendarPublicationRecovery(context);
+  }
+  if (options.recoverJobHandoffs === true) {
+    startEventQueueHandoffRecovery(context);
   }
   return {
     async onPollVote(event) {
@@ -205,6 +231,36 @@ function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): v
   timer.unref();
 }
 
+function startEventQueueHandoffRecovery(context: PluginRuntimeContext): void {
+  let running = false;
+  const sweep = async (): Promise<void> => {
+    if (running) {
+      return;
+    }
+    running = true;
+    try {
+      await recoverEventQueueHandoffs(context);
+    } catch (error) {
+      context.logger.error({ error }, 'official.community-events queue handoff recovery failed');
+    } finally {
+      running = false;
+    }
+  };
+  const timer = setInterval(() => {
+    void sweep();
+  }, EVENT_QUEUE_HANDOFF_RECOVERY_SWEEP_MS);
+  timer.unref();
+}
+
+export async function recoverEventQueueHandoffs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
+  const closeJobs = await recoverEventCloseJobs(context, options);
+  return pollReplacementJobs + closeJobs;
+}
+
 export async function recoverEventJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
@@ -224,13 +280,15 @@ export async function recoverEventJobs(
   const calendarPublications = await recoverDirtyEventCalendarPublications(context, options);
   const questionKeyRenames = await recoverEventQuestionKeyRenames(context, options);
   const editRepairJobs = await recoverEventEditRepairJobs(context);
+  const announcementDeliveryJobs = await recoverEventAnnouncementDeliveryJobs(context, options);
+  const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
   const cleanupJobs = await recoverEventCleanupJobs(context);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
   const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (
     enqueued > 0 ||
     interruptedPreCreateClaims > 0 ||
@@ -239,7 +297,7 @@ export async function recoverEventJobs(
     questionKeyRenames.unresolved > 0
   ) {
     context.logger.info(
-      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, interruptedPreCreateClaims, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -456,7 +514,7 @@ export async function recoverEventProvisioningJobs(
       continue;
     }
     if (!record.subgroupChatId && !eventPreCreateEligibleBeforeCleanup(record, now)) {
-      markScheduledEventPreCreateProvisioningMissed(db, {
+      const missed = markScheduledEventPreCreateProvisioningMissed(db, {
         eventId: record.id,
         scopeId: record.scopeId,
         generation: cursor.generation,
@@ -466,6 +524,29 @@ export async function recoverEventProvisioningJobs(
         reason: 'Event subgroup creation retries reached the cleanup deadline.',
         missedAt: now.toISOString()
       });
+      if (missed) {
+        const failedEvent = getEvent(db, record.id);
+        const receiptReleaseRetries = failedEvent
+          ? await releaseEligibleEventPollReplacementReceipts({
+              context,
+              db,
+              eventId: failedEvent.id,
+              now
+            })
+          : [];
+        for (const retry of receiptReleaseRetries) {
+          await enqueuePluginJob(context.queue, {
+            pluginId: EVENTS_PLUGIN_ID,
+            jobName: EVENTS_JOBS.pollReplacement,
+            scopeId: retry.scopeId,
+            ...(record.groupId ? { groupId: record.groupId } : {}),
+            ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+            runAt: retry.retryAt,
+            payload: { operationId: retry.operationId },
+            dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+          });
+        }
+      }
       continue;
     }
     if (
@@ -533,6 +614,9 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
   const now = options.now ?? new Date();
   let enqueued = 0;
   for (const candidate of records) {
+    if (hasActiveEventPollReplacement(db, candidate.id)) {
+      continue;
+    }
     const candidateCursor = eventProvisioningRecoveryCursor(candidate);
     if (!candidate.subgroupChatId && candidateCursor && !candidateCursor.nextRunAt) {
       // A partial cursor is a permanent one-shot ownership fence. Ordinary
@@ -557,10 +641,70 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       ...(record.groupId ? { groupId: record.groupId } : {}),
       ...(record.groupWid ? { groupWid: record.groupWid } : {}),
       ...(!due && Number.isFinite(closeAt.getTime()) ? { runAt: closeAt } : {}),
-      payload: { eventId: record.id },
+      payload: {
+        eventId: record.id,
+        pollGeneration: record.pollGeneration,
+        pollWaMsgId: record.pollWaMsgId
+      },
       dedupeKey: record.subgroupChatId
         ? eventProvisioningResumeDedupeKey(record.id, record.subgroupChatId)
         : `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
+export async function recoverEventPollReplacementJobs(
+  context: PluginRuntimeContext,
+  now: Date = new Date()
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const allThrough = new Date('9999-12-31T23:59:59.999Z');
+  const recoveries = [
+    ...listPendingEventPollReplacements(db, allThrough).map((replacement) => ({
+      replacement,
+      kind: 'core' as const,
+      nextAttemptAt: replacement.publicationLeaseExpiresAt ?? replacement.nextAttemptAt
+    })),
+    ...listPendingEventPollReplacementRetirements(db, allThrough).map((replacement) => ({
+      replacement,
+      kind: 'retire' as const,
+      nextAttemptAt: replacement.nextAttemptAt
+    })),
+    ...listEligibleEventPollReplacementReceiptReleases(db, allThrough).map((replacement) => ({
+      replacement,
+      kind: 'receipt-release' as const,
+      nextAttemptAt: replacement.receiptReleaseNextAttemptAt
+    }))
+  ];
+  let enqueued = 0;
+  for (const recovery of recoveries) {
+    const { replacement } = recovery;
+    const event = getEvent(db, replacement.eventId);
+    if (!event || event.scopeId !== replacement.scopeId) {
+      continue;
+    }
+    const persistedNextAttemptAt = recovery.nextAttemptAt
+      ? new Date(recovery.nextAttemptAt)
+      : now;
+    const closeAt = new Date(replacement.target.closeAt);
+    const nextAttemptAt = recovery.kind === 'core' && Number.isFinite(closeAt.getTime())
+      ? closeAt.getTime() <= now.getTime()
+        ? now
+        : persistedNextAttemptAt.getTime() > closeAt.getTime()
+          ? closeAt
+          : persistedNextAttemptAt
+      : persistedNextAttemptAt;
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.pollReplacement,
+      scopeId: replacement.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      ...(nextAttemptAt.getTime() > now.getTime() ? { runAt: nextAttemptAt } : {}),
+      payload: { operationId: replacement.operationId },
+      dedupeKey: `${EVENTS_JOBS.pollReplacement}:${replacement.operationId}:startup:${recovery.kind}:${replacement.updatedAt}`
     });
     enqueued += 1;
   }
@@ -682,6 +826,36 @@ export async function recoverEventEditRepairJobs(context: PluginRuntimeContext):
   return enqueued;
 }
 
+export async function recoverEventAnnouncementDeliveryJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const now = options.now ?? new Date();
+  let enqueued = 0;
+  for (const delivery of listRecoverableEventAnnouncementDeliveries(db, {
+    kind: 'event_group_hint'
+  })) {
+    const event = getEvent(db, delivery.eventId);
+    if (!event || event.scopeId !== delivery.scopeId) {
+      continue;
+    }
+    const leaseExpiresAt = delivery.leaseExpiresAt
+      ? new Date(delivery.leaseExpiresAt)
+      : undefined;
+    const runAt = delivery.status === 'sending' && leaseExpiresAt && leaseExpiresAt > now
+      ? leaseExpiresAt
+      : now;
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      ...eventAnnouncementDeliveryJobRequest(event, delivery, 0, runAt),
+      dedupeKey: `${EVENTS_JOBS.announcementDelivery}:${delivery.eventId}:${delivery.kind}:${delivery.deliveryKey}:startup:${delivery.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
 export async function recoverEventWeatherForecastJobs(context: PluginRuntimeContext): Promise<number> {
   const db = eventsDatabase(context.databases);
   const records = listWeatherForecastCandidateEvents(db);
@@ -746,11 +920,18 @@ export async function recoverEventWeatherForecastJobs(context: PluginRuntimeCont
 
 async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVotePluginEvent): Promise<void> {
   const db = eventsDatabase(context.databases);
-  const record = getEventByEquivalentPoll(db, event.vote.pollWaMsgId);
+  const record = getOpenEventByEquivalentPoll(db, event.vote.pollWaMsgId);
   if (!record) {
     return;
   }
-  upsertVote(db, record.id, event.vote);
+  if (!record.pollWaMsgId || !upsertVoteForOpenPollGeneration(db, {
+    eventId: record.id,
+    pollWaMsgId: record.pollWaMsgId,
+    pollGeneration: record.pollGeneration,
+    vote: event.vote
+  })) {
+    return;
+  }
   await appendJsonLog(context, {
     action: 'poll.vote',
     scopeId: record.scopeId,
@@ -782,6 +963,12 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.editRepair) {
     return repairEventEditJob(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.announcementDelivery) {
+    return retryEventAnnouncementDelivery(context, event);
+  }
+  if (event.jobName === EVENTS_JOBS.pollReplacement) {
+    return replaceEventPollJob(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.close) {
     return closeEvent(context, event);
   }
@@ -807,6 +994,240 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
     return handleEventWeatherForecastJob(context, db, event, profile);
   }
   return [];
+}
+
+async function replaceEventPollJob(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const operationId = jobPayloadOperationId(job.payload);
+  if (!operationId) {
+    return [audit('events.job.skipped', {
+      jobName: job.jobName,
+      reason: 'missing operationId'
+    })];
+  }
+  const db = eventsDatabase(context.databases);
+  const run = await runEventPollReplacement({
+    context,
+    db,
+    operationId,
+    ...(context.deleteMessage
+      ? { deleteMessage: (messageId: string) => context.deleteMessage!(messageId) }
+      : {})
+  });
+  if (run.status === 'pending') {
+    return [{
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.pollReplacement,
+      scopeId: run.replacement.scopeId,
+      runAt: run.retryAt,
+      payload: { operationId },
+      dedupeKey: `${EVENTS_JOBS.pollReplacement}:${operationId}:core:${run.replacement.failureCount}:${run.retryAt.toISOString()}`
+    }, audit('events.poll_replacement.pending', {
+      eventId: run.replacement.eventId,
+      operationId,
+      reason: run.error,
+      retryAt: run.retryAt.toISOString()
+    })];
+  }
+  const event = getEvent(db, run.replacement.eventId);
+  if (run.status === 'aborted' || !event) {
+    const actions: PluginAction[] = [audit('events.poll_replacement.aborted', {
+      eventId: run.replacement.eventId,
+      operationId,
+      reason: run.status === 'aborted' ? run.error : 'event disappeared'
+    })];
+    if (run.status === 'aborted' && run.retirementPending) {
+      const retryAt = run.replacement.nextAttemptAt
+        ? new Date(run.replacement.nextAttemptAt)
+        : new Date(Date.now() + 5_000);
+      actions.unshift(eventPollReplacementRetryAction(event, {
+        operationId,
+        scopeId: run.replacement.scopeId,
+        retryAt,
+        kind: 'retire',
+        attempt: run.replacement.retirementFailureCount
+      }));
+    }
+    if (run.status === 'aborted') {
+      actions.unshift(...run.receiptReleaseRetries.map((retry) =>
+        eventPollReceiptReleaseRetryAction(event, retry)
+      ));
+    }
+    if (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open') {
+      const closeAt = new Date(event.closeAt);
+      actions.unshift(eventCloseAction(event, closeAt));
+    }
+    return actions;
+  }
+
+  let presentationRepairPending = false;
+  let presentationRepairActions: PluginAction[] = [];
+  if (!context.sendText || !context.setGroupSubject) {
+    presentationRepairPending = true;
+    presentationRepairActions = eventEditRepairRetryActions(job, operationId, 0, [
+      'plugin runtime does not expose durable text/group-subject delivery'
+    ]);
+  } else {
+    try {
+      const repair = await repairEventEdit({
+        appConfig: context.config,
+        db,
+        operationId,
+        configFor: (scopeId) => context.configFor(scopeId),
+        sender: {
+          sendText: context.sendText,
+          setGroupSubject: context.setGroupSubject
+        },
+        ...(context.getGroupInviteCode
+          ? { getGroupInviteCode: context.getGroupInviteCode }
+          : {})
+      });
+      if (repair.status === 'pending') {
+        presentationRepairPending = true;
+        presentationRepairActions = eventEditRepairRetryActions(
+          job,
+          operationId,
+          0,
+          repair.failures,
+          repair.retryAt
+        );
+      }
+    } catch (error) {
+      presentationRepairPending = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      presentationRepairActions = eventEditRepairRetryActions(job, operationId, 0, [reason]);
+      context.logger.warn(
+        { error, eventId: run.event.id, operationId },
+        'Event poll replacement presentation repair failed'
+      );
+    }
+  }
+
+  const replacementIsCurrentOpen =
+    event.eventStatus === 'active' &&
+    event.groupLifecycleStatus === 'poll_open' &&
+    event.pollGeneration === run.replacement.oldPollGeneration + 1 &&
+    event.pollWaMsgId === run.replacement.newPollWaMsgId;
+  if (!replacementIsCurrentOpen) {
+    const actions: PluginAction[] = [
+      ...presentationRepairActions,
+      ...run.receiptReleaseRetries.map((retry) => eventPollReceiptReleaseRetryAction(event, retry))
+    ];
+    if (run.retirementPending) {
+      const retryAt = run.replacement.nextAttemptAt
+        ? new Date(run.replacement.nextAttemptAt)
+        : new Date(Date.now() + 5_000);
+      actions.push(eventPollReplacementRetryAction(event, {
+        operationId,
+        scopeId: run.replacement.scopeId,
+        retryAt,
+        kind: 'retire',
+        attempt: run.replacement.retirementFailureCount
+      }));
+    }
+    actions.push(audit('events.poll_replacement.recovered', {
+      eventId: event.id,
+      operationId,
+      pollGeneration: event.pollGeneration,
+      retirementPending: run.retirementPending,
+      receiptReleasePending: run.receiptReleaseRetries.length > 0,
+      presentationRepairPending
+    }));
+    return actions;
+  }
+
+  const closeAt = new Date(run.event.closeAt);
+  const actions: PluginAction[] = [eventCloseAction(run.event, closeAt)];
+  actions.push(...presentationRepairActions);
+  actions.push(...run.receiptReleaseRetries.map((retry) =>
+    eventPollReceiptReleaseRetryAction(run.event, retry)
+  ));
+  if (run.retirementPending) {
+    const retryAt = run.replacement.nextAttemptAt
+      ? new Date(run.replacement.nextAttemptAt)
+      : new Date(Date.now() + 5_000);
+    actions.push({
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.pollReplacement,
+      scopeId: run.event.scopeId,
+      runAt: retryAt,
+      payload: { operationId },
+      dedupeKey: `${EVENTS_JOBS.pollReplacement}:${operationId}:retire:${run.replacement.retirementFailureCount}`
+    });
+  }
+  actions.push(audit('events.poll_replacement.completed', {
+    eventId: run.event.id,
+    operationId,
+    pollGeneration: run.event.pollGeneration,
+    retirementPending: run.retirementPending,
+    presentationRepairPending
+  }));
+  return actions;
+}
+
+function eventPollReplacementRetryAction(
+  event: StoredEventRecord | undefined,
+  input: {
+    operationId: string;
+    scopeId: string;
+    retryAt: Date;
+    kind: 'retire';
+    attempt: number;
+  }
+): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.pollReplacement,
+    scopeId: event?.scopeId ?? input.scopeId,
+    ...(event?.groupId ? { groupId: event.groupId } : {}),
+    ...(event?.groupWid ? { groupWid: event.groupWid } : {}),
+    runAt: input.retryAt,
+    payload: { operationId: input.operationId },
+    dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:${input.kind}:${input.attempt}`
+  };
+}
+
+function eventPollReceiptReleaseRetryAction(
+  event: StoredEventRecord | undefined,
+  retry: EventPollReceiptReleaseRetry
+): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.pollReplacement,
+    scopeId: retry.scopeId,
+    ...(event?.groupId ? { groupId: event.groupId } : {}),
+    ...(event?.groupWid ? { groupWid: event.groupWid } : {}),
+    runAt: retry.retryAt,
+    payload: { operationId: retry.operationId },
+    dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+  };
+}
+
+function eventCloseAction(record: StoredEventRecord, closeAt: Date): PluginEnqueueJobAction {
+  const now = Date.now();
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.close,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt: Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now
+      ? closeAt
+      : new Date(now),
+    payload: {
+      eventId: record.id,
+      pollGeneration: record.pollGeneration,
+      pollWaMsgId: record.pollWaMsgId
+    },
+    dedupeKey: `${EVENTS_JOBS.close}:${record.id}:poll-generation:${record.pollGeneration}`
+  };
 }
 
 async function repairEventEditJob(
@@ -886,6 +1307,167 @@ function eventEditRepairRetryActions(
   ];
 }
 
+async function retryEventAnnouncementDelivery(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const eventId = jobPayloadEventId(job.payload);
+  const payload = job.payload && typeof job.payload === 'object'
+    ? job.payload as Record<string, unknown>
+    : {};
+  const deliveryKey = typeof payload.deliveryKey === 'string'
+    ? payload.deliveryKey.trim()
+    : '';
+  const kind = payload.kind === 'event_group_hint' ? payload.kind : undefined;
+  const attempt = jobPayloadAttempt(job.payload);
+  if (!eventId || !kind || !deliveryKey) {
+    return [audit('events.job.skipped', {
+      jobName: job.jobName,
+      reason: 'missing event announcement delivery identity'
+    })];
+  }
+
+  const db = eventsDatabase(context.databases);
+  const delivery = getEventAnnouncementDeliveryClaim(db, eventId, kind, deliveryKey);
+  if (!delivery || delivery.status === 'sent' || delivery.status === 'superseded') {
+    return [audit('events.announcement_delivery.settled', {
+      eventId,
+      kind,
+      deliveryKey,
+      status: delivery?.status ?? 'missing'
+    })];
+  }
+  const record = getEvent(db, eventId);
+  if (
+    !record ||
+    record.scopeId !== delivery.scopeId ||
+    record.eventStatus !== 'active' ||
+    record.groupLifecycleStatus !== 'poll_closed'
+  ) {
+    supersedeEventAnnouncementDelivery(db, { eventId, kind, deliveryKey });
+    return [audit('events.announcement_delivery.superseded', {
+      eventId,
+      kind,
+      deliveryKey,
+      reason: 'event is no longer an active closed poll'
+    })];
+  }
+
+  const now = new Date();
+  const cleanupClaim = getEventCleanupClaim(db, eventId);
+  const activeDeliveryLease = delivery.status === 'sending' && delivery.leaseExpiresAt
+    ? new Date(delivery.leaseExpiresAt)
+    : undefined;
+  if (cleanupClaim || (activeDeliveryLease && activeDeliveryLease > now)) {
+    const retryAt = cleanupClaim ? new Date(cleanupClaim.leaseExpiresAt) : activeDeliveryLease!;
+    return eventAnnouncementDeliveryRetryActions(
+      record,
+      delivery,
+      attempt,
+      Number.isFinite(retryAt.getTime()) ? retryAt : undefined,
+      'delivery is fenced by an active mutation or send lease'
+    );
+  }
+  if (!context.sendText || !delivery.text || !delivery.idempotencyKey) {
+    return eventAnnouncementDeliveryRetryActions(
+      record,
+      delivery,
+      attempt,
+      undefined,
+      'plugin runtime does not expose the persisted durable text delivery intent'
+    );
+  }
+
+  try {
+    const result = await sendClaimedEventAnnouncement({
+      db,
+      eventId,
+      scopeId: delivery.scopeId,
+      kind,
+      deliveryKey,
+      chatId: delivery.chatId,
+      text: delivery.text,
+      idempotencyKey: delivery.idempotencyKey,
+      sender: { sendText: context.sendText }
+    });
+    if (result.status === 'already_claimed') {
+      const current = getEventAnnouncementDeliveryClaim(db, eventId, kind, deliveryKey) ?? delivery;
+      const retryAt = current.leaseExpiresAt ? new Date(current.leaseExpiresAt) : undefined;
+      return eventAnnouncementDeliveryRetryActions(
+        record,
+        current,
+        attempt,
+        retryAt,
+        'delivery claim remains in progress'
+      );
+    }
+    return [audit('events.announcement_delivery.settled', {
+      eventId,
+      kind,
+      deliveryKey,
+      status: result.status
+    })];
+  } catch (error) {
+    return eventAnnouncementDeliveryRetryActions(
+      record,
+      getEventAnnouncementDeliveryClaim(db, eventId, kind, deliveryKey) ?? delivery,
+      attempt,
+      undefined,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+function eventAnnouncementDeliveryRetryActions(
+  event: StoredEventRecord,
+  delivery: StoredEventAnnouncementDeliveryClaim,
+  attempt: number,
+  requestedRunAt: Date | undefined,
+  reason: string
+): PluginAction[] {
+  const runAt = requestedRunAt && Number.isFinite(requestedRunAt.getTime()) && requestedRunAt > new Date()
+    ? new Date(requestedRunAt.getTime() + 1)
+    : new Date(Date.now() + EVENT_ANNOUNCEMENT_DELIVERY_RETRY_MS);
+  const nextAttempt = attempt + 1;
+  return [
+    audit('events.announcement_delivery.pending', {
+      eventId: event.id,
+      kind: delivery.kind,
+      deliveryKey: delivery.deliveryKey,
+      attempt,
+      reason,
+      retryAt: runAt.toISOString()
+    }),
+    {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      ...eventAnnouncementDeliveryJobRequest(event, delivery, nextAttempt, runAt),
+      dedupeKey: `${EVENTS_JOBS.announcementDelivery}:${event.id}:${delivery.kind}:${delivery.deliveryKey}:retry:${nextAttempt}:${runAt.toISOString()}`
+    }
+  ];
+}
+
+function eventAnnouncementDeliveryJobRequest(
+  event: StoredEventRecord,
+  delivery: StoredEventAnnouncementDeliveryClaim,
+  attempt: number,
+  runAt: Date
+): Omit<PluginEnqueueJobAction, 'type' | 'pluginId' | 'dedupeKey'> {
+  return {
+    jobName: EVENTS_JOBS.announcementDelivery,
+    scopeId: event.scopeId,
+    ...(event.groupId ? { groupId: event.groupId } : {}),
+    ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: event.id,
+      kind: delivery.kind,
+      deliveryKey: delivery.deliveryKey,
+      attempt
+    }
+  };
+}
+
 async function handleGroupDismantled(
   context: PluginRuntimeContext,
   event: PluginGroupDismantledEvent
@@ -909,7 +1491,60 @@ async function handleGroupDismantled(
     expectedUpdatedAt: record.updatedAt,
     cleanedAt
   })) {
+    const current = getEvent(db, record.id);
+    const retryAt = current
+      ? externalDismantleRetryAt(db, current, event.chatId, event.receivedAt)
+      : undefined;
+    if (current && retryAt) {
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.cleaned.external_deferred',
+        metadata: { retryAt: retryAt.toISOString() }
+      });
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.cleanup,
+        scopeId: current.scopeId,
+        ...(current.groupId ? { groupId: current.groupId } : {}),
+        ...(current.groupWid ? { groupWid: current.groupWid } : {}),
+        runAt: retryAt,
+        payload: { eventId: current.id, attempt: 0, externalDismantledChatId: event.chatId },
+        dedupeKey: `${EVENTS_JOBS.cleanup}:${current.id}:external-deferred:${retryAt.toISOString()}`
+      });
+    }
     return;
+  }
+  const announcementMessageDeletion = await deleteEventArtifacts({
+    db,
+    event: record,
+    ...(context.deleteMessage
+      ? { deleteMessage: (messageId) => context.deleteMessage!(messageId) }
+      : {})
+  });
+  const receiptReleaseRetries = await releaseEligibleEventPollReplacementReceipts({
+    context,
+    db,
+    eventId: record.id
+  });
+  const receiptReleaseEnqueueFailures: Array<{ operationId: string; reason: string }> = [];
+  for (const retry of receiptReleaseRetries) {
+    try {
+      await enqueuePluginJob(context.queue, {
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.pollReplacement,
+        scopeId: retry.scopeId,
+        ...(record.groupId ? { groupId: record.groupId } : {}),
+        ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+        runAt: retry.retryAt,
+        payload: { operationId: retry.operationId },
+        dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+      });
+    } catch (error) {
+      receiptReleaseEnqueueFailures.push({
+        operationId: retry.operationId,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
   await setCleanupFailureStatus(context, record.scopeId, null);
   appendEventLog(db, {
@@ -917,7 +1552,10 @@ async function handleGroupDismantled(
     action: 'events.cleaned.external',
     metadata: {
       source: event.source,
-      dismantleResult: event.result
+      dismantleResult: event.result,
+      announcementMessageDeletion,
+      pollReceiptReleasePending: receiptReleaseRetries.length > 0,
+      receiptReleaseEnqueueFailures
     }
   });
   await appendJsonLog(context, {
@@ -929,7 +1567,10 @@ async function handleGroupDismantled(
     ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
     metadata: {
       source: event.source,
-      dismantleResult: event.result
+      dismantleResult: event.result,
+      announcementMessageDeletion,
+      pollReceiptReleasePending: receiptReleaseRetries.length > 0,
+      receiptReleaseEnqueueFailures
     }
   });
 }
@@ -944,11 +1585,54 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
   if (!record || record.eventStatus !== 'active' || record.groupLifecycleStatus !== 'poll_open') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or poll not open' })];
   }
+  const expectedPollGeneration = jobPayloadPollGeneration(job.payload);
+  const expectedPollWaMsgId = jobPayloadPollWaMsgId(job.payload);
+  if (
+    (expectedPollGeneration !== undefined && expectedPollGeneration !== record.pollGeneration) ||
+    (expectedPollGeneration === undefined && record.pollGeneration > 1) ||
+    (expectedPollWaMsgId !== undefined && expectedPollWaMsgId !== record.pollWaMsgId)
+  ) {
+    return [audit('events.job.skipped', {
+      jobName: job.jobName,
+      eventId,
+      reason: 'stale poll generation',
+      expectedPollGeneration,
+      pollGeneration: record.pollGeneration,
+      expectedPollWaMsgId,
+      pollWaMsgId: record.pollWaMsgId
+    })];
+  }
+  if (hasActiveEventPollReplacement(db, record.id)) {
+    const retryAt = new Date(Date.now() + 5_000);
+    return [{
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.close,
+      scopeId: record.scopeId,
+      runAt: retryAt,
+      payload: {
+        eventId: record.id,
+        pollGeneration: record.pollGeneration,
+        pollWaMsgId: record.pollWaMsgId
+      },
+      dedupeKey: `${EVENTS_JOBS.close}:${record.id}:replacement-fence:${record.pollGeneration}:${retryAt.toISOString()}`
+    }, audit('events.close.replacement_fenced', {
+      eventId: record.id,
+      pollGeneration: record.pollGeneration,
+      retryAt: retryAt.toISOString()
+    })];
+  }
   if (!record.pollWaMsgId) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event has no poll' })];
   }
+  // A close job owns exactly the poll generation it observed before its first await. Every
+  // later mutation is fenced against these values so a replacement cannot turn an old close
+  // invocation into an early close/failure of the successor poll.
+  const closingPollGeneration = record.pollGeneration;
+  const closingPollWaMsgId = record.pollWaMsgId;
 
   let closePersisted = false;
+  let pollReceiptReleaseActions: PluginAction[] = [];
   const persistedCloseCursor = eventProvisioningRecoveryCursor(record);
   if (!record.subgroupChatId && persistedCloseCursor && !persistedCloseCursor.nextRunAt) {
     return [audit('events.provisioning.precreate_skipped', {
@@ -975,6 +1659,19 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     const config = parseEventsConfig(await context.configFor(record.scopeId));
     const closeAt = effectiveCloseAt(record, config);
     record = persistEffectiveCloseAt(db, record, closeAt);
+    if (
+      record.eventStatus !== 'active' ||
+      record.groupLifecycleStatus !== 'poll_open' ||
+      record.pollGeneration !== closingPollGeneration ||
+      record.pollWaMsgId !== closingPollWaMsgId ||
+      hasActiveEventPollReplacement(db, record.id)
+    ) {
+      return [audit('events.close.poll_generation_changed', {
+        eventId: record.id,
+        pollGeneration: closingPollGeneration,
+        pollWaMsgId: closingPollWaMsgId
+      })];
+    }
     const now = new Date();
     if (!record.subgroupChatId && Number.isFinite(closeAt.getTime()) && closeAt.getTime() > now.getTime()) {
       return [
@@ -989,19 +1686,16 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           jobName: EVENTS_JOBS.close,
           scopeId: record.scopeId,
           runAt: closeAt,
-          payload: { eventId: record.id },
+          payload: {
+            eventId: record.id,
+            pollGeneration: record.pollGeneration,
+            pollWaMsgId: record.pollWaMsgId
+          },
           dedupeKey: `${EVENTS_JOBS.close}:${record.id}:deferred:${closeAt.toISOString()}`
         }
       ];
     }
-    const pollWaMsgId = record.pollWaMsgId;
-    if (!pollWaMsgId) {
-      return [audit('events.job.skipped', {
-        jobName: job.jobName,
-        eventId,
-        reason: 'event lost its poll while resolving the effective close time'
-      })];
-    }
+    const pollWaMsgId = closingPollWaMsgId;
     if (!context.pollVoteReadbackFor) {
       throw new IncompletePollVoteReadbackError({
         pollWaMsgId,
@@ -1015,7 +1709,28 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       requireCompletePollVotes(await context.pollVoteReadbackFor(pollWaMsgId)),
       requirePollVoteIdentityResolver(context)
     );
-    replaceVotes(db, record.id, liveVotes);
+    const postReadbackRecord = getEvent(db, record.id);
+    if (
+      !postReadbackRecord ||
+      postReadbackRecord.eventStatus !== 'active' ||
+      postReadbackRecord.groupLifecycleStatus !== 'poll_open' ||
+      postReadbackRecord.pollGeneration !== closingPollGeneration ||
+      postReadbackRecord.pollWaMsgId !== closingPollWaMsgId ||
+      hasActiveEventPollReplacement(db, record.id) ||
+      !replaceVotesForOpenPollGeneration(db, {
+        eventId: record.id,
+        pollWaMsgId: closingPollWaMsgId,
+        pollGeneration: closingPollGeneration,
+        votes: liveVotes
+      })
+    ) {
+      return [audit('events.close.poll_generation_changed', {
+        eventId: record.id,
+        pollGeneration: closingPollGeneration,
+        pollWaMsgId: closingPollWaMsgId
+      })];
+    }
+    record = getEvent(db, record.id)!;
     for (const vote of liveVotes) {
       await appendJsonLog(context, {
         action: 'poll.vote.snapshot',
@@ -1041,7 +1756,12 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     if (subgroupChatId && !preCreateClaim) {
       const claimRecord = getEvent(db, record.id);
       const claimedAt = new Date();
-      if (!claimRecord) {
+      if (
+        !claimRecord ||
+        claimRecord.pollGeneration !== closingPollGeneration ||
+        claimRecord.pollWaMsgId !== closingPollWaMsgId ||
+        hasActiveEventPollReplacement(db, record.id)
+      ) {
         return [audit('events.provisioning.known_child_skipped', {
           eventId: record.id,
           subgroupChatId,
@@ -1082,16 +1802,46 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     if (!subgroupChatId) {
         const claimRecord = getEvent(db, record.id);
         const claimedAt = new Date();
-        if (!claimRecord || !eventPreCreateEligibleBeforeCleanup(claimRecord, claimedAt)) {
-          const missed = Boolean(claimRecord) && markUnclaimedEventPreCreateProvisioningMissed(db, {
-            eventId: claimRecord!.id,
-            scopeId: claimRecord!.scopeId,
-            expectedUpdatedAt: claimRecord!.updatedAt,
-            expectedCleanupAt: claimRecord!.cleanupAt,
+        if (!claimRecord) {
+          return [audit('events.provisioning.precreate_skipped', {
+            eventId: record.id,
+            reason: 'event changed or subgroup creation is already claimed'
+          })];
+        }
+        if (
+          claimRecord.pollGeneration !== closingPollGeneration ||
+          claimRecord.pollWaMsgId !== closingPollWaMsgId ||
+          hasActiveEventPollReplacement(db, record.id)
+        ) {
+          return [audit('events.close.poll_generation_changed', {
+            eventId: record.id,
+            pollGeneration: closingPollGeneration,
+            pollWaMsgId: closingPollWaMsgId
+          })];
+        }
+        if (!eventPreCreateEligibleBeforeCleanup(claimRecord, claimedAt)) {
+          const missed = markUnclaimedEventPreCreateProvisioningMissed(db, {
+            eventId: claimRecord.id,
+            scopeId: claimRecord.scopeId,
+            expectedUpdatedAt: claimRecord.updatedAt,
+            expectedCleanupAt: claimRecord.cleanupAt,
             reason: 'Event subgroup creation was not started before its cleanup deadline.',
             missedAt: claimedAt.toISOString()
           });
-          return [audit(missed
+          const failedEvent = missed ? getEvent(db, record.id) : undefined;
+          const receiptReleaseRetries = failedEvent
+            ? await releaseEligibleEventPollReplacementReceipts({
+                context,
+                db,
+                eventId: failedEvent.id,
+                now: claimedAt
+              })
+            : [];
+          return [
+            ...receiptReleaseRetries.map((retry) =>
+              eventPollReceiptReleaseRetryAction(failedEvent, retry)
+            ),
+            audit(missed
             ? 'events.provisioning.precreate_missed'
             : 'events.provisioning.precreate_skipped', {
             eventId: record.id,
@@ -1324,6 +2074,14 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     ) {
       throw new Error(`Event ${record.id} changed while its poll closure was being persisted.`);
     }
+    const receiptReleaseRetries = await releaseEligibleEventPollReplacementReceipts({
+      context,
+      db,
+      eventId: closedEvent.id
+    });
+    pollReceiptReleaseActions = receiptReleaseRetries.map((retry) =>
+      eventPollReceiptReleaseRetryAction(closedEvent, retry)
+    );
     if (createdSubgroupLog) {
       await appendJsonLog(context, {
         action: 'subgroup.created',
@@ -1389,6 +2147,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(weatherForecastAction ? [weatherForecastAction] : []),
       closeCleanupAction(closedEvent),
       ...(calendarFailureAudit ? [calendarFailureAudit] : []),
+      ...pollReceiptReleaseActions,
       audit('events.closed', { eventId: record.id, attendeeCount: attendeeWids.length, subgroupChatId })
     ];
   } catch (error) {
@@ -1401,6 +2160,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       await recordPostCloseFailure(context, db, record, reason);
       return [
         closeCleanupAction(record),
+        ...pollReceiptReleaseActions,
         audit('events.close.side_effect_failed', { eventId: record.id, reason })
       ];
     }
@@ -1434,7 +2194,11 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           jobName: EVENTS_JOBS.close,
           scopeId: record.scopeId,
           runAt: retryAt,
-          payload: { eventId: record.id },
+          payload: {
+            eventId: record.id,
+            pollGeneration: record.pollGeneration,
+            pollWaMsgId: record.pollWaMsgId
+          },
           dedupeKey: `${EVENTS_JOBS.close}:${record.id}:readback:${retryAt.toISOString()}`
         },
         audit('events.close.readback_incomplete', {
@@ -1785,10 +2549,18 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         };
       } else {
         const current = getEvent(db, record.id);
-        failurePersisted = Boolean(current) && markUnclaimedEventFailed(db, {
+        failurePersisted = Boolean(
+          current &&
+          current.eventStatus === 'active' &&
+          current.groupLifecycleStatus === 'poll_open' &&
+          current.pollGeneration === closingPollGeneration &&
+          current.pollWaMsgId === closingPollWaMsgId
+        ) && markUnclaimedEventFailed(db, {
           eventId: current!.id,
           scopeId: current!.scopeId,
           expectedUpdatedAt: current!.updatedAt,
+          expectedPollGeneration: closingPollGeneration,
+          expectedPollWaMsgId: closingPollWaMsgId,
           reason,
           failedAt
         });
@@ -1815,9 +2587,21 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       ...(failedSubgroupChatId ? { subgroupChatId: failedSubgroupChatId } : {}),
       metadata: failureMetadata
     });
+    const failedEvent = getEvent(db, record.id);
+    const receiptReleaseRetries = failedEvent
+      ? await releaseEligibleEventPollReplacementReceipts({
+          context,
+          db,
+          eventId: failedEvent.id,
+          now: new Date(failedAt)
+        })
+      : [];
     return [
       ...(cleanupDeadlineAction ? [cleanupDeadlineAction] : []),
       ...(provisioningRecoveryAction ? [provisioningRecoveryAction] : []),
+      ...receiptReleaseRetries.map((retry) =>
+        eventPollReceiptReleaseRetryAction(failedEvent, retry)
+      ),
       audit('events.close.failed', { eventId: record.id, ...failureMetadata })
     ];
   }
@@ -2107,7 +2891,7 @@ async function recoverFailedEventProvisioning(
     });
   } else {
     if (!eventPreCreateEligibleBeforeCleanup(record, claimedAt)) {
-      markScheduledEventPreCreateProvisioningMissed(db, {
+      const missed = markScheduledEventPreCreateProvisioningMissed(db, {
         eventId: record.id,
         scopeId: record.scopeId,
         generation: payload.generation,
@@ -2117,7 +2901,20 @@ async function recoverFailedEventProvisioning(
         reason: 'Event subgroup creation retries reached the cleanup deadline.',
         missedAt: claimedAt.toISOString()
       });
-      return [audit('events.provisioning.precreate_missed', {
+      const failedEvent = missed ? getEvent(db, record.id) : undefined;
+      const receiptReleaseRetries = failedEvent
+        ? await releaseEligibleEventPollReplacementReceipts({
+            context,
+            db,
+            eventId: failedEvent.id,
+            now: claimedAt
+          })
+        : [];
+      return [
+        ...receiptReleaseRetries.map((retry) =>
+          eventPollReceiptReleaseRetryAction(failedEvent, retry)
+        ),
+        audit('events.provisioning.precreate_missed', {
         eventId: record.id,
         generation: payload.generation,
         attempt: payload.attempt,
@@ -2535,6 +3332,18 @@ async function recoverFailedEventProvisioning(
       }
     }
     await notifyCreatorAboutMembershipPause(context, db, record.id, error);
+    const receiptEvent = getEvent(db, record.id);
+    const receiptReleaseRetries = receiptEvent
+      ? await releaseEligibleEventPollReplacementReceipts({
+          context,
+          db,
+          eventId: receiptEvent.id,
+          now: failedAt
+        })
+      : [];
+    const receiptReleaseActions = receiptReleaseRetries.map((receiptRetry) =>
+      eventPollReceiptReleaseRetryAction(receiptEvent, receiptRetry)
+    );
     if (retry) {
       const stage = postCreateError?.stage ?? preCreateError?.stage;
       appendEventLog(db, {
@@ -2556,6 +3365,7 @@ async function recoverFailedEventProvisioning(
         }
       });
       return [
+        ...receiptReleaseActions,
         audit('events.provisioning.recovery_retry_scheduled', {
           eventId: record.id,
           ...(retry.record.subgroupChatId
@@ -2600,7 +3410,7 @@ async function recoverFailedEventProvisioning(
           recoveryReason: reason
         }
       });
-      return [audit('events.provisioning.recovery_finalization_forwarded', {
+      return [...receiptReleaseActions, audit('events.provisioning.recovery_finalization_forwarded', {
         eventId: latest.id,
         subgroupChatId: latest.subgroupChatId,
         generation: latestFinalization.generation,
@@ -2632,7 +3442,7 @@ async function recoverFailedEventProvisioning(
         } : {})
       }
     });
-    return [audit('events.provisioning.recovery_failed', {
+    return [...receiptReleaseActions, audit('events.provisioning.recovery_failed', {
       eventId: record.id,
       ...(recoverySubgroupChatId ? { subgroupChatId: recoverySubgroupChatId } : {}),
       generation: payload.generation,
@@ -2913,6 +3723,69 @@ function cleanupDeferAction(record: StoredEventRecord, runAt: Date, reason: stri
   };
 }
 
+function externalDismantleRetryAt(
+  db: ReturnType<typeof eventsDatabase>,
+  record: StoredEventRecord,
+  subgroupChatId: string,
+  observedAt: Date
+): Date | undefined {
+  const eligible = (
+    (record.eventStatus === 'active' || record.eventStatus === 'completed') &&
+    (record.groupLifecycleStatus === 'poll_closed' || record.groupLifecycleStatus === 'cleanup_failed')
+  ) || (
+    record.eventStatus === 'failed' &&
+    record.groupLifecycleStatus === 'cleanup_failed' &&
+    Boolean(record.subgroupChatId)
+  );
+  if (!eligible || record.subgroupChatId?.toLowerCase() !== subgroupChatId.toLowerCase()) {
+    return undefined;
+  }
+  const candidateTimes = [observedAt.getTime() + 1_000];
+  const cleanupClaim = getEventCleanupClaim(db, record.id);
+  const cleanupLeaseMs = cleanupClaim ? Date.parse(cleanupClaim.leaseExpiresAt) : Number.NaN;
+  if (Number.isFinite(cleanupLeaseMs) && cleanupLeaseMs > observedAt.getTime()) {
+    candidateTimes.push(cleanupLeaseMs + 1);
+  }
+  const sendingLease = getEventAnnouncementSendingLeaseExpiresAt(db, record.id);
+  const sendingLeaseMs = sendingLease ? Date.parse(sendingLease) : Number.NaN;
+  if (Number.isFinite(sendingLeaseMs) && sendingLeaseMs > observedAt.getTime()) {
+    candidateTimes.push(sendingLeaseMs + 1);
+  }
+  const editRepairLease = getEventEditRepairExecutionLeaseExpiresAt(
+    db,
+    record.id,
+    observedAt.toISOString()
+  );
+  const editRepairLeaseMs = editRepairLease ? Date.parse(editRepairLease) : Number.NaN;
+  if (Number.isFinite(editRepairLeaseMs) && editRepairLeaseMs > observedAt.getTime()) {
+    candidateTimes.push(editRepairLeaseMs + 1);
+  }
+  return new Date(Math.max(...candidateTimes));
+}
+
+function externalDismantleCleanupAction(
+  record: StoredEventRecord,
+  subgroupChatId: string,
+  runAt: Date,
+  attempt: number
+): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.cleanup,
+    scopeId: record.scopeId,
+    ...(record.groupId ? { groupId: record.groupId } : {}),
+    ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+    runAt,
+    payload: {
+      eventId: record.id,
+      attempt,
+      externalDismantledChatId: subgroupChatId
+    },
+    dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:external-dismantled:${record.updatedAt}:${runAt.toISOString()}`
+  };
+}
+
 function unplannedEventFinalizationPayload(
   payload: unknown
 ): UnplannedEventFinalizationPayload | undefined {
@@ -3113,8 +3986,28 @@ async function plannedEventAnnouncementActions(
       await appendPlannedAnnouncementSkipped(context, record, 'empty_rendered_text', { subgroupChatId });
       return [];
     }
+    if (!context.sendText) {
+      throw new Error('Plugin runtime does not expose durable text delivery.');
+    }
+    const deliveryKey = 'initial';
+    const delivery = await sendClaimedEventAnnouncement({
+      db: eventsDatabase(context.databases),
+      eventId: record.id,
+      scopeId: record.scopeId,
+      kind: 'event_group_hint',
+      deliveryKey,
+      chatId: record.announcementGroupWid,
+      text,
+      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+        eventId: record.id,
+        kind: 'event_group_hint',
+        deliveryKey
+      }),
+      expectedEventUpdatedAt: record.updatedAt,
+      sender: { sendText: context.sendText }
+    });
     await appendJsonLog(context, {
-      action: 'event.planned_announcement_queued',
+      action: 'event.planned_announcement_sent',
       scopeId: record.scopeId,
       eventId: record.id,
       actorWid: record.actorWid,
@@ -3123,14 +4016,11 @@ async function plannedEventAnnouncementActions(
       subgroupChatId,
       metadata: {
         announcementGroupWid: record.announcementGroupWid,
-        groupJoinUrl
+        groupJoinUrl,
+        delivery: delivery.status
       }
     });
-    return [{
-      type: 'message.sendText',
-      chatId: record.announcementGroupWid,
-      text
-    }];
+    return [];
   } catch (error) {
     await appendJsonLog(context, {
       action: 'event.planned_announcement_failed',
@@ -3145,7 +4035,21 @@ async function plannedEventAnnouncementActions(
         reason: error instanceof Error ? error.message : String(error)
       }
     });
-    return [];
+    const delivery = getEventAnnouncementDeliveryClaim(
+      eventsDatabase(context.databases),
+      record.id,
+      'event_group_hint',
+      'initial'
+    );
+    return delivery && ['pending', 'sending', 'uncertain'].includes(delivery.status)
+      ? eventAnnouncementDeliveryRetryActions(
+          record,
+          delivery,
+          0,
+          undefined,
+          error instanceof Error ? error.message : String(error)
+        )
+      : [];
   }
 }
 
@@ -3172,6 +4076,8 @@ async function appendPlannedAnnouncementSkipped(
 async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {
   const db = eventsDatabase(context.databases);
   const eventId = jobPayloadEventId(job.payload);
+  const externalDismantledChatId = jobPayloadExternalDismantledChatId(job.payload);
+  const externalDismantled = Boolean(externalDismantledChatId);
   if (!eventId) {
     return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
   }
@@ -3193,10 +4099,18 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
   if (!ordinaryCleanup && !pausedKnownChild && !expiredKnownChild) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: `event lifecycle is ${record.eventStatus}/${record.groupLifecycleStatus}` })];
   }
+  if (externalDismantledChatId &&
+      record.subgroupChatId?.toLowerCase() !== externalDismantledChatId.toLowerCase()) {
+    return [audit('events.job.skipped', {
+      jobName: job.jobName,
+      eventId,
+      reason: 'external dismantle subgroup no longer matches the event'
+    })];
+  }
 
   const cleanupAt = new Date(record.cleanupAt);
   const now = new Date();
-  if (Number.isFinite(cleanupAt.getTime()) && cleanupAt.getTime() > now.getTime()) {
+  if (!externalDismantled && Number.isFinite(cleanupAt.getTime()) && cleanupAt.getTime() > now.getTime()) {
     return [audit('events.cleanup.deferred', {
       eventId: record.id,
       cleanupAt: record.cleanupAt
@@ -3267,7 +4181,8 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
     eventId: record.id,
     expectedUpdatedAt: record.updatedAt,
     expectedCleanupAt: record.cleanupAt,
-    claimedAt: now.toISOString()
+    claimedAt: now.toISOString(),
+    ...(externalDismantled ? { allowBeforeDeadline: true } : {})
   });
   if (!claim) {
     const activeClaim = getEventCleanupClaim(db, record.id);
@@ -3284,9 +4199,75 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
         ...(record.groupId ? { groupId: record.groupId } : {}),
         ...(record.groupWid ? { groupWid: record.groupWid } : {}),
         runAt: claimExpiresAt,
-        payload: { eventId: record.id, attempt },
+        payload: {
+          eventId: record.id,
+          attempt,
+          ...(externalDismantledChatId ? { externalDismantledChatId } : {})
+        },
         dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:claim-expiry:${claimExpiresAt.toISOString()}`
       }];
+    }
+    const sendingLease = getEventAnnouncementSendingLeaseExpiresAt(db, record.id);
+    const sendingLeaseAt = sendingLease ? new Date(sendingLease) : undefined;
+    if (sendingLeaseAt && Number.isFinite(sendingLeaseAt.getTime()) && sendingLeaseAt > now) {
+      const retryAt = new Date(sendingLeaseAt.getTime() + 1);
+      return [audit('events.cleanup.delivery_claimed', {
+        eventId,
+        claimExpiresAt: sendingLeaseAt.toISOString()
+      }), {
+        type: 'plugin.enqueueJob',
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.cleanup,
+        scopeId: record.scopeId,
+        ...(record.groupId ? { groupId: record.groupId } : {}),
+        ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+        runAt: retryAt,
+        payload: {
+          eventId: record.id,
+          attempt,
+          ...(externalDismantledChatId ? { externalDismantledChatId } : {})
+        },
+        dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:delivery-expiry:${retryAt.toISOString()}`
+      }];
+    }
+    const editRepairLease = getEventEditRepairExecutionLeaseExpiresAt(
+      db,
+      record.id,
+      now.toISOString()
+    );
+    const editRepairLeaseAt = editRepairLease ? new Date(editRepairLease) : undefined;
+    if (editRepairLeaseAt && Number.isFinite(editRepairLeaseAt.getTime()) && editRepairLeaseAt > now) {
+      const retryAt = new Date(editRepairLeaseAt.getTime() + 1);
+      return [audit('events.cleanup.edit_repair_claimed', {
+        eventId,
+        claimExpiresAt: editRepairLeaseAt.toISOString()
+      }), {
+        type: 'plugin.enqueueJob',
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.cleanup,
+        scopeId: record.scopeId,
+        ...(record.groupId ? { groupId: record.groupId } : {}),
+        ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+        runAt: retryAt,
+        payload: {
+          eventId: record.id,
+          attempt,
+          ...(externalDismantledChatId ? { externalDismantledChatId } : {})
+        },
+        dedupeKey: `${EVENTS_JOBS.cleanup}:${record.id}:edit-repair-expiry:${retryAt.toISOString()}`
+      }];
+    }
+    if (externalDismantledChatId) {
+      const current = getEvent(db, record.id);
+      const retryAt = current
+        ? externalDismantleRetryAt(db, current, externalDismantledChatId, now)
+        : undefined;
+      if (current && retryAt) {
+        return [audit('events.cleanup.external_revision_changed', {
+          eventId,
+          retryAt: retryAt.toISOString()
+        }), externalDismantleCleanupAction(current, externalDismantledChatId, retryAt, attempt)];
+      }
     }
     return [audit('events.job.skipped', {
       jobName: job.jobName,
@@ -3297,7 +4278,7 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
 
   try {
     let dismantleResult: PluginGroupDismantleResult | undefined;
-    if (record.subgroupChatId) {
+    if (record.subgroupChatId && !externalDismantled) {
       if (!context.dismantleManagedGroup) {
         throw new Error('Plugin runtime does not expose dismantleManagedGroup.');
       }
@@ -3323,17 +4304,45 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
       cleanedAt
     })) {
       releaseEventCleanupClaim(db, { eventId: record.id, claimId: claim.claimId });
+      if (externalDismantledChatId) {
+        const current = getEvent(db, record.id);
+        const retryAt = current
+          ? externalDismantleRetryAt(db, current, externalDismantledChatId, new Date())
+          : undefined;
+        if (current && retryAt) {
+          return [audit('events.cleanup.external_revision_changed', {
+            eventId,
+            retryAt: retryAt.toISOString()
+          }), externalDismantleCleanupAction(current, externalDismantledChatId, retryAt, attempt)];
+        }
+      }
       return [audit('events.job.skipped', {
         jobName: job.jobName,
         eventId,
         reason: 'event lifecycle changed while cleanup was running'
       })];
     }
+    const announcementMessageDeletion = await deleteEventArtifacts({
+      db,
+      event: record,
+      ...(context.deleteMessage
+        ? { deleteMessage: (messageId) => context.deleteMessage!(messageId) }
+        : {})
+    });
+    const receiptReleaseRetries = await releaseEligibleEventPollReplacementReceipts({
+      context,
+      db,
+      eventId: record.id
+    });
     await setCleanupFailureStatus(context, record.scopeId, null);
     appendEventLog(db, {
       eventId: record.id,
       action: 'events.cleaned',
-      metadata: { dismantleResult }
+      metadata: {
+        dismantleResult,
+        announcementMessageDeletion,
+        pollReceiptReleasePending: receiptReleaseRetries.length > 0
+      }
     });
     await appendJsonLog(context, {
       action: 'event.cleaned',
@@ -3342,9 +4351,20 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
       profileId: record.profileId,
       ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {}),
       ...(record.subgroupChatId ? { subgroupChatId: record.subgroupChatId } : {}),
-      metadata: { dismantleResult }
+      metadata: {
+        dismantleResult,
+        announcementMessageDeletion,
+        pollReceiptReleasePending: receiptReleaseRetries.length > 0
+      }
     });
-    return [audit('events.cleaned', { eventId: record.id, dismantleResult })];
+    return [
+      ...receiptReleaseRetries.map((retry) => eventPollReceiptReleaseRetryAction(record, retry)),
+      audit('events.cleaned', {
+      eventId: record.id,
+      dismantleResult,
+      announcementMessageDeletion,
+      pollReceiptReleasePending: receiptReleaseRetries.length > 0
+    })];
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return cleanupFailed(context, db, record, config, attempt, reason, { retryable: true }, claim.claimId);
@@ -3357,21 +4377,35 @@ async function withEventCleanupClaimHeartbeat<T>(
   operation: () => Promise<T>
 ): Promise<T> {
   let ownershipLost = false;
+  let renewalError: unknown;
   const renew = (): boolean => {
-    const renewed = renewEventCleanupClaim(db, {
-      eventId: claim.eventId,
-      claimId: claim.claimId,
-      expectedUpdatedAt: claim.expectedEventUpdatedAt,
-      leaseExpiresAt: new Date(Date.now() + EVENT_CLEANUP_CLAIM_LEASE_MS).toISOString()
-    });
-    ownershipLost ||= !renewed;
-    return renewed;
+    try {
+      const renewed = renewEventCleanupClaim(db, {
+        eventId: claim.eventId,
+        claimId: claim.claimId,
+        expectedUpdatedAt: claim.expectedEventUpdatedAt,
+        leaseExpiresAt: new Date(Date.now() + EVENT_CLEANUP_CLAIM_LEASE_MS).toISOString()
+      });
+      ownershipLost ||= !renewed;
+      return renewed;
+    } catch (error) {
+      renewalError ??= error;
+      ownershipLost = true;
+      return false;
+    }
   };
-  const timer = setInterval(renew, Math.max(1_000, Math.floor(EVENT_CLEANUP_CLAIM_LEASE_MS / 3)));
+  const timer = setInterval(() => { renew(); }, Math.max(1_000, Math.floor(EVENT_CLEANUP_CLAIM_LEASE_MS / 3)));
   timer.unref();
   try {
     const result = await operation();
-    if (ownershipLost || !renew()) {
+    const renewed = renew();
+    if (renewalError) {
+      throw new Error(
+        `Cleanup claim ${claim.claimId} renewal failed for event ${claim.eventId}: ` +
+        (renewalError instanceof Error ? renewalError.message : String(renewalError))
+      );
+    }
+    if (ownershipLost || !renewed) {
       throw new Error(`Cleanup claim ${claim.claimId} was lost while dismantling event ${claim.eventId}.`);
     }
     return result;
@@ -3559,6 +4593,27 @@ async function markStartupEventMissed(
   if (!missed) {
     return;
   }
+  const failedEvent = getEvent(db, record.id);
+  const receiptReleaseRetries = failedEvent
+    ? await releaseEligibleEventPollReplacementReceipts({
+        context,
+        db,
+        eventId: failedEvent.id,
+        now
+      })
+    : [];
+  for (const retry of receiptReleaseRetries) {
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.pollReplacement,
+      scopeId: retry.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      runAt: retry.retryAt,
+      payload: { operationId: retry.operationId },
+      dedupeKey: `${EVENTS_JOBS.pollReplacement}:${retry.operationId}:receipt-release:${retry.failureCount}`
+    });
+  }
   appendEventLog(db, {
     eventId: record.id,
     action: 'events.close.missed',
@@ -3651,6 +4706,29 @@ function jobPayloadEventId(payload: unknown): string | undefined {
   return payload && typeof payload === 'object' && typeof (payload as { eventId?: unknown }).eventId === 'string'
     ? (payload as { eventId: string }).eventId
     : undefined;
+}
+
+function jobPayloadExternalDismantledChatId(payload: unknown): string | undefined {
+  const value = payload && typeof payload === 'object'
+    ? (payload as { externalDismantledChatId?: unknown }).externalDismantledChatId
+    : undefined;
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function jobPayloadPollGeneration(payload: unknown): number | undefined {
+  const value = payload && typeof payload === 'object'
+    ? (payload as { pollGeneration?: unknown }).pollGeneration
+    : undefined;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function jobPayloadPollWaMsgId(payload: unknown): string | undefined {
+  const value = payload && typeof payload === 'object'
+    ? (payload as { pollWaMsgId?: unknown }).pollWaMsgId
+    : undefined;
+  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
 function jobPayloadQuestionKeyRenameOperationId(payload: unknown): string | undefined {

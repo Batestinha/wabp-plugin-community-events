@@ -244,7 +244,7 @@ export async function adoptEventLifecycle(input: {
   });
   const eventId = newEventId();
   const now = new Date();
-  const event: NewStoredEventRecord = {
+  const event: NewStoredEventRecord & StoredEventRecord = {
     id: eventId,
     scopeId: adoption.scopeId,
     profileId: profile.id,
@@ -260,6 +260,7 @@ export async function adoptEventLifecycle(input: {
     actorLabel: adoption.actorLabel,
     ...(announcementGroupWid ? { announcementGroupWid } : {}),
     ...(adoption.pollWaMsgId ? { pollWaMsgId: adoption.pollWaMsgId } : {}),
+    pollGeneration: 1,
     ...(adoption.pollWaMsgId ? { pollQuestion: materialized.pollQuestion } : {}),
     pollOptions: adoption.pollWaMsgId ? materialized.pollOptions : [],
     responseClasses: materialized.responseClasses,

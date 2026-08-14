@@ -1,4 +1,5 @@
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
+import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import {
   persistedEventAnnouncementDisposition,
@@ -41,6 +42,7 @@ export interface EventCalendarHintContext {
 export async function sendEventCalendarHint(input: {
   context: EventCalendarHintContext;
   runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases'>;
+  db?: PluginDatabase | undefined;
   activeTransport: CalendarHintTextTransport;
   trigger: CalendarHintTrigger;
   scopeId: string;
@@ -54,6 +56,7 @@ export async function sendEventCalendarHint(input: {
   groupJoinUrl?: string | undefined;
   subgroupChatId?: string | undefined;
   expectedEventUpdatedAt?: string | undefined;
+  deliveryKey?: string | undefined;
 }): Promise<EventCalendarHintResult> {
   const hint = input.profile.calendar.hint;
   const enabled = input.trigger === 'poll_published'
@@ -63,13 +66,14 @@ export async function sendEventCalendarHint(input: {
     return 'disabled';
   }
   const runtime = input.runtime;
-  const db = eventsDatabase(runtime.databases);
-  const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', 'initial');
+  const db = input.db ?? eventsDatabase(runtime.databases);
+  const deliveryKey = input.deliveryKey?.trim() || 'initial';
+  const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', deliveryKey);
   if (persistedDelivery === 'already_sent') {
     return persistedDelivery;
   }
   if (persistedDelivery === 'already_claimed') {
-    const claim = getEventAnnouncementDeliveryClaim(db, input.event.id, 'calendar_hint', 'initial');
+    const claim = getEventAnnouncementDeliveryClaim(db, input.event.id, 'calendar_hint', deliveryKey);
     if (claim?.status === 'superseded') {
       return 'superseded';
     }
@@ -154,7 +158,7 @@ export async function sendEventCalendarHint(input: {
       eventId: input.event.id,
       scopeId: input.scopeId,
       kind: 'calendar_hint',
-      deliveryKey: 'initial',
+      deliveryKey,
       chatId: input.announcementGroupWid,
       text,
       ...(input.expectedEventUpdatedAt

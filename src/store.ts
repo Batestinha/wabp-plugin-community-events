@@ -21,10 +21,12 @@ export type EventAnnouncementDeliveryKind = Exclude<EventAnnouncementMessageKind
 export type EventAnnouncementDeliveryClaimStatus = 'pending' | 'sending' | 'sent' | 'uncertain' | 'superseded';
 export type EventAnnouncementDeliveryClaimResult = 'claimed' | 'already_sent' | 'already_claimed' | 'superseded';
 export type EventEditRepairStatus = 'pending' | 'completed';
+export type EventPollReplacementStatus = 'pending' | 'published' | 'completed' | 'aborted';
 export type EventQuestionKeyRenameStatus = 'expanded' | 'completed' | 'rolled_back';
 export type UnplannedEventFinalizationStatus = 'pending' | 'completed';
 
 export const EVENT_CLEANUP_CLAIM_LEASE_MS = 15 * 60 * 1000;
+export const EVENT_EDIT_REPAIR_EXECUTION_LEASE_MS = 2 * 60 * 1000;
 export const EVENT_ANNOUNCEMENT_DELIVERY_LEASE_MS = 2 * 60 * 1000;
 export const EVENT_CALENDAR_PUBLICATION_LEASE_MS = 45 * 1000;
 export const EVENT_CALENDAR_PUBLICATION_RETRY_DELAYS_MS = [
@@ -39,6 +41,13 @@ export class EventQuestionKeyRenameConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'EventQuestionKeyRenameConflictError';
+  }
+}
+
+export class EventPollReplacementConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EventPollReplacementConflictError';
   }
 }
 
@@ -135,6 +144,8 @@ export interface EventEditRepairIntent {
   targetGroupTitle: string;
   calendarId: string;
   announcementDeliveryKey?: string | undefined;
+  calendarHintDeliveryKey?: string | undefined;
+  calendarHintLocale?: string | undefined;
 }
 
 export interface StoredEventQuestionKeyRename {
@@ -205,6 +216,8 @@ export interface StoredEventRecord {
   actorLabel: string;
   announcementGroupWid?: string | undefined;
   pollWaMsgId?: string | undefined;
+  /** Monotonically advances whenever an open poll is replaced in-place. */
+  pollGeneration: number;
   pollQuestion?: string | undefined;
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
@@ -255,11 +268,80 @@ export interface StoredUnplannedEventFinalization {
 
 export type NewStoredEventRecord = Omit<
   StoredEventRecord,
-  'actorIdentityId' | 'calendarOwnershipStatus'
+  'actorIdentityId' | 'calendarOwnershipStatus' | 'pollGeneration'
 > & {
   actorIdentityId: string;
   calendarOwnershipStatus: Exclude<EventCalendarOwnershipStatus, 'unresolved'>;
+  pollGeneration?: number | undefined;
 };
+
+export interface EventPollReplacementTarget {
+  profileLabel: string;
+  profileRevision: string;
+  pollQuestion: string;
+  pollOptions: StoredEventPollOption[];
+  responseClasses: StoredEventResponseClass[];
+  answers: Record<string, string>;
+  eventLocation?: StoredEventLocation | undefined;
+  startsAt: string;
+  startsAtUtc: string;
+  timezone: string;
+  localDate: string;
+  localTime?: string | undefined;
+  place?: string | undefined;
+  closeAt: string;
+  cleanupAt: string;
+  groupTitle: string;
+  calendarDurationMinutes: number;
+  calendarLocation?: string | undefined;
+  calendarDescription?: string | undefined;
+  allowMultipleAnswers: boolean;
+  announcementIntent?: EventAnnouncementDeliveryIntent | undefined;
+  repairIntent?: EventEditRepairIntent | undefined;
+}
+
+export interface StoredEventPollReplacement {
+  operationId: string;
+  eventId: string;
+  scopeId: string;
+  status: EventPollReplacementStatus;
+  expectedEventUpdatedAt: string;
+  oldPollWaMsgId: string;
+  oldPollGeneration: number;
+  target: EventPollReplacementTarget;
+  editorIdentityId: string;
+  editorWid: string;
+  editorLabel: string;
+  locale: string;
+  sourcePluginId: string;
+  artifactIds: string[];
+  publishIdempotencyKey: string;
+  newPollWaMsgId?: string | undefined;
+  publicationClaimToken?: string | undefined;
+  publicationLeaseExpiresAt?: string | undefined;
+  publicationStartedAt?: string | undefined;
+  failureCount: number;
+  nextAttemptAt?: string | undefined;
+  lastError?: string | undefined;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt?: string | undefined;
+  swappedAt?: string | undefined;
+  completedAt?: string | undefined;
+  retiredAt?: string | undefined;
+  retirementError?: string | undefined;
+  retirementFailureCount: number;
+  receiptReleasedAt?: string | undefined;
+  receiptReleaseError?: string | undefined;
+  receiptReleaseFailureCount: number;
+  receiptReleaseNextAttemptAt?: string | undefined;
+}
+
+export interface EventPollReplacementPublicationClaim {
+  operationId: string;
+  claimToken: string;
+  leaseExpiresAt: string;
+}
 
 export interface UnassignedEventCalendarOwnership {
   eventId: string;
@@ -427,11 +509,21 @@ export interface StoredEventEditRepair {
   targetGroupTitle: string;
   calendarId: string;
   announcementDeliveryKey?: string | undefined;
+  calendarHintDeliveryKey?: string | undefined;
+  calendarHintLocale?: string | undefined;
   status: EventEditRepairStatus;
+  executionClaimId?: string | undefined;
+  executionLeaseExpiresAt?: string | undefined;
   lastError?: string | undefined;
   createdAt: string;
   updatedAt: string;
   completedAt?: string | undefined;
+}
+
+export interface EventEditRepairExecutionClaim {
+  operationId: string;
+  claimId: string;
+  leaseExpiresAt: string;
 }
 
 interface EventRow extends PluginDatabaseRow {
@@ -453,6 +545,7 @@ interface EventRow extends PluginDatabaseRow {
   actor_label: string;
   announcement_group_wid: string | null;
   poll_wa_msg_id: string | null;
+  poll_generation: number;
   poll_question: string | null;
   poll_options_json: string;
   response_classes_json: string;
@@ -486,6 +579,43 @@ interface EventRow extends PluginDatabaseRow {
   provisioning_recovery_attempt: number | null;
   provisioning_recovery_next_run_at: string | null;
   provisioning_recovery_halted_at: string | null;
+}
+
+interface EventPollReplacementRow extends PluginDatabaseRow {
+  operation_id: string;
+  event_id: string;
+  scope_id: string;
+  status: EventPollReplacementStatus;
+  expected_event_updated_at: string;
+  old_poll_wa_msg_id: string;
+  old_poll_generation: number;
+  target_json: string;
+  editor_identity_id: string;
+  editor_wid: string;
+  editor_label: string;
+  locale: string;
+  source_plugin_id: string;
+  artifact_ids_json: string;
+  publish_idempotency_key: string;
+  new_poll_wa_msg_id: string | null;
+  publication_claim_token: string | null;
+  publication_lease_expires_at: string | null;
+  publication_started_at: string | null;
+  failure_count: number;
+  next_attempt_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  published_at: string | null;
+  swapped_at: string | null;
+  completed_at: string | null;
+  retired_at: string | null;
+  retirement_error: string | null;
+  retirement_failure_count: number;
+  receipt_released_at: string | null;
+  receipt_release_error: string | null;
+  receipt_release_failure_count: number;
+  receipt_release_next_attempt_at: string | null;
 }
 
 interface VoteRow extends PluginDatabaseRow {
@@ -619,7 +749,11 @@ interface EventEditRepairRow extends PluginDatabaseRow {
   target_group_title: string;
   calendar_id: string;
   announcement_delivery_key: string | null;
+  calendar_hint_delivery_key: string | null;
+  calendar_hint_locale: string | null;
   status: EventEditRepairStatus;
+  execution_claim_id: string | null;
+  execution_lease_expires_at: string | null;
   last_error: string | null;
   created_at: string;
   updated_at: string;
@@ -711,6 +845,21 @@ export function beginEventQuestionKeyRename(db: PluginDatabase, input: {
     if (active) {
       throw new EventQuestionKeyRenameConflictError(
         `Question-key rename ${active.operation_id} is already in progress for event profile ${input.profileId}.`
+      );
+    }
+    const activePollReplacement = db.get<{ operation_id: string }>(
+      `SELECT replacement.operation_id
+         FROM event_poll_replacements replacement
+         JOIN event_records event ON event.id = replacement.event_id
+        WHERE event.scope_id = ? AND event.profile_id = ?
+          AND replacement.status NOT IN ('completed', 'aborted')
+        LIMIT 1`,
+      input.scopeId,
+      input.profileId
+    );
+    if (activePollReplacement) {
+      throw new EventQuestionKeyRenameConflictError(
+        `Poll replacement ${activePollReplacement.operation_id} is already in progress for event profile ${input.profileId}.`
       );
     }
 
@@ -968,14 +1117,14 @@ export function insertEvent(
       id, scope_id, group_id, group_wid, profile_id, profile_revision, profile_label, origin,
       event_status, group_lifecycle_status, calendar_status, calendar_id, calendar_ownership_status,
       actor_identity_id, actor_wid, actor_label,
-      announcement_group_wid, poll_wa_msg_id, poll_question, poll_options_json, response_classes_json,
+      announcement_group_wid, poll_wa_msg_id, poll_generation, poll_question, poll_options_json, response_classes_json,
       answers_json, event_location_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
       provisioning_recovery_next_run_at, provisioning_recovery_halted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -994,6 +1143,7 @@ export function insertEvent(
     event.actorLabel,
     event.announcementGroupWid ?? null,
     event.pollWaMsgId ?? null,
+    event.pollGeneration ?? (event.pollWaMsgId ? 1 : 0),
     event.pollQuestion ?? null,
     JSON.stringify(event.pollOptions),
     JSON.stringify(event.responseClasses),
@@ -1165,9 +1315,10 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
       const inserted = db.run(
         `INSERT INTO event_edit_repairs (
            operation_id, event_id, scope_id, expected_event_updated_at, subgroup_chat_id,
-           target_group_title, calendar_id, announcement_delivery_key, status, last_error,
+           target_group_title, calendar_id, announcement_delivery_key,
+           calendar_hint_delivery_key, calendar_hint_locale, status, last_error,
            created_at, updated_at, completed_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL)
          ON CONFLICT(operation_id) DO NOTHING`,
         repair.operationId,
         input.eventId,
@@ -1177,6 +1328,8 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
         repair.targetGroupTitle,
         repair.calendarId,
         repair.announcementDeliveryKey ?? null,
+        repair.calendarHintDeliveryKey ?? null,
+        repair.calendarHintLocale ?? null,
         input.updatedAt,
         input.updatedAt
       );
@@ -1216,8 +1369,934 @@ export function getEvent(db: PluginDatabase, eventId: string): StoredEventRecord
   return row ? eventFromRow(row) : undefined;
 }
 
+export function beginEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  eventId: string;
+  scopeId: string;
+  expectedEventUpdatedAt: string;
+  expectedPollWaMsgId: string;
+  expectedPollGeneration: number;
+  target: EventPollReplacementTarget;
+  editorIdentityId: string;
+  editorWid: string;
+  editorLabel: string;
+  locale: string;
+  sourcePluginId: string;
+  publishIdempotencyKey: string;
+  createdAt?: string | undefined;
+}): StoredEventPollReplacement {
+  return db.transaction(() => {
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    const existing = db.get<EventPollReplacementRow>(
+      'SELECT * FROM event_poll_replacements WHERE operation_id = ?',
+      input.operationId
+    );
+    if (existing) {
+      if (existing.event_id !== input.eventId || existing.scope_id !== input.scopeId) {
+        throw new EventPollReplacementConflictError(
+          `Event poll replacement operation ${input.operationId} belongs to another event.`
+        );
+      }
+      return eventPollReplacementFromRow(existing);
+    }
+
+    const event = db.get<EventRow>(
+      `SELECT * FROM event_records
+        WHERE id = ?
+          AND scope_id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND updated_at = ?
+          AND poll_wa_msg_id = ?
+          AND poll_generation = ?
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = event_records.id
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims delivery
+             WHERE delivery.event_id = event_records.id
+               AND delivery.status = 'sending'
+               AND delivery.lease_expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_edit_repairs repair
+             WHERE repair.event_id = event_records.id
+               AND repair.status = 'pending'
+               AND repair.subgroup_chat_id IS NOT NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_edit_repairs repair
+             WHERE repair.event_id = event_records.id
+               AND repair.status = 'pending'
+               AND repair.execution_claim_id IS NOT NULL
+               AND repair.execution_lease_expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_question_key_renames rename
+             WHERE rename.scope_id = event_records.scope_id
+               AND rename.profile_id = event_records.profile_id
+               AND rename.status = 'expanded'
+          )`,
+      input.eventId,
+      input.scopeId,
+      input.expectedEventUpdatedAt,
+      input.expectedPollWaMsgId,
+      input.expectedPollGeneration,
+      createdAt,
+      createdAt
+    );
+    if (!event) {
+      throw new EventPollReplacementConflictError(
+        `Event ${input.eventId} changed before its poll replacement could begin.`
+      );
+    }
+    const persistedPollArtifact = db.get<{ id: string }>(
+      `SELECT id FROM event_announcement_messages
+        WHERE event_id = ? AND kind = 'poll' AND message_id = ?
+        LIMIT 1`,
+      input.eventId,
+      input.expectedPollWaMsgId
+    );
+    if (!persistedPollArtifact) {
+      db.run(
+        `INSERT INTO event_announcement_messages (
+           id, event_id, scope_id, kind, delivery_key, chat_id, message_id,
+           created_at, deleted_at, delete_error
+         ) VALUES (?, ?, ?, 'poll', ?, ?, ?, ?, NULL, NULL)`,
+        `evtmsg-${randomUUID()}`,
+        input.eventId,
+        input.scopeId,
+        `replacement-source:${input.operationId}`,
+        event.announcement_group_wid ?? event.group_wid ?? '',
+        input.expectedPollWaMsgId,
+        createdAt
+      );
+    }
+    const artifactIds = db.all<{ id: string }>(
+      `SELECT id FROM event_announcement_messages
+        WHERE event_id = ? AND scope_id = ? AND deleted_at IS NULL
+        ORDER BY created_at ASC, id ASC`,
+      input.eventId,
+      input.scopeId
+    ).map((row) => row.id);
+    const now = createdAt;
+    db.run(
+      `INSERT INTO event_poll_replacements (
+         operation_id, event_id, scope_id, status, expected_event_updated_at,
+         old_poll_wa_msg_id, old_poll_generation, target_json,
+         editor_identity_id, editor_wid, editor_label, locale, source_plugin_id,
+         artifact_ids_json, publish_idempotency_key, new_poll_wa_msg_id,
+         publication_claim_token, publication_lease_expires_at, publication_started_at,
+         failure_count, next_attempt_at, last_error, created_at, updated_at,
+         published_at, swapped_at, completed_at, retired_at, retirement_error,
+         retirement_failure_count, receipt_released_at, receipt_release_error,
+         receipt_release_failure_count, receipt_release_next_attempt_at
+       ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
+                 0, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, 0,
+                 NULL, NULL, 0, NULL)`,
+      input.operationId,
+      input.eventId,
+      input.scopeId,
+      input.expectedEventUpdatedAt,
+      input.expectedPollWaMsgId,
+      input.expectedPollGeneration,
+      JSON.stringify(input.target),
+      input.editorIdentityId,
+      input.editorWid,
+      input.editorLabel,
+      input.locale,
+      input.sourcePluginId,
+      JSON.stringify(artifactIds),
+      input.publishIdempotencyKey,
+      now,
+      now
+    );
+    return requireEventPollReplacement(db, input.operationId);
+  });
+}
+
+export function getEventPollReplacement(
+  db: PluginDatabase,
+  operationId: string
+): StoredEventPollReplacement | undefined {
+  const row = db.get<EventPollReplacementRow>(
+    'SELECT * FROM event_poll_replacements WHERE operation_id = ?',
+    operationId
+  );
+  return row ? eventPollReplacementFromRow(row) : undefined;
+}
+
+export function listPendingEventPollReplacements(
+  db: PluginDatabase,
+  now: Date = new Date()
+): StoredEventPollReplacement[] {
+  return db.all<EventPollReplacementRow>(
+    `SELECT * FROM event_poll_replacements
+      WHERE (status = 'published' AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+         OR (status = 'pending' AND (
+           (publication_claim_token IS NULL
+             AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+           OR (publication_claim_token IS NOT NULL
+             AND publication_lease_expires_at <= ?)
+         ))
+      ORDER BY created_at ASC, operation_id ASC`,
+    now.toISOString(),
+    now.toISOString(),
+    now.toISOString()
+  ).map(eventPollReplacementFromRow);
+}
+
+export function hasActiveEventPollReplacement(db: PluginDatabase, eventId: string): boolean {
+  return Boolean(db.get<{ operation_id: string }>(
+    `SELECT operation_id FROM event_poll_replacements
+      WHERE event_id = ? AND status NOT IN ('completed', 'aborted')
+      LIMIT 1`,
+    eventId
+  ));
+}
+
+export function claimEventPollReplacementPublication(db: PluginDatabase, input: {
+  operationId: string;
+  claimToken: string;
+  now: string;
+  leaseExpiresAt: string;
+}): StoredEventPollReplacement | undefined {
+  if (Date.parse(input.leaseExpiresAt) <= Date.parse(input.now)) {
+    throw new Error('Event poll replacement publication lease must expire after it starts.');
+  }
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET publication_claim_token = ?, publication_lease_expires_at = ?,
+            next_attempt_at = NULL, updated_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        AND (
+          publication_claim_token IS NULL
+          OR publication_lease_expires_at <= ?
+        )`,
+    input.claimToken,
+    input.leaseExpiresAt,
+    input.now,
+    input.operationId,
+    input.now,
+    input.now
+  ).changes;
+  return changed === 1 ? requireEventPollReplacement(db, input.operationId) : undefined;
+}
+
+/** An expired claim is never revived at the provider mutation boundary. */
+export function renewEventPollReplacementPublicationClaim(db: PluginDatabase, input: {
+  claim: EventPollReplacementPublicationClaim;
+  now: string;
+  leaseExpiresAt: string;
+}): boolean {
+  if (Date.parse(input.leaseExpiresAt) <= Date.parse(input.now)) {
+    throw new Error('Renewed event poll replacement lease must expire after renewal.');
+  }
+  return db.run(
+    `UPDATE event_poll_replacements
+        SET publication_lease_expires_at = ?, updated_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+        AND publication_claim_token = ?
+        AND publication_lease_expires_at > ?`,
+    input.leaseExpiresAt,
+    input.now,
+    input.claim.operationId,
+    input.claim.claimToken,
+    input.now
+  ).changes === 1;
+}
+
+/**
+ * Persists the provider-attempt anchor under the current publication claim.
+ * DOAS/whatsmeow still owns cross-process provider idempotency; the local lease
+ * prevents two plugin runners from concurrently reconciling or invoking it.
+ */
+export function markEventPollReplacementPublicationStarted(db: PluginDatabase, input: {
+  operationId: string;
+  claimToken: string;
+  startedAt?: string | undefined;
+}): StoredEventPollReplacement | undefined {
+  const startedAt = input.startedAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET publication_started_at = ?, updated_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+        AND publication_claim_token = ? AND publication_lease_expires_at > ?
+        AND publication_started_at IS NULL`,
+    startedAt,
+    startedAt,
+    input.operationId,
+    input.claimToken,
+    startedAt
+  ).changes;
+  return changed === 1 ? requireEventPollReplacement(db, input.operationId) : undefined;
+}
+
+/** Clears only the exact attempt anchor whose provider call proved non-delivery. */
+export function clearEventPollReplacementPublicationStarted(db: PluginDatabase, input: {
+  operationId: string;
+  claimToken: string;
+  expectedStartedAt: string;
+  clearedAt?: string | undefined;
+}): { replacement: StoredEventPollReplacement; cleared: boolean } {
+  const clearedAt = input.clearedAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET publication_started_at = NULL, updated_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+        AND publication_claim_token = ? AND publication_lease_expires_at > ?
+        AND publication_started_at = ?`,
+    clearedAt,
+    input.operationId,
+    input.claimToken,
+    clearedAt,
+    input.expectedStartedAt
+  ).changes;
+  return {
+    replacement: requireEventPollReplacement(db, input.operationId),
+    cleared: changed === 1
+  };
+}
+
+/**
+ * A deadline can safely abort without provider reconciliation only while no
+ * durable provider-attempt anchor exists. The NULL predicate is the CAS that
+ * races the pre-publish anchor.
+ */
+export function abortUnstartedEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  claimToken: string;
+  reason: string;
+  abortedAt?: string | undefined;
+}): { replacement: StoredEventPollReplacement; aborted: boolean } {
+  const abortedAt = input.abortedAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET status = 'aborted', artifact_ids_json = '[]', last_error = ?,
+            publication_claim_token = NULL, publication_lease_expires_at = NULL,
+            next_attempt_at = NULL, updated_at = ?, completed_at = ?, retired_at = ?
+      WHERE operation_id = ? AND status = 'pending' AND publication_started_at IS NULL
+        AND publication_claim_token = ? AND publication_lease_expires_at > ?`,
+    input.reason,
+    abortedAt,
+    abortedAt,
+    abortedAt,
+    input.operationId,
+    input.claimToken,
+    abortedAt
+  ).changes;
+  return {
+    replacement: requireEventPollReplacement(db, input.operationId),
+    aborted: changed === 1
+  };
+}
+
+export function markEventPollReplacementPublished(db: PluginDatabase, input: {
+  operationId: string;
+  messageId: string;
+  publishedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  return db.transaction(() => {
+    const replacement = requireEventPollReplacement(db, input.operationId);
+    if (replacement.newPollWaMsgId && replacement.newPollWaMsgId !== input.messageId) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} received conflicting publication receipts.`
+      );
+    }
+    const checkpointArtifact = (publishedAt: string): StoredEventAnnouncementMessage => {
+      const event = getEvent(db, replacement.eventId);
+      const chatId = event?.announcementGroupWid?.trim() || event?.groupWid?.trim();
+      if (!event || !chatId) {
+        throw new EventPollReplacementConflictError(
+          `Event ${replacement.eventId} lost its announcement group while its replacement receipt was persisted.`
+        );
+      }
+      return recordEventAnnouncementMessage(db, {
+        eventId: replacement.eventId,
+        scopeId: replacement.scopeId,
+        kind: 'poll',
+        deliveryKey: replacement.operationId,
+        chatId,
+        messageId: input.messageId,
+        createdAt: publishedAt
+      });
+    };
+    if (replacement.status === 'aborted') {
+      if (replacement.newPollWaMsgId === input.messageId) {
+        return replacement;
+      }
+      const publishedAt = input.publishedAt ?? new Date().toISOString();
+      const artifact = checkpointArtifact(publishedAt);
+      db.run(
+        `UPDATE event_poll_replacements
+            SET new_poll_wa_msg_id = ?, published_at = ?,
+                publication_started_at = COALESCE(publication_started_at, ?), artifact_ids_json = ?,
+                retired_at = NULL, retirement_error = NULL,
+                publication_claim_token = NULL, publication_lease_expires_at = NULL,
+                next_attempt_at = NULL, updated_at = ?
+          WHERE operation_id = ? AND status = 'aborted' AND new_poll_wa_msg_id IS NULL`,
+        input.messageId,
+        publishedAt,
+        publishedAt,
+        JSON.stringify([artifact.id]),
+        publishedAt,
+        input.operationId
+      );
+      return requireEventPollReplacement(db, input.operationId);
+    }
+    if (replacement.status !== 'pending') {
+      return replacement;
+    }
+    const publishedAt = input.publishedAt ?? new Date().toISOString();
+    const changed = db.run(
+      `UPDATE event_poll_replacements
+          SET status = 'published', new_poll_wa_msg_id = ?, published_at = ?,
+              publication_started_at = COALESCE(publication_started_at, ?),
+              publication_claim_token = NULL, publication_lease_expires_at = NULL,
+              next_attempt_at = NULL, last_error = NULL, updated_at = ?
+        WHERE operation_id = ? AND status = 'pending'`,
+      input.messageId,
+      publishedAt,
+      publishedAt,
+      publishedAt,
+      input.operationId
+    ).changes;
+    if (changed !== 1) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} changed while its receipt was persisted.`
+      );
+    }
+    checkpointArtifact(publishedAt);
+    return requireEventPollReplacement(db, input.operationId);
+  });
+}
+
+export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  swappedAt?: string | undefined;
+}): { replacement: StoredEventPollReplacement; event: StoredEventRecord } {
+  return db.transaction(() => {
+    const replacement = requireEventPollReplacement(db, input.operationId);
+    const existingEvent = getEvent(db, replacement.eventId);
+    if (!existingEvent) {
+      throw new EventPollReplacementConflictError(
+        `Event ${replacement.eventId} disappeared during poll replacement.`
+      );
+    }
+    if (replacement.status === 'completed') {
+      return { replacement, event: existingEvent };
+    }
+    if (replacement.status !== 'published' || !replacement.newPollWaMsgId) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${replacement.operationId} has not been published.`
+      );
+    }
+    const target = replacement.target;
+    const swappedAt = nextEventRevisionTimestamp(
+      replacement.expectedEventUpdatedAt,
+      input.swappedAt ? new Date(input.swappedAt) : new Date()
+    );
+    let changed: number;
+    try {
+      changed = db.run(
+        `UPDATE event_records
+          SET profile_label = ?, profile_revision = ?, poll_wa_msg_id = ?,
+              poll_generation = ?, poll_question = ?, poll_options_json = ?,
+              response_classes_json = ?, answers_json = ?, event_location_json = ?,
+              starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
+              local_time = ?, place = ?, style = NULL, close_at = ?, cleanup_at = ?,
+              group_title = ?,
+              subgroup_title = CASE WHEN subgroup_chat_id IS NOT NULL THEN ? ELSE subgroup_title END,
+              calendar_duration_minutes = ?, calendar_location = ?,
+              calendar_description = ?, error = NULL, updated_at = ?
+        WHERE id = ? AND scope_id = ?
+          AND event_status = 'active' AND group_lifecycle_status = 'poll_open'
+          AND updated_at = ? AND poll_wa_msg_id = ? AND poll_generation = ?
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cleanup_claims
+             WHERE event_cleanup_claims.event_id = event_records.id
+          )`,
+      target.profileLabel,
+      target.profileRevision,
+      replacement.newPollWaMsgId,
+      replacement.oldPollGeneration + 1,
+      target.pollQuestion,
+      JSON.stringify(target.pollOptions),
+      JSON.stringify(target.responseClasses),
+      JSON.stringify(target.answers),
+      target.eventLocation ? JSON.stringify(target.eventLocation) : null,
+      target.startsAt,
+      target.startsAtUtc,
+      target.timezone,
+      target.localDate,
+      target.localTime ?? null,
+      target.place ?? null,
+      target.closeAt,
+      target.cleanupAt,
+      target.groupTitle,
+      target.groupTitle,
+      target.calendarDurationMinutes,
+      target.calendarLocation ?? null,
+      target.calendarDescription ?? null,
+      swappedAt,
+      replacement.eventId,
+      replacement.scopeId,
+      replacement.expectedEventUpdatedAt,
+      replacement.oldPollWaMsgId,
+        replacement.oldPollGeneration
+      ).changes;
+    } catch (error) {
+      const sqliteCode = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      if (sqliteCode.startsWith('SQLITE_CONSTRAINT')) {
+        throw new EventPollReplacementConflictError(
+          `Event ${replacement.eventId} rejected its published replacement: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      throw error;
+    }
+    if (changed !== 1) {
+      throw new EventPollReplacementConflictError(
+        `Event ${replacement.eventId} changed before its replacement poll could be activated.`
+      );
+    }
+    db.run('DELETE FROM event_votes WHERE event_id = ?', replacement.eventId);
+    recordEventAnnouncementMessage(db, {
+      eventId: replacement.eventId,
+      scopeId: replacement.scopeId,
+      kind: 'poll',
+      deliveryKey: replacement.operationId,
+      chatId: existingEvent.announcementGroupWid ?? existingEvent.groupWid ?? '',
+      messageId: replacement.newPollWaMsgId,
+      createdAt: swappedAt
+    });
+    const announcementIntent = target.announcementIntent
+      ? normalizedEventAnnouncementIntent(target.announcementIntent)
+      : undefined;
+    const repairIntent = normalizedEventEditRepairIntent(target.repairIntent ?? {
+      operationId: replacement.operationId,
+      scopeId: replacement.scopeId,
+      ...(existingEvent.subgroupChatId ? { subgroupChatId: existingEvent.subgroupChatId } : {}),
+      targetGroupTitle: target.groupTitle,
+      calendarId: resolvedEventCalendarId(existingEvent) ?? ''
+    });
+    if (
+      repairIntent.operationId !== replacement.operationId ||
+      repairIntent.scopeId !== replacement.scopeId ||
+      Boolean(announcementIntent) !== Boolean(repairIntent.announcementDeliveryKey) ||
+      (announcementIntent && (
+        announcementIntent.scopeId !== replacement.scopeId ||
+        announcementIntent.kind !== 'event_edit' ||
+        announcementIntent.deliveryKey !== repairIntent.announcementDeliveryKey
+      ))
+    ) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${replacement.operationId} has invalid presentation intent.`
+      );
+    }
+    if (announcementIntent) {
+      const inserted = db.run(
+        `INSERT INTO event_announcement_delivery_claims (
+           event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+           lease_expires_at, message_id, error, claimed_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL, ?, ?)
+         ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
+        replacement.eventId,
+        announcementIntent.kind,
+        announcementIntent.deliveryKey,
+        announcementIntent.scopeId,
+        announcementIntent.chatId,
+        announcementIntent.text,
+        announcementIntent.idempotencyKey,
+        swappedAt,
+        swappedAt
+      );
+      if (inserted.changes !== 1) {
+        throw new EventPollReplacementConflictError(
+          `Event announcement operation ${announcementIntent.deliveryKey} already exists for event ${replacement.eventId}.`
+        );
+      }
+    }
+    const insertedRepair = db.run(
+      `INSERT INTO event_edit_repairs (
+         operation_id, event_id, scope_id, expected_event_updated_at, subgroup_chat_id,
+         target_group_title, calendar_id, announcement_delivery_key,
+         calendar_hint_delivery_key, calendar_hint_locale, status, last_error,
+         created_at, updated_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL)
+       ON CONFLICT(operation_id) DO NOTHING`,
+      repairIntent.operationId,
+      replacement.eventId,
+      repairIntent.scopeId,
+      swappedAt,
+      repairIntent.subgroupChatId ?? null,
+      repairIntent.targetGroupTitle,
+      repairIntent.calendarId,
+      repairIntent.announcementDeliveryKey ?? null,
+      repairIntent.calendarHintDeliveryKey ?? null,
+      repairIntent.calendarHintLocale ?? null,
+      swappedAt,
+      swappedAt
+    );
+    if (insertedRepair.changes !== 1) {
+      throw new EventPollReplacementConflictError(
+        `Event edit repair operation ${repairIntent.operationId} already exists.`
+      );
+    }
+    db.run(
+      `UPDATE event_poll_replacements
+          SET status = 'completed', swapped_at = ?, completed_at = ?,
+              publication_claim_token = NULL, publication_lease_expires_at = NULL,
+              next_attempt_at = NULL, last_error = NULL, updated_at = ?
+        WHERE operation_id = ? AND status = 'published'`,
+      swappedAt,
+      swappedAt,
+      swappedAt,
+      replacement.operationId
+    );
+    appendEventLog(db, {
+      eventId: replacement.eventId,
+      action: 'events.poll_replacement.swapped',
+      metadata: {
+        operationId: replacement.operationId,
+        oldPollWaMsgId: replacement.oldPollWaMsgId,
+        newPollWaMsgId: replacement.newPollWaMsgId,
+        oldPollGeneration: replacement.oldPollGeneration,
+        pollGeneration: replacement.oldPollGeneration + 1
+      }
+    });
+    return {
+      replacement: requireEventPollReplacement(db, replacement.operationId),
+      event: getEvent(db, replacement.eventId)!
+    };
+  });
+}
+
+export function failEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  claimToken?: string | undefined;
+  reason: string;
+  nextAttemptAt: string;
+  failedAt?: string | undefined;
+}): { replacement: StoredEventPollReplacement; failed: boolean } {
+  const failedAt = input.failedAt ?? new Date().toISOString();
+  const changed = input.claimToken
+    ? db.run(
+        `UPDATE event_poll_replacements
+            SET publication_claim_token = NULL, publication_lease_expires_at = NULL,
+                failure_count = failure_count + 1, next_attempt_at = ?, last_error = ?, updated_at = ?
+          WHERE operation_id = ? AND status = 'pending' AND publication_claim_token = ?`,
+        input.nextAttemptAt,
+        input.reason,
+        failedAt,
+        input.operationId,
+        input.claimToken
+      ).changes
+    : db.run(
+        `UPDATE event_poll_replacements
+            SET failure_count = failure_count + 1, next_attempt_at = ?, last_error = ?, updated_at = ?
+          WHERE operation_id = ? AND status = 'published'`,
+        input.nextAttemptAt,
+        input.reason,
+        failedAt,
+        input.operationId
+      ).changes;
+  return {
+    replacement: requireEventPollReplacement(db, input.operationId),
+    failed: changed === 1
+  };
+}
+
+/**
+ * A definite non-delivery may remove only the exact anchor established by the
+ * still-current claimant. If a successor has taken the lease, this is a no-op.
+ */
+export function resetEventPollReplacementAfterDefiniteNonDelivery(
+  db: PluginDatabase,
+  input: {
+    operationId: string;
+    claimToken: string;
+    expectedStartedAt: string;
+    reason: string;
+    nextAttemptAt: string;
+    failedAt?: string | undefined;
+  }
+): { replacement: StoredEventPollReplacement; reset: boolean } {
+  const failedAt = input.failedAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET publication_claim_token = NULL, publication_lease_expires_at = NULL,
+            publication_started_at = NULL, failure_count = failure_count + 1,
+            next_attempt_at = ?, last_error = ?, updated_at = ?
+      WHERE operation_id = ? AND status = 'pending'
+        AND publication_claim_token = ? AND publication_started_at = ?`,
+    input.nextAttemptAt,
+    input.reason,
+    failedAt,
+    input.operationId,
+    input.claimToken,
+    input.expectedStartedAt
+  ).changes;
+  return {
+    replacement: requireEventPollReplacement(db, input.operationId),
+    reset: changed === 1
+  };
+}
+
+export function abortEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  reason: string;
+  abortedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const abortedAt = input.abortedAt ?? new Date().toISOString();
+  db.run(
+      `UPDATE event_poll_replacements
+        SET status = 'aborted', artifact_ids_json = '[]', last_error = ?,
+            publication_claim_token = NULL, publication_lease_expires_at = NULL,
+            next_attempt_at = NULL, updated_at = ?, completed_at = ?, retired_at = ?
+      WHERE operation_id = ? AND status = 'pending'`,
+    input.reason,
+    abortedAt,
+    abortedAt,
+    abortedAt,
+    input.operationId
+  );
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+/**
+ * Permanently abandons a poll that was published but could not win the event
+ * revision CAS. The replacement poll artifact becomes the only retirement
+ * target; the still-authoritative old event artifacts must remain untouched.
+ */
+export function abortPublishedEventPollReplacement(db: PluginDatabase, input: {
+  operationId: string;
+  reason: string;
+  abortedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  return db.transaction(() => {
+    const replacement = requireEventPollReplacement(db, input.operationId);
+    if (replacement.status === 'aborted') {
+      return replacement;
+    }
+    if (replacement.status !== 'published' || !replacement.newPollWaMsgId) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} has no published poll to abandon.`
+      );
+    }
+    const artifact = db.get<{ id: string }>(
+      `SELECT id FROM event_announcement_messages
+        WHERE event_id = ? AND kind = 'poll' AND delivery_key = ?
+        LIMIT 1`,
+      replacement.eventId,
+      replacement.operationId
+    );
+    if (!artifact) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} lost its published artifact checkpoint.`
+      );
+    }
+    const abortedAt = input.abortedAt ?? new Date().toISOString();
+    const changed = db.run(
+      `UPDATE event_poll_replacements
+          SET status = 'aborted', artifact_ids_json = ?, last_error = ?,
+              publication_claim_token = NULL, publication_lease_expires_at = NULL,
+              next_attempt_at = NULL, updated_at = ?, completed_at = ?
+        WHERE operation_id = ? AND status = 'published'`,
+      JSON.stringify([artifact.id]),
+      input.reason,
+      abortedAt,
+      abortedAt,
+      input.operationId
+    ).changes;
+    if (changed !== 1) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} changed while it was being abandoned.`
+      );
+    }
+    appendEventLog(db, {
+      eventId: replacement.eventId,
+      action: 'events.poll_replacement.aborted_after_publish',
+      metadata: {
+        operationId: replacement.operationId,
+        oldPollWaMsgId: replacement.oldPollWaMsgId,
+        publishedPollWaMsgId: replacement.newPollWaMsgId,
+        reason: input.reason
+      }
+    });
+    return requireEventPollReplacement(db, input.operationId);
+  });
+}
+
+export function markEventPollReplacementRetired(db: PluginDatabase, input: {
+  operationId: string;
+  retiredAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const retiredAt = input.retiredAt ?? new Date().toISOString();
+  db.run(
+    `UPDATE event_poll_replacements
+        SET retired_at = ?, retirement_error = NULL, next_attempt_at = NULL, updated_at = ?
+      WHERE operation_id = ? AND status IN ('completed', 'aborted') AND retired_at IS NULL`,
+    retiredAt,
+    retiredAt,
+    input.operationId
+  );
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+export function markEventPollReplacementRetirementFailed(db: PluginDatabase, input: {
+  operationId: string;
+  reason: string;
+  nextAttemptAt: string;
+  failedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const failedAt = input.failedAt ?? new Date().toISOString();
+  db.run(
+    `UPDATE event_poll_replacements
+        SET retirement_error = ?, retirement_failure_count = retirement_failure_count + 1,
+            next_attempt_at = ?, updated_at = ?
+      WHERE operation_id = ? AND status IN ('completed', 'aborted') AND retired_at IS NULL`,
+    input.reason,
+    input.nextAttemptAt,
+    failedAt,
+    input.operationId
+  );
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+export function listPendingEventPollReplacementRetirements(
+  db: PluginDatabase,
+  now: Date = new Date()
+): StoredEventPollReplacement[] {
+  return db.all<EventPollReplacementRow>(
+    `SELECT * FROM event_poll_replacements
+      WHERE status IN ('completed', 'aborted') AND new_poll_wa_msg_id IS NOT NULL
+        AND retired_at IS NULL
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+      ORDER BY completed_at ASC, operation_id ASC`,
+    now.toISOString()
+  ).map(eventPollReplacementFromRow);
+}
+
+export function markEventPollReplacementReceiptReleased(db: PluginDatabase, input: {
+  operationId: string;
+  releasedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const releasedAt = input.releasedAt ?? new Date().toISOString();
+  db.run(
+    `UPDATE event_poll_replacements
+        SET receipt_released_at = ?, receipt_release_error = NULL,
+            receipt_release_next_attempt_at = NULL, updated_at = ?
+      WHERE operation_id = ? AND status IN ('completed', 'aborted')
+        AND new_poll_wa_msg_id IS NOT NULL AND receipt_released_at IS NULL`,
+    releasedAt,
+    releasedAt,
+    input.operationId
+  );
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+export function markEventPollReplacementReceiptReleaseFailed(db: PluginDatabase, input: {
+  operationId: string;
+  reason: string;
+  nextAttemptAt: string;
+  failedAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const failedAt = input.failedAt ?? new Date().toISOString();
+  db.run(
+    `UPDATE event_poll_replacements
+        SET receipt_release_error = ?,
+            receipt_release_failure_count = receipt_release_failure_count + 1,
+            receipt_release_next_attempt_at = ?, updated_at = ?
+      WHERE operation_id = ? AND status IN ('completed', 'aborted')
+        AND new_poll_wa_msg_id IS NOT NULL AND receipt_released_at IS NULL`,
+    input.reason,
+    input.nextAttemptAt,
+    failedAt,
+    input.operationId
+  );
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+/** A replacement receipt can be released only once its poll is not authoritative. */
+export function eventPollReplacementReceiptReleaseEligible(
+  db: PluginDatabase,
+  replacement: StoredEventPollReplacement
+): boolean {
+  if (
+    !replacement.newPollWaMsgId ||
+    replacement.receiptReleasedAt ||
+    (replacement.status !== 'completed' && replacement.status !== 'aborted')
+  ) {
+    return false;
+  }
+  if (replacement.status === 'aborted') {
+    return true;
+  }
+  const event = getEvent(db, replacement.eventId);
+  if (!event) {
+    return true;
+  }
+  const replacementGeneration = replacement.oldPollGeneration + 1;
+  return event.eventStatus !== 'active' ||
+    event.groupLifecycleStatus !== 'poll_open' ||
+    event.pollGeneration !== replacementGeneration ||
+    event.pollWaMsgId !== replacement.newPollWaMsgId;
+}
+
+export function listEligibleEventPollReplacementReceiptReleases(
+  db: PluginDatabase,
+  now: Date = new Date(),
+  eventId?: string | undefined
+): StoredEventPollReplacement[] {
+  return db.all<EventPollReplacementRow>(
+    `SELECT replacement.*
+       FROM event_poll_replacements replacement
+      WHERE replacement.status IN ('completed', 'aborted')
+        AND replacement.new_poll_wa_msg_id IS NOT NULL
+        AND replacement.receipt_released_at IS NULL
+        AND (replacement.receipt_release_next_attempt_at IS NULL
+          OR replacement.receipt_release_next_attempt_at <= ?)
+        AND (? IS NULL OR replacement.event_id = ?)
+      ORDER BY replacement.completed_at ASC, replacement.operation_id ASC`,
+    now.toISOString(),
+    eventId ?? null,
+    eventId ?? null
+  ).map(eventPollReplacementFromRow)
+    .filter((replacement) => eventPollReplacementReceiptReleaseEligible(db, replacement));
+}
+
 export function getEventByPoll(db: PluginDatabase, pollWaMsgId: string): StoredEventRecord | undefined {
   const row = db.get<EventRow>('SELECT * FROM event_records WHERE poll_wa_msg_id = ?', pollWaMsgId);
+  return row ? eventFromRow(row) : undefined;
+}
+
+export function getOpenEventByEquivalentPoll(
+  db: PluginDatabase,
+  pollWaMsgId: string
+): StoredEventRecord | undefined {
+  const rows = db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE poll_wa_msg_id IS NOT NULL
+        AND event_status = 'active'
+        AND group_lifecycle_status = 'poll_open'
+      ORDER BY starts_at ASC, id ASC`
+  );
+  const row = rows.find((candidate) =>
+    equivalentWhatsAppMessageIds(candidate.poll_wa_msg_id ?? undefined, pollWaMsgId)
+  );
   return row ? eventFromRow(row) : undefined;
 }
 
@@ -1686,7 +2765,17 @@ export function updateEventCloseAt(db: PluginDatabase, input: {
         AND updated_at = ?
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
-        AND provisioning_recovery_next_run_at IS NULL`,
+        AND provisioning_recovery_next_run_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM event_announcement_delivery_claims delivery
+           WHERE delivery.event_id = event_records.id
+             AND delivery.status = 'sending'
+        )`,
     input.closeAt,
     input.updatedAt,
     input.eventId,
@@ -1964,37 +3053,62 @@ export function markEventCleaned(db: PluginDatabase, input: {
   expectedUpdatedAt: string;
   cleanedAt: string;
 }): boolean {
-  const result = db.run(
-    `UPDATE event_records
-        SET event_status = 'completed',
-            group_lifecycle_status = 'cleaned',
-            cleaned_at = ?,
-            error = NULL,
-            provisioning_recovery_generation = NULL,
-            provisioning_recovery_attempt = NULL,
-            provisioning_recovery_next_run_at = NULL,
-            provisioning_recovery_halted_at = NULL,
-            updated_at = ?
-      WHERE id = ?
-        AND (
-          (event_status IN ('active', 'completed')
-            AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
-          OR
-          (event_status = 'failed'
-            AND group_lifecycle_status = 'cleanup_failed'
-            AND subgroup_chat_id IS NOT NULL
-            AND provisioning_recovery_generation IS NULL
-            AND provisioning_recovery_attempt IS NULL
-            AND provisioning_recovery_next_run_at IS NULL
-            AND provisioning_recovery_halted_at IS NULL)
-        )
-        AND updated_at = ?`,
-    input.cleanedAt,
-    input.cleanedAt,
-    input.eventId,
-    input.expectedUpdatedAt
-  );
-  return result.changes === 1;
+  return db.transaction(() => {
+    const result = db.run(
+      `UPDATE event_records
+          SET event_status = 'completed',
+              group_lifecycle_status = 'cleaned',
+              cleaned_at = ?,
+              error = NULL,
+              provisioning_recovery_generation = NULL,
+              provisioning_recovery_attempt = NULL,
+              provisioning_recovery_next_run_at = NULL,
+              provisioning_recovery_halted_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND (
+            (event_status IN ('active', 'completed')
+              AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed'))
+            OR
+            (event_status = 'failed'
+              AND group_lifecycle_status = 'cleanup_failed'
+              AND subgroup_chat_id IS NOT NULL
+              AND provisioning_recovery_generation IS NULL
+              AND provisioning_recovery_attempt IS NULL
+              AND provisioning_recovery_next_run_at IS NULL
+              AND provisioning_recovery_halted_at IS NULL)
+          )
+          AND updated_at = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cleanup_claims
+             WHERE event_cleanup_claims.event_id = event_records.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims delivery
+             WHERE delivery.event_id = event_records.id
+               AND delivery.status = 'sending'
+               AND delivery.lease_expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_edit_repairs repair
+             WHERE repair.event_id = event_records.id
+               AND repair.status = 'pending'
+               AND repair.execution_claim_id IS NOT NULL
+               AND repair.execution_lease_expires_at > ?
+          )`,
+      input.cleanedAt,
+      input.cleanedAt,
+      input.eventId,
+      input.expectedUpdatedAt,
+      input.cleanedAt,
+      input.cleanedAt
+    );
+    if (result.changes !== 1) {
+      return false;
+    }
+    supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cleanedAt);
+    return true;
+  });
 }
 
 export function claimEventCleanup(db: PluginDatabase, input: {
@@ -2003,6 +3117,7 @@ export function claimEventCleanup(db: PluginDatabase, input: {
   expectedCleanupAt: string;
   claimedAt?: string | undefined;
   leaseExpiresAt?: string | undefined;
+  allowBeforeDeadline?: boolean | undefined;
 }): EventCleanupClaim | undefined {
   const claimId = `evtcleanup-${randomUUID()}`;
   const claimedAt = input.claimedAt ?? new Date().toISOString();
@@ -2030,11 +3145,24 @@ export function claimEventCleanup(db: PluginDatabase, input: {
         )
         AND updated_at = ?
         AND cleanup_at = ?
-        AND cleanup_at <= ?
+        AND (? = 1 OR cleanup_at <= ?)
         AND NOT EXISTS (
           SELECT 1
             FROM event_cleanup_claims
            WHERE event_cleanup_claims.event_id = event_records.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM event_announcement_delivery_claims delivery
+           WHERE delivery.event_id = event_records.id
+             AND delivery.status = 'sending'
+             AND delivery.lease_expires_at > ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM event_edit_repairs repair
+           WHERE repair.event_id = event_records.id
+             AND repair.status = 'pending'
+             AND repair.execution_claim_id IS NOT NULL
+             AND repair.execution_lease_expires_at > ?
         )`,
     claimId,
     claimedAt,
@@ -2042,6 +3170,9 @@ export function claimEventCleanup(db: PluginDatabase, input: {
     input.eventId,
     input.expectedUpdatedAt,
     input.expectedCleanupAt,
+    input.allowBeforeDeadline ? 1 : 0,
+    claimedAt,
+    claimedAt,
     claimedAt
   );
   return result.changes === 1
@@ -2053,7 +3184,82 @@ export function claimEventCleanup(db: PluginDatabase, input: {
         claimedAt,
         leaseExpiresAt
       }
-    : undefined;
+      : undefined;
+}
+
+/** Acquires the cleanup mutation fence for cancellation before its deadline. */
+export function claimEventCancellationCleanup(db: PluginDatabase, input: {
+  eventId: string;
+  expectedUpdatedAt: string;
+  claimedAt?: string | undefined;
+  leaseExpiresAt?: string | undefined;
+}): EventCleanupClaim | undefined {
+  const claimId = `evtcancel-${randomUUID()}`;
+  const claimedAt = input.claimedAt ?? new Date().toISOString();
+  const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
+    new Date(claimedAt).getTime() + EVENT_CLEANUP_CLAIM_LEASE_MS
+  ).toISOString();
+  return db.transaction(() => {
+    releaseExpiredEventCleanupClaims(db, claimedAt);
+    const result = db.run(
+      `INSERT INTO event_cleanup_claims (
+         event_id, claim_id, expected_event_updated_at, claimed_cleanup_at, claimed_at, lease_expires_at
+       )
+       SELECT id, ?, updated_at, cleanup_at, ?, ?
+         FROM event_records
+        WHERE id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+          AND updated_at = ?
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cleanup_claims cleanup
+             WHERE cleanup.event_id = event_records.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = event_records.id
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims delivery
+             WHERE delivery.event_id = event_records.id
+               AND delivery.status = 'sending'
+               AND delivery.lease_expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_edit_repairs repair
+             WHERE repair.event_id = event_records.id
+               AND repair.status = 'pending'
+               AND repair.execution_claim_id IS NOT NULL
+               AND repair.execution_lease_expires_at > ?
+          )`,
+      claimId,
+      claimedAt,
+      leaseExpiresAt,
+      input.eventId,
+      input.expectedUpdatedAt,
+      claimedAt,
+      claimedAt
+    );
+    if (result.changes !== 1) {
+      return undefined;
+    }
+    const event = getEvent(db, input.eventId);
+    if (!event) {
+      throw new Error(`Event ${input.eventId} disappeared while its cancellation claim was created.`);
+    }
+    return {
+      eventId: input.eventId,
+      claimId,
+      expectedEventUpdatedAt: input.expectedUpdatedAt,
+      claimedCleanupAt: event.cleanupAt,
+      claimedAt,
+      leaseExpiresAt
+    };
+  });
 }
 
 export function getEventCleanupClaim(db: PluginDatabase, eventId: string): EventCleanupClaim | undefined {
@@ -2062,6 +3268,19 @@ export function getEventCleanupClaim(db: PluginDatabase, eventId: string): Event
     eventId
   );
   return row ? eventCleanupClaimFromRow(row) : undefined;
+}
+
+export function getEventAnnouncementSendingLeaseExpiresAt(
+  db: PluginDatabase,
+  eventId: string
+): string | undefined {
+  const row = db.get<{ lease_expires_at: string | null }>(
+    `SELECT MAX(lease_expires_at) AS lease_expires_at
+       FROM event_announcement_delivery_claims
+      WHERE event_id = ? AND status = 'sending'`,
+    eventId
+  );
+  return row?.lease_expires_at ?? undefined;
 }
 
 export function renewEventCleanupClaim(db: PluginDatabase, input: {
@@ -2941,6 +4160,7 @@ export function markClaimedEventCleaned(db: PluginDatabase, input: {
     if (result.changes !== 1) {
       return false;
     }
+    supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cleanedAt);
     const released = releaseEventCleanupClaim(db, {
       eventId: input.eventId,
       claimId: input.claimId
@@ -3017,33 +4237,159 @@ export function markEventCancelled(db: PluginDatabase, input: {
   calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
   reason?: string | undefined;
 }): boolean {
-  const result = db.run(
-    `UPDATE event_records
-        SET event_status = 'cancelled',
-            calendar_status = ?,
-            cancelled_at = ?,
-            cancelled_by_wid = ?,
-            cancelled_by_label = ?,
-            cancel_reason = ?,
-            error = NULL,
-            updated_at = ?
-      WHERE id = ?
-        AND event_status = 'active'
-        AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
-        AND updated_at = ?
-        AND provisioning_recovery_generation IS NULL
-        AND provisioning_recovery_attempt IS NULL
-        AND provisioning_recovery_next_run_at IS NULL`,
-    input.calendarStatus ?? 'cancelled',
-    input.cancelledAt,
-    input.cancelledByWid,
-    input.cancelledByLabel,
-    input.reason ?? null,
-    input.cancelledAt,
-    input.eventId,
-    input.expectedUpdatedAt
+  return db.transaction(() => {
+    const result = db.run(
+      `UPDATE event_records
+          SET event_status = 'cancelled',
+              calendar_status = ?,
+              cancelled_at = ?,
+              cancelled_by_wid = ?,
+              cancelled_by_label = ?,
+              cancel_reason = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND updated_at = ?
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = event_records.id
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims delivery
+             WHERE delivery.event_id = event_records.id
+               AND delivery.status = 'sending'
+               AND delivery.lease_expires_at > ?
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_cleanup_claims cleanup
+             WHERE cleanup.event_id = event_records.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_edit_repairs repair
+             WHERE repair.event_id = event_records.id
+               AND repair.status = 'pending'
+               AND repair.execution_claim_id IS NOT NULL
+               AND repair.execution_lease_expires_at > ?
+          )`,
+      input.calendarStatus ?? 'cancelled',
+      input.cancelledAt,
+      input.cancelledByWid,
+      input.cancelledByLabel,
+      input.reason ?? null,
+      input.cancelledAt,
+      input.eventId,
+      input.expectedUpdatedAt,
+      input.cancelledAt,
+      input.cancelledAt
+    );
+    if (result.changes !== 1) {
+      return false;
+    }
+    supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cancelledAt);
+    return true;
+  });
+}
+
+export function markClaimedEventCancelled(db: PluginDatabase, input: {
+  eventId: string;
+  claimId: string;
+  expectedUpdatedAt: string;
+  cancelledAt: string;
+  cancelledByWid: string;
+  cancelledByLabel: string;
+  calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
+  reason?: string | undefined;
+}): boolean {
+  return db.transaction(() => {
+    const result = db.run(
+      `UPDATE event_records
+          SET event_status = 'cancelled',
+              calendar_status = ?,
+              cancelled_at = ?,
+              cancelled_by_wid = ?,
+              cancelled_by_label = ?,
+              cancel_reason = ?,
+              error = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status IN ('poll_closed', 'cleanup_failed')
+          AND updated_at = ?
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = event_records.id
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims delivery
+             WHERE delivery.event_id = event_records.id
+               AND delivery.status = 'sending'
+               AND delivery.lease_expires_at > ?
+          )
+          AND EXISTS (
+            SELECT 1 FROM event_cleanup_claims cleanup
+             WHERE cleanup.event_id = event_records.id
+               AND cleanup.claim_id = ?
+               AND cleanup.expected_event_updated_at = event_records.updated_at
+          )`,
+      input.calendarStatus ?? 'cancelled',
+      input.cancelledAt,
+      input.cancelledByWid,
+      input.cancelledByLabel,
+      input.reason ?? null,
+      input.cancelledAt,
+      input.eventId,
+      input.expectedUpdatedAt,
+      input.cancelledAt,
+      input.claimId
+    );
+    if (result.changes !== 1) {
+      return false;
+    }
+    supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cancelledAt);
+    if (!releaseEventCleanupClaim(db, { eventId: input.eventId, claimId: input.claimId })) {
+      throw new Error(`Cancellation claim ${input.claimId} disappeared for event ${input.eventId}.`);
+    }
+    return true;
+  });
+}
+
+function supersedeEventEditPresentationForTerminalTransition(
+  db: PluginDatabase,
+  eventId: string,
+  transitionedAt: string
+): void {
+  db.run(
+    `UPDATE event_announcement_delivery_claims
+        SET status = 'superseded', lease_expires_at = NULL, error = NULL, updated_at = ?
+      WHERE event_id = ?
+        AND kind IN ('event_edit', 'calendar_hint')
+        AND (
+          status IN ('pending', 'uncertain')
+          OR (status = 'sending' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+        )`,
+    transitionedAt,
+    eventId,
+    transitionedAt
   );
-  return result.changes === 1;
+  db.run(
+    `UPDATE event_edit_repairs
+        SET status = 'completed', last_error = NULL, completed_at = ?, updated_at = ?,
+            execution_claim_id = NULL, execution_lease_expires_at = NULL
+      WHERE event_id = ? AND status = 'pending'`,
+    transitionedAt,
+    transitionedAt,
+    eventId
+  );
 }
 
 export function updateEventCalendarStatus(db: PluginDatabase, input: {
@@ -3140,23 +4486,52 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
 
     const intent = normalizedEventAnnouncementIntent(input);
     const now = input.claimedAt ?? new Date().toISOString();
-    if (input.expectedEventUpdatedAt) {
-      const currentEvent = db.get<{ updated_at: string }>(
-        'SELECT updated_at FROM event_records WHERE id = ?',
-        input.eventId
+    const currentEvent = db.get<{
+      updated_at: string;
+      event_status: EventStatus;
+      group_lifecycle_status: EventGroupLifecycleStatus;
+    }>(
+      `SELECT updated_at, event_status, group_lifecycle_status
+         FROM event_records
+        WHERE id = ?`,
+      input.eventId
+    );
+    if (
+      !currentEvent ||
+      currentEvent.event_status === 'cancelled' ||
+      currentEvent.group_lifecycle_status === 'cleaned' ||
+      (input.expectedEventUpdatedAt && currentEvent.updated_at !== input.expectedEventUpdatedAt)
+    ) {
+      db.run(
+        `UPDATE event_announcement_delivery_claims
+            SET status = 'superseded', lease_expires_at = NULL, error = NULL, updated_at = ?
+          WHERE event_id = ? AND kind = ? AND delivery_key = ? AND status <> 'sent'`,
+        now,
+        input.eventId,
+        intent.kind,
+        intent.deliveryKey
       );
-      if (!currentEvent || currentEvent.updated_at !== input.expectedEventUpdatedAt) {
-        db.run(
-          `UPDATE event_announcement_delivery_claims
-              SET status = 'superseded', lease_expires_at = NULL, error = NULL, updated_at = ?
-            WHERE event_id = ? AND kind = ? AND delivery_key = ? AND status <> 'sent'`,
-          now,
-          input.eventId,
-          intent.kind,
-          intent.deliveryKey
-        );
-        return 'superseded';
-      }
+      return 'superseded';
+    }
+    const mutationFence = db.get<{ fenced: number }>(
+      `SELECT (
+          EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = ?
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )
+          OR EXISTS (
+            SELECT 1 FROM event_cleanup_claims cleanup
+             WHERE cleanup.event_id = ?
+          )
+        ) AS fenced`,
+      input.eventId,
+      input.eventId
+    );
+    if (Boolean(mutationFence?.fenced)) {
+      // The mutation may still fail and release its fence. Preserve the frozen
+      // intent so the same-key delivery can resume instead of losing it.
+      return 'already_claimed';
     }
     const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
       new Date(now).getTime() + EVENT_ANNOUNCEMENT_DELIVERY_LEASE_MS
@@ -3379,6 +4754,25 @@ export function getEventAnnouncementDeliveryClaim(
   return row ? eventAnnouncementDeliveryClaimFromRow(row) : undefined;
 }
 
+export function listRecoverableEventAnnouncementDeliveries(
+  db: PluginDatabase,
+  input: { kind?: EventAnnouncementDeliveryKind | undefined } = {}
+): StoredEventAnnouncementDeliveryClaim[] {
+  const rows = input.kind
+    ? db.all<EventAnnouncementDeliveryClaimRow>(
+      `SELECT * FROM event_announcement_delivery_claims
+        WHERE kind = ? AND status IN ('pending', 'sending', 'uncertain')
+        ORDER BY updated_at ASC, event_id ASC, delivery_key ASC`,
+      input.kind
+    )
+    : db.all<EventAnnouncementDeliveryClaimRow>(
+      `SELECT * FROM event_announcement_delivery_claims
+        WHERE status IN ('pending', 'sending', 'uncertain')
+        ORDER BY updated_at ASC, event_id ASC, kind ASC, delivery_key ASC`
+    );
+  return rows.map(eventAnnouncementDeliveryClaimFromRow);
+}
+
 export function getEventEditRepair(
   db: PluginDatabase,
   operationId: string
@@ -3409,33 +4803,125 @@ export function listPendingEventEditRepairs(
   return rows.map(eventEditRepairFromRow);
 }
 
+export function claimEventEditRepairExecution(db: PluginDatabase, input: {
+  operationId: string;
+  claimedAt?: string | undefined;
+  leaseExpiresAt?: string | undefined;
+}): EventEditRepairExecutionClaim | undefined {
+  const claimedAt = input.claimedAt ?? new Date().toISOString();
+  const leaseExpiresAt = input.leaseExpiresAt ?? new Date(
+    new Date(claimedAt).getTime() + EVENT_EDIT_REPAIR_EXECUTION_LEASE_MS
+  ).toISOString();
+  const claimId = `evteditrepair-${randomUUID()}`;
+  const claimed = db.run(
+    `UPDATE event_edit_repairs
+        SET execution_claim_id = ?, execution_lease_expires_at = ?, updated_at = ?
+      WHERE operation_id = ?
+        AND status = 'pending'
+        AND (
+          execution_claim_id IS NULL
+          OR execution_lease_expires_at IS NULL
+          OR execution_lease_expires_at <= ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cleanup_claims cleanup
+           WHERE cleanup.event_id = event_edit_repairs.event_id
+        )`,
+    claimId,
+    leaseExpiresAt,
+    claimedAt,
+    input.operationId,
+    claimedAt
+  );
+  return claimed.changes === 1
+    ? { operationId: input.operationId, claimId, leaseExpiresAt }
+    : undefined;
+}
+
+export function renewEventEditRepairExecution(db: PluginDatabase, input: {
+  operationId: string;
+  claimId: string;
+  leaseExpiresAt: string;
+}): boolean {
+  return db.run(
+    `UPDATE event_edit_repairs
+        SET execution_lease_expires_at = ?
+      WHERE operation_id = ?
+        AND status = 'pending'
+        AND execution_claim_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM event_cleanup_claims cleanup
+           WHERE cleanup.event_id = event_edit_repairs.event_id
+        )`,
+    input.leaseExpiresAt,
+    input.operationId,
+    input.claimId
+  ).changes === 1;
+}
+
+export function releaseEventEditRepairExecution(db: PluginDatabase, input: {
+  operationId: string;
+  claimId: string;
+}): boolean {
+  return db.run(
+    `UPDATE event_edit_repairs
+        SET execution_claim_id = NULL, execution_lease_expires_at = NULL
+      WHERE operation_id = ? AND execution_claim_id = ?`,
+    input.operationId,
+    input.claimId
+  ).changes === 1;
+}
+
+export function getEventEditRepairExecutionLeaseExpiresAt(
+  db: PluginDatabase,
+  eventId: string,
+  now: string = new Date().toISOString()
+): string | undefined {
+  const row = db.get<{ lease_expires_at: string | null }>(
+    `SELECT MAX(execution_lease_expires_at) AS lease_expires_at
+       FROM event_edit_repairs
+      WHERE event_id = ?
+        AND status = 'pending'
+        AND execution_claim_id IS NOT NULL
+        AND execution_lease_expires_at > ?`,
+    eventId,
+    now
+  );
+  return row?.lease_expires_at ?? undefined;
+}
+
 export function completeEventEditRepair(db: PluginDatabase, input: {
   operationId: string;
+  executionClaimId: string;
   completedAt?: string | undefined;
 }): boolean {
   const completedAt = input.completedAt ?? new Date().toISOString();
   return db.run(
     `UPDATE event_edit_repairs
-        SET status = 'completed', last_error = NULL, completed_at = ?, updated_at = ?
-      WHERE operation_id = ? AND status = 'pending'`,
+        SET status = 'completed', last_error = NULL, completed_at = ?, updated_at = ?,
+            execution_claim_id = NULL, execution_lease_expires_at = NULL
+      WHERE operation_id = ? AND status = 'pending' AND execution_claim_id = ?`,
     completedAt,
     completedAt,
-    input.operationId
+    input.operationId,
+    input.executionClaimId
   ).changes === 1;
 }
 
 export function markEventEditRepairPending(db: PluginDatabase, input: {
   operationId: string;
+  executionClaimId: string;
   reason: string;
   updatedAt?: string | undefined;
 }): boolean {
   return db.run(
     `UPDATE event_edit_repairs
         SET last_error = ?, updated_at = ?
-      WHERE operation_id = ? AND status = 'pending'`,
+      WHERE operation_id = ? AND status = 'pending' AND execution_claim_id = ?`,
     input.reason,
     input.updatedAt ?? new Date().toISOString(),
-    input.operationId
+    input.operationId,
+    input.executionClaimId
   ).changes === 1;
 }
 
@@ -3904,9 +5390,9 @@ export function markEventAnnouncementMessageDeleteFailed(
   reason: string
 ): void {
   db.run(
-    `UPDATE event_announcement_messages
+      `UPDATE event_announcement_messages
         SET delete_error = ?
-      WHERE id = ?`,
+      WHERE id = ? AND deleted_at IS NULL`,
     reason,
     id
   );
@@ -3916,6 +5402,8 @@ export function markUnclaimedEventFailed(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
   expectedUpdatedAt: string;
+  expectedPollGeneration: number;
+  expectedPollWaMsgId: string;
   reason: string;
   failedAt: string;
 }): boolean {
@@ -3932,14 +5420,23 @@ export function markUnclaimedEventFailed(db: PluginDatabase, input: {
         AND event_status = 'active'
         AND group_lifecycle_status = 'poll_open'
         AND updated_at = ?
+        AND poll_generation = ?
+        AND poll_wa_msg_id = ?
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
-        AND provisioning_recovery_next_run_at IS NULL`,
+        AND provisioning_recovery_next_run_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )`,
     input.reason,
     input.failedAt,
     input.eventId,
     input.scopeId,
-    input.expectedUpdatedAt
+    input.expectedUpdatedAt,
+    input.expectedPollGeneration,
+    input.expectedPollWaMsgId
   );
   return result.changes === 1;
 }
@@ -3969,6 +5466,11 @@ export function claimInitialEventPreCreateProvisioningAttempt(db: PluginDatabase
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
         AND provisioning_recovery_next_run_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )
         AND (
           (origin IN ('created', 'adopted_poll')
             AND event_status = 'active'
@@ -4022,7 +5524,12 @@ export function claimInitialBoundPlannedEventProvisioningAttempt(db: PluginDatab
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
         AND provisioning_recovery_next_run_at IS NULL
-        AND provisioning_recovery_halted_at IS NULL`,
+        AND provisioning_recovery_halted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )`,
     input.generation,
     input.attempt,
     input.claimedAt,
@@ -4979,7 +6486,12 @@ export function markUnclaimedEventPreCreateProvisioningMissed(db: PluginDatabase
         AND cleanup_at = ?
         AND provisioning_recovery_generation IS NULL
         AND provisioning_recovery_attempt IS NULL
-        AND provisioning_recovery_next_run_at IS NULL`,
+        AND provisioning_recovery_next_run_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )`,
     input.reason,
     input.missedAt,
     input.eventId,
@@ -5020,12 +6532,77 @@ export function upsertVote(db: PluginDatabase, eventId: string, vote: PluginPoll
   );
 }
 
+export function upsertVoteForOpenPollGeneration(db: PluginDatabase, input: {
+  eventId: string;
+  pollWaMsgId: string;
+  pollGeneration: number;
+  vote: PluginPollVote;
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id FROM event_records
+        WHERE id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND poll_wa_msg_id = ?
+          AND poll_generation = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements
+             WHERE event_poll_replacements.event_id = event_records.id
+               AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+          )`,
+      input.eventId,
+      input.pollWaMsgId,
+      input.pollGeneration
+    );
+    if (!current) {
+      return false;
+    }
+    upsertVote(db, input.eventId, input.vote);
+    return true;
+  });
+}
+
 export function replaceVotes(db: PluginDatabase, eventId: string, votes: PluginPollVote[]): void {
   db.transaction(() => {
     db.run('DELETE FROM event_votes WHERE event_id = ?', eventId);
     for (const vote of votes) {
       upsertVote(db, eventId, vote);
     }
+  });
+}
+
+export function replaceVotesForOpenPollGeneration(db: PluginDatabase, input: {
+  eventId: string;
+  pollWaMsgId: string;
+  pollGeneration: number;
+  votes: PluginPollVote[];
+}): boolean {
+  return db.transaction(() => {
+    const current = db.get<{ id: string }>(
+      `SELECT id FROM event_records
+        WHERE id = ?
+          AND event_status = 'active'
+          AND group_lifecycle_status = 'poll_open'
+          AND poll_wa_msg_id = ?
+          AND poll_generation = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements
+             WHERE event_poll_replacements.event_id = event_records.id
+               AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+          )`,
+      input.eventId,
+      input.pollWaMsgId,
+      input.pollGeneration
+    );
+    if (!current) {
+      return false;
+    }
+    db.run('DELETE FROM event_votes WHERE event_id = ?', input.eventId);
+    for (const vote of input.votes) {
+      upsertVote(db, input.eventId, vote);
+    }
+    return true;
   });
 }
 
@@ -6011,6 +7588,7 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     actorLabel: row.actor_label,
     ...(row.announcement_group_wid ? { announcementGroupWid: row.announcement_group_wid } : {}),
     ...(row.poll_wa_msg_id ? { pollWaMsgId: row.poll_wa_msg_id } : {}),
+    pollGeneration: Number(row.poll_generation ?? (row.poll_wa_msg_id ? 1 : 0)),
     ...(row.poll_question ? { pollQuestion: row.poll_question } : {}),
     pollOptions: parseJson<StoredEventPollOption[]>(row.poll_options_json, []),
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
@@ -6050,6 +7628,78 @@ function eventFromRow(row: EventRow): StoredEventRecord {
       : {}),
     ...(row.provisioning_recovery_halted_at
       ? { provisioningRecoveryHaltedAt: row.provisioning_recovery_halted_at }
+      : {})
+  };
+}
+
+function requireEventPollReplacement(
+  db: PluginDatabase,
+  operationId: string
+): StoredEventPollReplacement {
+  const replacement = getEventPollReplacement(db, operationId);
+  if (!replacement) {
+    throw new Error(`Event poll replacement ${operationId} does not exist.`);
+  }
+  return replacement;
+}
+
+function eventPollReplacementFromRow(row: EventPollReplacementRow): StoredEventPollReplacement {
+  return {
+    operationId: row.operation_id,
+    eventId: row.event_id,
+    scopeId: row.scope_id,
+    status: row.status,
+    expectedEventUpdatedAt: row.expected_event_updated_at,
+    oldPollWaMsgId: row.old_poll_wa_msg_id,
+    oldPollGeneration: Number(row.old_poll_generation),
+    target: parseJson<EventPollReplacementTarget>(row.target_json, {
+      profileLabel: '',
+      profileRevision: '',
+      pollQuestion: '',
+      pollOptions: [],
+      responseClasses: [],
+      answers: {},
+      startsAt: '',
+      startsAtUtc: '',
+      timezone: 'UTC',
+      localDate: '',
+      closeAt: '',
+      cleanupAt: '',
+      groupTitle: '',
+      calendarDurationMinutes: 0,
+      allowMultipleAnswers: false
+    }),
+    editorIdentityId: row.editor_identity_id,
+    editorWid: row.editor_wid,
+    editorLabel: row.editor_label,
+    locale: row.locale,
+    sourcePluginId: row.source_plugin_id,
+    artifactIds: parseJson<string[]>(row.artifact_ids_json, []),
+    publishIdempotencyKey: row.publish_idempotency_key,
+    ...(row.new_poll_wa_msg_id ? { newPollWaMsgId: row.new_poll_wa_msg_id } : {}),
+    ...(row.publication_claim_token
+      ? { publicationClaimToken: row.publication_claim_token }
+      : {}),
+    ...(row.publication_lease_expires_at
+      ? { publicationLeaseExpiresAt: row.publication_lease_expires_at }
+      : {}),
+    ...(row.publication_started_at ? { publicationStartedAt: row.publication_started_at } : {}),
+    failureCount: Number(row.failure_count),
+    ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.published_at ? { publishedAt: row.published_at } : {}),
+    ...(row.swapped_at ? { swappedAt: row.swapped_at } : {}),
+    ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+    ...(row.retired_at ? { retiredAt: row.retired_at } : {}),
+    ...(row.retirement_error ? { retirementError: row.retirement_error } : {}),
+    retirementFailureCount: Number(row.retirement_failure_count),
+    ...(row.receipt_released_at ? { receiptReleasedAt: row.receipt_released_at } : {}),
+    ...(row.receipt_release_error ? { receiptReleaseError: row.receipt_release_error } : {}),
+    receiptReleaseFailureCount: Number(row.receipt_release_failure_count),
+    ...(row.receipt_release_next_attempt_at
+      ? { receiptReleaseNextAttemptAt: row.receipt_release_next_attempt_at }
       : {})
   };
 }
@@ -6101,7 +7751,15 @@ function eventEditRepairFromRow(row: EventEditRepairRow): StoredEventEditRepair 
     ...(row.announcement_delivery_key
       ? { announcementDeliveryKey: row.announcement_delivery_key }
       : {}),
+    ...(row.calendar_hint_delivery_key
+      ? { calendarHintDeliveryKey: row.calendar_hint_delivery_key }
+      : {}),
+    ...(row.calendar_hint_locale ? { calendarHintLocale: row.calendar_hint_locale } : {}),
     status: row.status,
+    ...(row.execution_claim_id ? { executionClaimId: row.execution_claim_id } : {}),
+    ...(row.execution_lease_expires_at
+      ? { executionLeaseExpiresAt: row.execution_lease_expires_at }
+      : {}),
     ...(row.last_error ? { lastError: row.last_error } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -6135,16 +7793,23 @@ function normalizedEventEditRepairIntent(input: EventEditRepairIntent): EventEdi
   const operationId = requiredEventOperationValue(input.operationId, 'edit operation id');
   const scopeId = requiredEventOperationValue(input.scopeId, 'edit scope id');
   const targetGroupTitle = requiredEventOperationValue(input.targetGroupTitle, 'edit target group title', false);
-  const calendarId = requiredEventOperationValue(input.calendarId, 'edit calendar id');
+  const calendarId = input.calendarId.trim();
   const subgroupChatId = input.subgroupChatId?.trim() || undefined;
   const announcementDeliveryKey = input.announcementDeliveryKey?.trim() || undefined;
+  const calendarHintDeliveryKey = input.calendarHintDeliveryKey?.trim() || undefined;
+  const calendarHintLocale = input.calendarHintLocale?.trim() || undefined;
+  if (Boolean(calendarHintDeliveryKey) !== Boolean(calendarHintLocale)) {
+    throw new Error('Event calendar-hint delivery key and locale must be persisted together.');
+  }
   return {
     operationId,
     scopeId,
     ...(subgroupChatId ? { subgroupChatId } : {}),
     targetGroupTitle,
     calendarId,
-    ...(announcementDeliveryKey ? { announcementDeliveryKey } : {})
+    ...(announcementDeliveryKey ? { announcementDeliveryKey } : {}),
+    ...(calendarHintDeliveryKey ? { calendarHintDeliveryKey } : {}),
+    ...(calendarHintLocale ? { calendarHintLocale } : {})
   };
 }
 

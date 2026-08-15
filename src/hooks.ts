@@ -35,6 +35,7 @@ import {
   eventAnnouncementTransportIdempotencyKey,
   sendClaimedEventAnnouncement
 } from './announcementDelivery';
+import { sendEventCalendarHint } from './calendarHint';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
@@ -70,6 +71,7 @@ import {
   expireKnownChildEventProvisioningForCleanup,
   getEvent,
   getEventAnnouncementDeliveryClaim,
+  getCalendarPublicationStatus,
   getEventRequiredCreatorReference,
   getUnplannedEventFinalization,
   getOpenEventByEquivalentPoll,
@@ -218,6 +220,7 @@ function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): v
     running = true;
     try {
       await recoverDirtyEventCalendarPublications(context);
+      await recoverHealthyEventCalendarHintDeliveryJobs(context);
     } catch (error) {
       context.logger.error({ error }, 'official.community-events calendar publication recovery failed');
     } finally {
@@ -830,15 +833,62 @@ export async function recoverEventAnnouncementDeliveryJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
 ): Promise<number> {
+  const eventGroupHints = await enqueueRecoverableEventAnnouncementDeliveryJobs(
+    context,
+    options,
+    'event_group_hint'
+  );
+  const calendarHints = await enqueueRecoverableEventAnnouncementDeliveryJobs(
+    context,
+    options,
+    'calendar_hint',
+    true
+  );
+  return eventGroupHints + calendarHints;
+}
+
+async function recoverHealthyEventCalendarHintDeliveryJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  return enqueueRecoverableEventAnnouncementDeliveryJobs(
+    context,
+    options,
+    'calendar_hint',
+    true
+  );
+}
+
+async function enqueueRecoverableEventAnnouncementDeliveryJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions,
+  kind: StoredEventAnnouncementDeliveryClaim['kind'],
+  requireHealthyCalendarPublication = false
+): Promise<number> {
   const db = eventsDatabase(context.databases);
   const now = options.now ?? new Date();
   let enqueued = 0;
-  for (const delivery of listRecoverableEventAnnouncementDeliveries(db, {
-    kind: 'event_group_hint'
-  })) {
+  for (const delivery of listRecoverableEventAnnouncementDeliveries(db, { kind })) {
     const event = getEvent(db, delivery.eventId);
     if (!event || event.scopeId !== delivery.scopeId) {
       continue;
+    }
+    if (
+      requireHealthyCalendarPublication &&
+      delivery.kind === 'calendar_hint' &&
+      !delivery.text
+    ) {
+      let calendarId = delivery.calendarHintIntent?.calendarId;
+      if (!calendarId) {
+        try {
+          calendarId = resolvedEventCalendarId(event);
+        } catch {
+          continue;
+        }
+      }
+      if (!calendarId || getCalendarPublicationStatus(db, event.scopeId, calendarId)?.ok !== true) {
+        continue;
+      }
     }
     const leaseExpiresAt = delivery.leaseExpiresAt
       ? new Date(delivery.leaseExpiresAt)
@@ -1318,7 +1368,9 @@ async function retryEventAnnouncementDelivery(
   const deliveryKey = typeof payload.deliveryKey === 'string'
     ? payload.deliveryKey.trim()
     : '';
-  const kind = payload.kind === 'event_group_hint' ? payload.kind : undefined;
+  const kind = payload.kind === 'event_group_hint' || payload.kind === 'calendar_hint'
+    ? payload.kind
+    : undefined;
   const attempt = jobPayloadAttempt(job.payload);
   if (!eventId || !kind || !deliveryKey) {
     return [audit('events.job.skipped', {
@@ -1338,19 +1390,33 @@ async function retryEventAnnouncementDelivery(
     })];
   }
   const record = getEvent(db, eventId);
-  if (
+  const invalidLifecycle =
     !record ||
     record.scopeId !== delivery.scopeId ||
     record.eventStatus !== 'active' ||
-    record.groupLifecycleStatus !== 'poll_closed'
-  ) {
+    record.groupLifecycleStatus === 'cleaned' ||
+    (kind === 'event_group_hint' && record.groupLifecycleStatus !== 'poll_closed');
+  const staleCalendarHint = Boolean(
+    record &&
+    kind === 'calendar_hint' &&
+    delivery.calendarHintIntent &&
+    record.updatedAt !== delivery.calendarHintIntent.expectedEventUpdatedAt
+  );
+  if (invalidLifecycle || staleCalendarHint) {
     supersedeEventAnnouncementDelivery(db, { eventId, kind, deliveryKey });
     return [audit('events.announcement_delivery.superseded', {
       eventId,
       kind,
       deliveryKey,
-      reason: 'event is no longer an active closed poll'
+      reason: staleCalendarHint
+        ? 'event changed after the calendar-hint intent was prepared'
+        : kind === 'event_group_hint'
+          ? 'event is no longer an active closed poll'
+          : 'event is no longer active'
     })];
+  }
+  if (!record) {
+    return [];
   }
 
   const now = new Date();
@@ -1367,6 +1433,9 @@ async function retryEventAnnouncementDelivery(
       Number.isFinite(retryAt.getTime()) ? retryAt : undefined,
       'delivery is fenced by an active mutation or send lease'
     );
+  }
+  if (kind === 'calendar_hint' && !delivery.text) {
+    return retryPreparedEventCalendarHint(context, record, delivery, attempt);
   }
   if (!context.sendText || !delivery.text || !delivery.idempotencyKey) {
     return eventAnnouncementDeliveryRetryActions(
@@ -1388,6 +1457,9 @@ async function retryEventAnnouncementDelivery(
       chatId: delivery.chatId,
       text: delivery.text,
       idempotencyKey: delivery.idempotencyKey,
+      ...(kind === 'calendar_hint' && delivery.calendarHintIntent
+        ? { expectedEventUpdatedAt: delivery.calendarHintIntent.expectedEventUpdatedAt }
+        : {}),
       sender: { sendText: context.sendText }
     });
     if (result.status === 'already_claimed') {
@@ -1411,6 +1483,157 @@ async function retryEventAnnouncementDelivery(
     return eventAnnouncementDeliveryRetryActions(
       record,
       getEventAnnouncementDeliveryClaim(db, eventId, kind, deliveryKey) ?? delivery,
+      attempt,
+      undefined,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+async function retryPreparedEventCalendarHint(
+  context: PluginRuntimeContext,
+  event: StoredEventRecord,
+  delivery: StoredEventAnnouncementDeliveryClaim,
+  attempt: number
+): Promise<PluginAction[]> {
+  const intent = delivery.calendarHintIntent;
+  const db = eventsDatabase(context.databases);
+  if (!intent) {
+    supersedeEventAnnouncementDelivery(db, {
+      eventId: event.id,
+      kind: 'calendar_hint',
+      deliveryKey: delivery.deliveryKey
+    });
+    return [audit('events.announcement_delivery.superseded', {
+      eventId: event.id,
+      kind: 'calendar_hint',
+      deliveryKey: delivery.deliveryKey,
+      reason: 'persisted calendar-hint delivery is missing its retry intent'
+    })];
+  }
+  if (!context.sendText) {
+    return eventAnnouncementDeliveryRetryActions(
+      event,
+      delivery,
+      attempt,
+      undefined,
+      'plugin runtime does not expose text delivery'
+    );
+  }
+
+  try {
+    if (!await context.enabledFor(event.scopeId)) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey
+      });
+      return [audit('events.announcement_delivery.superseded', {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey,
+        reason: 'community events is disabled for the delivery scope'
+      })];
+    }
+    const currentCalendarId = resolvedEventCalendarId(event);
+    if (currentCalendarId !== intent.calendarId) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey
+      });
+      return [audit('events.announcement_delivery.superseded', {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey,
+        reason: 'event calendar ownership no longer matches the prepared hint'
+      })];
+    }
+    const config = parseEventsConfig(await context.configFor(event.scopeId));
+    const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+    if (!profile) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey
+      });
+      return [audit('events.announcement_delivery.superseded', {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey,
+        reason: 'event profile is no longer configured'
+      })];
+    }
+    const result = await sendEventCalendarHint({
+      context,
+      runtime: { config: context.config, databases: context.databases },
+      db,
+      activeTransport: {
+        sendText: (chatId, text, options) => context.sendText!(chatId, text, options)
+      },
+      trigger: intent.trigger,
+      scopeId: event.scopeId,
+      announcementGroupWid: delivery.chatId,
+      event,
+      profile,
+      calendars: config.calendars,
+      timezone: intent.timezone,
+      locale: intent.locale,
+      creatorDisplayName: intent.creatorDisplayName,
+      ...(intent.groupJoinUrl ? { groupJoinUrl: intent.groupJoinUrl } : {}),
+      ...(intent.subgroupChatId ? { subgroupChatId: intent.subgroupChatId } : {}),
+      expectedEventUpdatedAt: intent.expectedEventUpdatedAt,
+      deliveryKey: delivery.deliveryKey
+    });
+    const current = getEventAnnouncementDeliveryClaim(
+      db,
+      event.id,
+      'calendar_hint',
+      delivery.deliveryKey
+    ) ?? delivery;
+    if (
+      result === 'sent' ||
+      result === 'already_sent' ||
+      result === 'superseded' ||
+      result === 'disabled' ||
+      current.status === 'sent' ||
+      current.status === 'superseded'
+    ) {
+      return [audit('events.announcement_delivery.settled', {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey,
+        status: current.status
+      })];
+    }
+    if (result === 'skipped') {
+      return [audit('events.announcement_delivery.pending', {
+        eventId: event.id,
+        kind: 'calendar_hint',
+        deliveryKey: delivery.deliveryKey,
+        attempt,
+        reason: 'calendar subscription URL remains unavailable'
+      })];
+    }
+    const retryAt = current.leaseExpiresAt ? new Date(current.leaseExpiresAt) : undefined;
+    return eventAnnouncementDeliveryRetryActions(
+      event,
+      current,
+      attempt,
+      result === 'already_claimed' ? retryAt : undefined,
+      result === 'failed'
+        ? current.error || 'calendar-hint delivery failed'
+        : 'calendar-hint delivery remains pending'
+    );
+  } catch (error) {
+    return eventAnnouncementDeliveryRetryActions(
+      event,
+      getEventAnnouncementDeliveryClaim(
+        db,
+        event.id,
+        'calendar_hint',
+        delivery.deliveryKey
+      ) ?? delivery,
       attempt,
       undefined,
       error instanceof Error ? error.message : String(error)

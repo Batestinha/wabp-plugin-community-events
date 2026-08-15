@@ -137,6 +137,25 @@ export interface EventAnnouncementDeliveryIntent {
   idempotencyKey: string;
 }
 
+export type EventCalendarHintTrigger = 'poll_published' | 'unplanned_created' | 'unplanned_recovery';
+
+export interface EventCalendarHintDeliveryIntent {
+  trigger: EventCalendarHintTrigger;
+  calendarId: string;
+  locale: string;
+  timezone: string;
+  creatorDisplayName: string;
+  expectedEventUpdatedAt: string;
+  groupJoinUrl?: string | undefined;
+  subgroupChatId?: string | undefined;
+}
+
+export type EventCalendarHintIntentPreparationResult =
+  | 'prepared'
+  | 'already_sent'
+  | 'already_claimed'
+  | 'superseded';
+
 export interface EventEditRepairIntent {
   operationId: string;
   scopeId: string;
@@ -496,6 +515,7 @@ export interface StoredEventAnnouncementDeliveryClaim {
   leaseExpiresAt?: string | undefined;
   messageId?: string | undefined;
   error?: string | undefined;
+  calendarHintIntent?: EventCalendarHintDeliveryIntent | undefined;
   claimedAt: string;
   updatedAt: string;
 }
@@ -722,6 +742,7 @@ interface EventAnnouncementDeliveryClaimRow extends PluginDatabaseRow {
   lease_expires_at: string | null;
   message_id: string | null;
   error: string | null;
+  calendar_hint_intent_json: string | null;
   claimed_at: string;
   updated_at: string;
 }
@@ -4456,6 +4477,170 @@ export function recordEventAnnouncementMessage(db: PluginDatabase, input: {
   return eventAnnouncementMessageFromRow(row);
 }
 
+export function prepareEventCalendarHintDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  deliveryKey: string;
+  chatId: string;
+  idempotencyKey: string;
+  intent: EventCalendarHintDeliveryIntent;
+  preparedAt?: string | undefined;
+}): EventCalendarHintIntentPreparationResult {
+  return db.transaction(() => {
+    const deliveryKey = requiredEventOperationValue(input.deliveryKey, 'calendar-hint delivery key');
+    const scopeId = requiredEventOperationValue(input.scopeId, 'calendar-hint scope id');
+    const chatId = requiredEventOperationValue(input.chatId, 'calendar-hint chat id');
+    const idempotencyKey = requiredEventOperationValue(
+      input.idempotencyKey,
+      'calendar-hint idempotency key'
+    );
+    const intent = normalizedEventCalendarHintDeliveryIntent(input.intent);
+    const intentJson = JSON.stringify(intent);
+    const now = input.preparedAt ?? new Date().toISOString();
+    const existingMessage = db.get<{ id: string }>(
+      `SELECT id
+         FROM event_announcement_messages
+        WHERE event_id = ?
+          AND kind = 'calendar_hint'
+          AND delivery_key = ?
+        LIMIT 1`,
+      input.eventId,
+      deliveryKey
+    );
+    if (existingMessage) {
+      return 'already_sent';
+    }
+
+    const currentEvent = db.get<{
+      scope_id: string;
+      updated_at: string;
+      event_status: EventStatus;
+      group_lifecycle_status: EventGroupLifecycleStatus;
+    }>(
+      `SELECT scope_id, updated_at, event_status, group_lifecycle_status
+         FROM event_records
+        WHERE id = ?`,
+      input.eventId
+    );
+    if (
+      !currentEvent ||
+      currentEvent.scope_id !== scopeId ||
+      currentEvent.updated_at !== intent.expectedEventUpdatedAt ||
+      currentEvent.event_status === 'cancelled' ||
+      currentEvent.group_lifecycle_status === 'cleaned'
+    ) {
+      db.run(
+        `UPDATE event_announcement_delivery_claims
+            SET status = 'superseded', lease_expires_at = NULL, error = NULL, updated_at = ?
+          WHERE event_id = ?
+            AND kind = 'calendar_hint'
+            AND delivery_key = ?
+            AND status <> 'sent'`,
+        now,
+        input.eventId,
+        deliveryKey
+      );
+      return 'superseded';
+    }
+
+    const inserted = db.run(
+      `INSERT INTO event_announcement_delivery_claims (
+         event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+         lease_expires_at, message_id, error, calendar_hint_intent_json, claimed_at, updated_at
+       ) VALUES (?, 'calendar_hint', ?, ?, ?, 'pending', NULL, ?, NULL, NULL, NULL, ?, ?, ?)
+       ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
+      input.eventId,
+      deliveryKey,
+      scopeId,
+      chatId,
+      idempotencyKey,
+      intentJson,
+      now,
+      now
+    );
+    if (inserted.changes === 1) {
+      return 'prepared';
+    }
+
+    const existing = getEventAnnouncementDeliveryClaim(
+      db,
+      input.eventId,
+      'calendar_hint',
+      deliveryKey
+    );
+    if (existing?.status === 'sent') {
+      return 'already_sent';
+    }
+    if (existing?.status === 'superseded') {
+      return 'superseded';
+    }
+    if (!existing) {
+      return 'already_claimed';
+    }
+    if (
+      existing.scopeId !== scopeId ||
+      existing.chatId !== chatId ||
+      existing.idempotencyKey !== idempotencyKey
+    ) {
+      throw new Error(
+        `Persisted calendar_hint delivery ${deliveryKey} does not match the requested announcement intent.`
+      );
+    }
+    if (existing.calendarHintIntent) {
+      if (JSON.stringify(existing.calendarHintIntent) !== intentJson) {
+        throw new Error(
+          `Persisted calendar_hint delivery ${deliveryKey} does not match the requested calendar-hint intent.`
+        );
+      }
+    } else if (!existing.text) {
+      db.run(
+        `UPDATE event_announcement_delivery_claims
+            SET calendar_hint_intent_json = ?, updated_at = ?
+          WHERE event_id = ?
+            AND kind = 'calendar_hint'
+            AND delivery_key = ?
+            AND calendar_hint_intent_json IS NULL
+            AND text IS NULL
+            AND status IN ('pending', 'uncertain')`,
+        intentJson,
+        now,
+        input.eventId,
+        deliveryKey
+      );
+    }
+    if (existing.status === 'sending') {
+      const leaseExpiresAt = existing.leaseExpiresAt
+        ? new Date(existing.leaseExpiresAt).getTime()
+        : Number.NaN;
+      if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt > Date.now()) {
+        return 'already_claimed';
+      }
+    }
+    return 'prepared';
+  });
+}
+
+export function deferEventCalendarHintDelivery(db: PluginDatabase, input: {
+  eventId: string;
+  deliveryKey: string;
+  reason: string;
+  updatedAt?: string | undefined;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_announcement_delivery_claims
+        SET error = ?, lease_expires_at = NULL, updated_at = ?
+      WHERE event_id = ?
+        AND kind = 'calendar_hint'
+        AND delivery_key = ?
+        AND status = 'pending'`,
+    input.reason.trim() || 'calendar hint is waiting for retry',
+    input.updatedAt ?? new Date().toISOString(),
+    input.eventId,
+    input.deliveryKey
+  );
+  return result.changes === 1;
+}
+
 export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;
@@ -4563,10 +4748,14 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
     if (!existingClaim) {
       return 'already_claimed';
     }
+    const materializesPreparedCalendarHint =
+      existingClaim.kind === 'calendar_hint' &&
+      !existingClaim.text &&
+      Boolean(existingClaim.calendarHintIntent);
     if (
       existingClaim.scopeId !== intent.scopeId ||
       existingClaim.chatId !== intent.chatId ||
-      existingClaim.text !== intent.text ||
+      (!materializesPreparedCalendarHint && existingClaim.text !== intent.text) ||
       existingClaim.idempotencyKey !== intent.idempotencyKey
     ) {
       throw new Error(
@@ -4577,6 +4766,8 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
     const reacquired = db.run(
       `UPDATE event_announcement_delivery_claims
           SET status = 'sending',
+              text = ?,
+              idempotency_key = ?,
               lease_expires_at = ?,
               error = NULL,
               claimed_at = ?,
@@ -4588,6 +4779,8 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
             status IN ('pending', 'uncertain')
             OR (status = 'sending' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
           )`,
+      intent.text,
+      intent.idempotencyKey,
       leaseExpiresAt,
       now,
       now,
@@ -7722,6 +7915,9 @@ function eventAnnouncementMessageFromRow(row: EventAnnouncementMessageRow): Stor
 function eventAnnouncementDeliveryClaimFromRow(
   row: EventAnnouncementDeliveryClaimRow
 ): StoredEventAnnouncementDeliveryClaim {
+  const calendarHintIntent = eventCalendarHintDeliveryIntentFromJson(
+    row.calendar_hint_intent_json
+  );
   return {
     eventId: row.event_id,
     kind: row.kind,
@@ -7734,6 +7930,7 @@ function eventAnnouncementDeliveryClaimFromRow(
     ...(row.lease_expires_at ? { leaseExpiresAt: row.lease_expires_at } : {}),
     ...(row.message_id ? { messageId: row.message_id } : {}),
     ...(row.error ? { error: row.error } : {}),
+    ...(calendarHintIntent ? { calendarHintIntent } : {}),
     claimedAt: row.claimed_at,
     updatedAt: row.updated_at
   };
@@ -7787,6 +7984,56 @@ function normalizedEventAnnouncementIntent(
   const text = requiredEventOperationValue(input.text, 'announcement text', false);
   const idempotencyKey = requiredEventOperationValue(input.idempotencyKey, 'announcement idempotency key');
   return { scopeId, kind: input.kind, deliveryKey, chatId, text, idempotencyKey };
+}
+
+function normalizedEventCalendarHintDeliveryIntent(
+  input: EventCalendarHintDeliveryIntent
+): EventCalendarHintDeliveryIntent {
+  const trigger = input.trigger;
+  if (!['poll_published', 'unplanned_created', 'unplanned_recovery'].includes(trigger)) {
+    throw new Error(`Unknown calendar-hint trigger: ${String(trigger)}`);
+  }
+  const calendarId = requiredEventOperationValue(input.calendarId, 'calendar-hint calendar id');
+  const locale = requiredEventOperationValue(input.locale, 'calendar-hint locale');
+  const timezone = requiredEventOperationValue(input.timezone, 'calendar-hint timezone');
+  const creatorDisplayName = requiredEventOperationValue(
+    input.creatorDisplayName,
+    'calendar-hint creator display name',
+    false
+  );
+  const expectedEventUpdatedAt = requiredEventOperationValue(
+    input.expectedEventUpdatedAt,
+    'calendar-hint event revision'
+  );
+  const groupJoinUrl = input.groupJoinUrl?.trim() || undefined;
+  const subgroupChatId = input.subgroupChatId?.trim() || undefined;
+  return {
+    trigger,
+    calendarId,
+    locale,
+    timezone,
+    creatorDisplayName,
+    expectedEventUpdatedAt,
+    ...(groupJoinUrl ? { groupJoinUrl } : {}),
+    ...(subgroupChatId ? { subgroupChatId } : {})
+  };
+}
+
+function eventCalendarHintDeliveryIntentFromJson(
+  value: string | null
+): EventCalendarHintDeliveryIntent | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(value) as Partial<EventCalendarHintDeliveryIntent>;
+    if (!parsed || typeof parsed !== 'object') {
+      return undefined;
+    }
+    return normalizedEventCalendarHintDeliveryIntent(parsed as EventCalendarHintDeliveryIntent);
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizedEventEditRepairIntent(input: EventEditRepairIntent): EventEditRepairIntent {

@@ -2,6 +2,7 @@ import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import {
+  eventAnnouncementTransportIdempotencyKey,
   persistedEventAnnouncementDisposition,
   sendClaimedEventAnnouncement
 } from './announcementDelivery';
@@ -12,17 +13,25 @@ import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import {
   assertScopeEventCalendarOwnershipResolved,
+  deferEventCalendarHintDelivery,
   eventsDatabase,
   getEventAnnouncementDeliveryClaim,
   getCalendarPublicationStatus,
+  prepareEventCalendarHintDelivery,
   resolvedEventCalendarId,
+  supersedeEventAnnouncementDelivery,
+  type EventCalendarHintTrigger,
   type StoredEventRecord
 } from './store';
 
-export type CalendarHintTrigger = 'poll_published' | 'unplanned_created' | 'unplanned_recovery';
+export type CalendarHintTrigger = EventCalendarHintTrigger;
 
 export interface CalendarHintTextTransport {
-  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+  sendText(
+    chatId: string,
+    text: string,
+    options?: { idempotencyKey?: string | undefined }
+  ): Promise<{ messageId?: string | undefined }>;
 }
 
 export type EventCalendarHintResult =
@@ -62,12 +71,25 @@ export async function sendEventCalendarHint(input: {
   const enabled = input.trigger === 'poll_published'
     ? hint.sendOnPollPublished
     : hint.sendOnUnplannedCreated;
-  if (!enabled) {
-    return 'disabled';
-  }
   const runtime = input.runtime;
   const db = input.db ?? eventsDatabase(runtime.databases);
   const deliveryKey = input.deliveryKey?.trim() || 'initial';
+  if (!enabled) {
+    const existing = getEventAnnouncementDeliveryClaim(
+      db,
+      input.event.id,
+      'calendar_hint',
+      deliveryKey
+    );
+    if (existing && existing.status !== 'sent') {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      });
+    }
+    return 'disabled';
+  }
   const persistedDelivery = persistedEventAnnouncementDisposition(db, input.event.id, 'calendar_hint', deliveryKey);
   if (persistedDelivery === 'already_sent') {
     return persistedDelivery;
@@ -89,22 +111,70 @@ export async function sendEventCalendarHint(input: {
   }
   const template = hint.template.trim() ? hint.template : '';
   let calendarId = '';
+  let intentPrepared = false;
   try {
     calendarId = resolvedEventCalendarId(input.event) ?? '';
     assertScopeEventCalendarOwnershipResolved(db, input.scopeId);
     const calendar = calendarId ? input.calendars.find((candidate) => candidate.id === calendarId) : undefined;
     if (!template) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      });
       await recordCalendarHintSkipped(input, 'empty_template', calendarId);
       return 'skipped';
     }
     if (!calendarId || !calendar) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      });
       await recordCalendarHintSkipped(input, 'calendar_not_configured', calendarId);
       return 'skipped';
     }
     if (!calendar.enabled) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      });
       await recordCalendarHintSkipped(input, 'calendar_disabled', calendarId);
       return 'skipped';
     }
+    const expectedEventUpdatedAt = input.expectedEventUpdatedAt ?? input.event.updatedAt;
+    const preparation = prepareEventCalendarHintDelivery(db, {
+      eventId: input.event.id,
+      scopeId: input.scopeId,
+      deliveryKey,
+      chatId: input.announcementGroupWid,
+      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      }),
+      intent: {
+        trigger: input.trigger,
+        calendarId,
+        locale: input.locale,
+        timezone: input.timezone,
+        creatorDisplayName: input.creatorDisplayName,
+        expectedEventUpdatedAt,
+        ...(input.groupJoinUrl ? { groupJoinUrl: input.groupJoinUrl } : {}),
+        ...(input.subgroupChatId ? { subgroupChatId: input.subgroupChatId } : {})
+      }
+    });
+    if (preparation === 'already_sent') {
+      return 'already_sent';
+    }
+    if (preparation === 'already_claimed') {
+      return 'already_claimed';
+    }
+    if (preparation === 'superseded') {
+      return 'superseded';
+    }
+    intentPrepared = true;
     const publicationStatus = getCalendarPublicationStatus(db, input.scopeId, calendarId);
     const hostedSubscriptionUrl = publicationStatus?.ok
       ? publicationStatus.subscriptionUrl || ''
@@ -119,7 +189,13 @@ export async function sendEventCalendarHint(input: {
     });
     const subscriptionUrl = hostedSubscriptionUrl || fallbackSubscriptionUrl;
     if (!subscriptionUrl) {
+      deferEventCalendarHintDelivery(db, {
+        eventId: input.event.id,
+        deliveryKey,
+        reason: 'subscription_url_unavailable'
+      });
       await recordCalendarHintSkipped(input, 'subscription_url_unavailable', calendarId, {
+        retryable: true,
         tokenConfigured: Boolean(calendar.subscriptionToken.trim()),
         runtimeBindingIdConfigured: Boolean(runtime.config.RUNTIME_BINDING_ID.trim()),
         operatorConsolePublicOriginConfigured: Boolean(origin),
@@ -150,6 +226,11 @@ export async function sendEventCalendarHint(input: {
       }
     }).trim();
     if (!text) {
+      supersedeEventAnnouncementDelivery(db, {
+        eventId: input.event.id,
+        kind: 'calendar_hint',
+        deliveryKey
+      });
       await recordCalendarHintSkipped(input, 'empty_rendered_text', calendarId);
       return 'skipped';
     }
@@ -161,9 +242,7 @@ export async function sendEventCalendarHint(input: {
       deliveryKey,
       chatId: input.announcementGroupWid,
       text,
-      ...(input.expectedEventUpdatedAt
-        ? { expectedEventUpdatedAt: input.expectedEventUpdatedAt }
-        : {}),
+      expectedEventUpdatedAt,
       sender: input.activeTransport
     });
     if (delivery.status !== 'sent') {
@@ -186,6 +265,13 @@ export async function sendEventCalendarHint(input: {
     });
     return 'sent';
   } catch (error) {
+    if (intentPrepared) {
+      deferEventCalendarHintDelivery(db, {
+        eventId: input.event.id,
+        deliveryKey,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
     await appendEventJsonLog(input.context, {
       action: 'event.calendar_hint_failed',
       scopeId: input.scopeId,

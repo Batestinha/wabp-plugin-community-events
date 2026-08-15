@@ -247,6 +247,7 @@ async function publishClaimedCalendarGeneration(
       return { status: 'superseded' };
     }
     const publication = await publishCalendarBody({
+      appConfig: input.appConfig,
       scopeId: input.scopeId,
       calendar: frozenCalendar,
       icsBody: document.body,

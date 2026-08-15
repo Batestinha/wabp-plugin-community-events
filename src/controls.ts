@@ -56,7 +56,7 @@ const eventsPanelControl = defineControl({
   order: 68,
   visibility: 'bot_admin',
   configurable: false,
-  storage: { kind: 'internal', reason: 'Scoped events panel; data is loaded from the events plugin database and manual termination is handled by a confirmed runtime action.' },
+  storage: { kind: 'internal', reason: 'Scoped events panel; data is loaded from the events plugin database, while manual termination and idempotent calendar-hint replay use audited runtime actions.' },
   schema: { type: 'object', properties: {} },
   ui: {
     widget: 'builder',
@@ -64,15 +64,16 @@ const eventsPanelControl = defineControl({
     builderEndpoints: {
       state: '/api/v1/plugins/official.community-events/events/:scopeId',
       terminate: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/terminate',
+      calendarHintReplay: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar-hint/replay',
       calendarDisposition: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar',
       calendarOwnership: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar-ownership'
     },
-    helpText: 'Published events recorded for this scope, with confirmed manual termination for active event lifecycles.'
+    helpText: 'Published events recorded for this scope, with confirmed manual termination and idempotent initial calendar-hint replay for active event lifecycles.'
   },
   restartRequirement: 'NO_RESTART',
   dangerous: false,
   sensitivity: { sensitive: false, redact: 'none' },
-  auditExemptReason: 'Panel rendering is read-only; manual termination is audited by the terminate endpoint.',
+  auditExemptReason: 'Panel rendering is read-only; manual termination and calendar-hint replay are audited by their runtime-action endpoints.',
   relatedCommandIds: ['/event list', '/event edit', '/event cancel'],
   relatedActionIds: []
 });

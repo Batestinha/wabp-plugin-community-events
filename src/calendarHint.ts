@@ -1,5 +1,6 @@
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import {
   eventAnnouncementTransportIdempotencyKey,
@@ -21,6 +22,7 @@ import {
   resolvedEventCalendarId,
   supersedeEventAnnouncementDelivery,
   type EventCalendarHintTrigger,
+  type StoredCalendarPublicationStatus,
   type StoredEventRecord
 } from './store';
 
@@ -47,6 +49,18 @@ export interface EventCalendarHintContext {
   config: AppConfig;
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
 }
+
+export type EventCalendarHintTargetAuthorization =
+  | {
+      ok: true;
+      groupWid: string;
+      managementMode: 'ASSIST' | 'MANAGE';
+    }
+  | {
+      ok: false;
+      permanent: boolean;
+      reason: string;
+    };
 
 export async function sendEventCalendarHint(input: {
   context: EventCalendarHintContext;
@@ -176,18 +190,13 @@ export async function sendEventCalendarHint(input: {
     }
     intentPrepared = true;
     const publicationStatus = getCalendarPublicationStatus(db, input.scopeId, calendarId);
-    const hostedSubscriptionUrl = publicationStatus?.ok
-      ? publicationStatus.subscriptionUrl || ''
-      : '';
     const origin = operatorConsolePublicOriginForRuntime(runtime.config);
-    const fallbackSubscriptionUrl = botVisibleCalendarSubscriptionUrl({
-      operatorConsolePublicOrigin: origin,
-      runtimeBindingId: runtime.config.RUNTIME_BINDING_ID,
+    const subscriptionUrl = resolveEventCalendarHintSubscriptionUrl({
+      config: runtime.config,
       scopeId: input.scopeId,
-      calendarId,
-      token: calendar.subscriptionToken
+      calendar,
+      publicationStatus
     });
-    const subscriptionUrl = hostedSubscriptionUrl || fallbackSubscriptionUrl;
     if (!subscriptionUrl) {
       deferEventCalendarHintDelivery(db, {
         eventId: input.event.id,
@@ -325,6 +334,134 @@ async function recordCalendarHintSkipped(
 function operatorConsolePublicOriginForRuntime(config: OfficialPluginCommandRuntime['config']): string {
   const configured = (config as unknown as Record<string, unknown>).OPERATOR_CONSOLE_PUBLIC_ORIGIN;
   return (typeof configured === 'string' ? configured : process.env.OPERATOR_CONSOLE_PUBLIC_ORIGIN ?? '').trim();
+}
+
+export function botHostedEventCalendarSubscriptionUrl(input: {
+  config: OfficialPluginCommandRuntime['config'];
+  scopeId: string;
+  calendarId: string;
+  token?: string | undefined;
+}): string {
+  return botVisibleCalendarSubscriptionUrl({
+    operatorConsolePublicOrigin: operatorConsolePublicOriginForRuntime(input.config),
+    runtimeBindingId: input.config.RUNTIME_BINDING_ID,
+    scopeId: input.scopeId,
+    calendarId: input.calendarId,
+    token: input.token
+  });
+}
+
+export function resolveEventCalendarHintSubscriptionUrl(input: {
+  config: OfficialPluginCommandRuntime['config'];
+  scopeId: string;
+  calendar: Pick<EventCalendarResource, 'id' | 'subscriptionToken'>;
+  publicationStatus?: Pick<StoredCalendarPublicationStatus, 'ok' | 'subscriptionUrl'> | undefined;
+}): string {
+  const hostedSubscriptionUrl = input.publicationStatus?.ok === true
+    ? input.publicationStatus.subscriptionUrl?.trim() ?? ''
+    : '';
+  if (hostedSubscriptionUrl) {
+    return hostedSubscriptionUrl;
+  }
+  return botHostedEventCalendarSubscriptionUrl({
+    config: input.config,
+    scopeId: input.scopeId,
+    calendarId: input.calendar.id,
+    token: input.calendar.subscriptionToken
+  });
+}
+
+export async function authorizeEventCalendarHintTarget(
+  context: Pick<PluginRuntimeContext, 'coveredGroupsForScope' | 'botCapabilitiesFor'>,
+  input: { scopeId: string; chatId: string }
+): Promise<EventCalendarHintTargetAuthorization> {
+  if (!context.coveredGroupsForScope) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: 'calendar-hint delivery cannot verify the currently covered groups for this scope'
+    };
+  }
+  let coveredGroups: Awaited<ReturnType<NonNullable<
+    PluginRuntimeContext['coveredGroupsForScope']
+  >>>;
+  try {
+    coveredGroups = await context.coveredGroupsForScope(input.scopeId);
+  } catch (error) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: `calendar-hint delivery could not verify group coverage: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    };
+  }
+  const normalizedChatId = input.chatId.trim().toLowerCase();
+  const matchingGroups = coveredGroups.filter(
+    (group) => group.groupWid.trim().toLowerCase() === normalizedChatId
+  );
+  if (matchingGroups.length !== 1) {
+    return {
+      ok: false,
+      permanent: true,
+      reason: 'calendar-hint target is not exactly one currently covered group for this scope'
+    };
+  }
+  const matchedGroup = matchingGroups[0]!;
+  if (matchedGroup.managementMode === 'OBSERVE') {
+    return {
+      ok: false,
+      permanent: true,
+      reason: 'calendar-hint target is currently managed in OBSERVE mode'
+    };
+  }
+  if (!context.botCapabilitiesFor) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: 'calendar-hint delivery cannot verify authoritative group send capability'
+    };
+  }
+  let capabilities: Awaited<ReturnType<NonNullable<
+    PluginRuntimeContext['botCapabilitiesFor']
+  >>>;
+  try {
+    capabilities = await context.botCapabilitiesFor(normalizedChatId);
+  } catch (error) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: `calendar-hint delivery could not verify group send capability: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    };
+  }
+  if (!capabilities) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: 'calendar-hint delivery has no authoritative group send capability snapshot'
+    };
+  }
+  if (!capabilities.botIsMember) {
+    return {
+      ok: false,
+      permanent: true,
+      reason: 'calendar-hint target no longer includes the bot as a member'
+    };
+  }
+  if (!capabilities.canSend) {
+    return {
+      ok: false,
+      permanent: false,
+      reason: 'calendar-hint target does not currently allow the bot to send messages'
+    };
+  }
+  return {
+    ok: true,
+    groupWid: matchedGroup.groupWid.trim().toLowerCase(),
+    managementMode: matchedGroup.managementMode
+  };
 }
 
 function botVisibleCalendarSubscriptionUrl(input: Parameters<typeof eventsCalendarSubscriptionUrl>[0]): string {

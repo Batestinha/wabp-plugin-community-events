@@ -46,7 +46,11 @@ import {
 export type EventAdoptionMode = 'poll' | 'group';
 
 export interface EventTextTransport {
-  sendText(chatId: string, text: string): Promise<{ messageId?: string | undefined }>;
+  sendText(
+    chatId: string,
+    text: string,
+    options?: { idempotencyKey?: string | undefined }
+  ): Promise<{ messageId?: string | undefined }>;
 }
 
 export interface EventAdoptionInput {

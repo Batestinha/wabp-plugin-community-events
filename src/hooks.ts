@@ -35,7 +35,11 @@ import {
   eventAnnouncementTransportIdempotencyKey,
   sendClaimedEventAnnouncement
 } from './announcementDelivery';
-import { sendEventCalendarHint } from './calendarHint';
+import {
+  authorizeEventCalendarHintTarget,
+  resolveEventCalendarHintSubscriptionUrl,
+  sendEventCalendarHint
+} from './calendarHint';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
@@ -220,7 +224,7 @@ function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): v
     running = true;
     try {
       await recoverDirtyEventCalendarPublications(context);
-      await recoverHealthyEventCalendarHintDeliveryJobs(context);
+      await recoverReadyEventCalendarHintDeliveryJobs(context);
     } catch (error) {
       context.logger.error({ error }, 'official.community-events calendar publication recovery failed');
     } finally {
@@ -847,7 +851,7 @@ export async function recoverEventAnnouncementDeliveryJobs(
   return eventGroupHints + calendarHints;
 }
 
-async function recoverHealthyEventCalendarHintDeliveryJobs(
+async function recoverReadyEventCalendarHintDeliveryJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
 ): Promise<number> {
@@ -863,7 +867,7 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions,
   kind: StoredEventAnnouncementDeliveryClaim['kind'],
-  requireHealthyCalendarPublication = false
+  requireResolvableCalendarSubscription = false
 ): Promise<number> {
   const db = eventsDatabase(context.databases);
   const now = options.now ?? new Date();
@@ -873,8 +877,30 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
     if (!event || event.scopeId !== delivery.scopeId) {
       continue;
     }
+    const leaseExpiresAt = delivery.leaseExpiresAt
+      ? new Date(delivery.leaseExpiresAt)
+      : undefined;
+    const activeDeliveryLease = delivery.status === 'sending' &&
+      leaseExpiresAt &&
+      leaseExpiresAt > now;
+    if (delivery.kind === 'calendar_hint' && !activeDeliveryLease) {
+      const targetAuthorization = await authorizeEventCalendarHintTarget(context, {
+        scopeId: delivery.scopeId,
+        chatId: delivery.chatId
+      });
+      if (!targetAuthorization.ok) {
+        if (targetAuthorization.permanent) {
+          supersedeEventAnnouncementDelivery(db, {
+            eventId: delivery.eventId,
+            kind: delivery.kind,
+            deliveryKey: delivery.deliveryKey
+          });
+        }
+        continue;
+      }
+    }
     if (
-      requireHealthyCalendarPublication &&
+      requireResolvableCalendarSubscription &&
       delivery.kind === 'calendar_hint' &&
       !delivery.text
     ) {
@@ -886,13 +912,32 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
           continue;
         }
       }
-      if (!calendarId || getCalendarPublicationStatus(db, event.scopeId, calendarId)?.ok !== true) {
+      if (!calendarId) {
+        continue;
+      }
+      let subscriptionUrl = '';
+      try {
+        const config = parseEventsConfig(await context.configFor(event.scopeId));
+        const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
+        subscriptionUrl = calendar
+          ? resolveEventCalendarHintSubscriptionUrl({
+              config: context.config,
+              scopeId: event.scopeId,
+              calendar,
+              publicationStatus: getCalendarPublicationStatus(
+                db,
+                event.scopeId,
+                calendarId
+              )
+            })
+          : '';
+      } catch {
+        // Recovery remains dormant until the persisted scope configuration is readable.
+      }
+      if (!subscriptionUrl) {
         continue;
       }
     }
-    const leaseExpiresAt = delivery.leaseExpiresAt
-      ? new Date(delivery.leaseExpiresAt)
-      : undefined;
     const runAt = delivery.status === 'sending' && leaseExpiresAt && leaseExpiresAt > now
       ? leaseExpiresAt
       : now;
@@ -1433,6 +1478,30 @@ async function retryEventAnnouncementDelivery(
       Number.isFinite(retryAt.getTime()) ? retryAt : undefined,
       'delivery is fenced by an active mutation or send lease'
     );
+  }
+  if (kind === 'calendar_hint') {
+    const targetAuthorization = await authorizeEventCalendarHintTarget(
+      context,
+      { scopeId: delivery.scopeId, chatId: delivery.chatId }
+    );
+    if (!targetAuthorization.ok) {
+      if (targetAuthorization.permanent) {
+        supersedeEventAnnouncementDelivery(db, { eventId, kind, deliveryKey });
+        return [audit('events.announcement_delivery.superseded', {
+          eventId,
+          kind,
+          deliveryKey,
+          reason: targetAuthorization.reason
+        })];
+      }
+      return eventAnnouncementDeliveryRetryActions(
+        record,
+        delivery,
+        attempt,
+        undefined,
+        targetAuthorization.reason
+      );
+    }
   }
   if (kind === 'calendar_hint' && !delivery.text) {
     return retryPreparedEventCalendarHint(context, record, delivery, attempt);

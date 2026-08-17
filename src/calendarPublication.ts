@@ -19,7 +19,7 @@ export interface CalendarPublicationOutcome {
 }
 
 export async function publishCalendarBody(input: {
-  appConfig: Pick<AppConfig, 'PIWIGO_GALLERY_DEFAULT_BOT_SECRET'>;
+  appConfig: Pick<AppConfig, 'piwigoCalendarPublicationSecret'>;
   scopeId: string;
   calendar: EventsConfig['calendars'][number];
   icsBody: string;
@@ -41,7 +41,7 @@ export async function publishCalendarBody(input: {
       error: 'Calendar publication POST URL is not configured.'
     };
   }
-  const secret = calendarPublicationSecret(input.appConfig, input.calendar);
+  const secret = calendarPublicationSecret(input.appConfig);
   if (secret === undefined) {
     return {
       enabled: true,
@@ -52,7 +52,7 @@ export async function publishCalendarBody(input: {
       feedId: target.feedId,
       label: target.label,
       calendarUrl: target.calendarUrl || undefined,
-      error: 'Deployment Piwigo calendar publication secret is not configured.'
+      error: 'PIWIGO_CALENDAR_PUBLICATION_SECRET_FILE is not configured.'
     };
   }
 
@@ -112,14 +112,10 @@ export function calendarPublicationTarget(
 }
 
 function calendarPublicationSecret(
-  appConfig: Pick<AppConfig, 'PIWIGO_GALLERY_DEFAULT_BOT_SECRET'>,
-  calendar: EventsConfig['calendars'][number]
+  appConfig: Pick<AppConfig, 'piwigoCalendarPublicationSecret'>
 ): string | undefined {
-  if (calendar.publication.secretSource === 'piwigo-default') {
-    const secret = appConfig.PIWIGO_GALLERY_DEFAULT_BOT_SECRET.trim();
-    return secret || undefined;
-  }
-  return calendar.publication.secret.trim();
+  const secret = appConfig.piwigoCalendarPublicationSecret;
+  return secret || undefined;
 }
 
 function redactCalendarPublicationSecret(message: string, secret: string): string {

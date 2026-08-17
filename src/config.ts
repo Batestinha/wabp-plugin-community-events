@@ -7,7 +7,6 @@ export const EVENT_TIME_QUESTION_TYPE = 'time';
 export const EVENT_CHOICE_QUESTION_TYPE = 'choice';
 export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES = ['off', 'auto_convert'] as const;
-export const EVENT_CALENDAR_PUBLICATION_SECRET_SOURCES = ['inline', 'piwigo-default'] as const;
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
 export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
@@ -136,8 +135,6 @@ const eventCalendarResourceObjectSchema = z.object({
   publication: z.object({
     enabled: z.boolean().default(false),
     endpointUrl: z.string().trim().url().or(z.literal('')).default(''),
-    secretSource: z.enum(EVENT_CALENDAR_PUBLICATION_SECRET_SOURCES).default('inline'),
-    secret: z.string().trim().default(''),
     secretFieldName: z.string().trim().regex(/^[A-Za-z_][A-Za-z0-9_.-]*$/).or(z.literal('')).default('bot_secret'),
     feedId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(''),
     label: z.string().trim().default(''),
@@ -441,8 +438,6 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   publication: {
     enabled: false,
     endpointUrl: '',
-    secretSource: 'inline',
-    secret: '',
     secretFieldName: 'bot_secret',
     feedId: '',
     label: '',

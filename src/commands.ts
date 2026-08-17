@@ -513,12 +513,22 @@ async function startEventEditFlow(context: PluginCommandContext, ctx: CommandCon
 
   const db = eventsDatabase(runtime.databases);
   const query = ctx.command.args.join(' ').trim();
-  const subgroupChatId = ctx.groupWid ?? (ctx.message.context === 'group' ? ctx.message.chatId : undefined);
-  const subgroupMatches = !query && subgroupChatId
-    ? listEventsBySubgroupChatId(db, scopeId, subgroupChatId).filter(eventIsEditable)
+  const originSubgroupChatId = ctx.message.context === 'group' ? ctx.message.chatId : undefined;
+  const scopeEvents = listScopeEvents(db, scopeId);
+  const originSubgroupEvents = originSubgroupChatId
+    ? scopeEvents.filter((event) => event.subgroupChatId === originSubgroupChatId)
     : [];
-  const allEditable = listScopeEvents(db, scopeId)
-    .filter(eventIsEditable);
+  const subgroupMatches = !query && originSubgroupChatId
+    ? listEventsBySubgroupChatId(db, scopeId, originSubgroupChatId).filter(eventIsEditable)
+    : [];
+  const allEditable = scopeEvents.filter(eventIsEditable);
+  const shouldDiscoverUpcoming = !query && (
+    ctx.message.context === 'private' || originSubgroupEvents.length === 0
+  );
+  const discoveryNow = Date.now();
+  const discoveryMatches = shouldDiscoverUpcoming
+    ? scopeEvents.filter((event) => eventIsBareEditDiscoveryCandidate(event, discoveryNow))
+    : [];
   if (subgroupMatches.length > 1) {
     return { handled: true, text: ctx.t('official.community-events.update.ambiguous') };
   }
@@ -526,9 +536,7 @@ async function startEventEditFlow(context: PluginCommandContext, ctx: CommandCon
     ? subgroupMatches
     : query
       ? findEventMatches(allEditable, query, ctx.locale)
-      : ctx.message.context === 'private'
-        ? allEditable
-        : [];
+      : discoveryMatches;
 
   if (rawMatches.length === 0) {
     return { handled: true, text: ctx.t('official.community-events.edit.noEvents') };
@@ -1993,6 +2001,14 @@ function eventStructuredDataChanged(
 
 function eventIsEditable(event: StoredEventRecord): boolean {
   return event.eventStatus === 'active' || event.eventStatus === 'completed';
+}
+
+function eventIsBareEditDiscoveryCandidate(
+  event: StoredEventRecord,
+  nowMs: number
+): boolean {
+  const startsAtMs = new Date(event.startsAt).getTime();
+  return event.eventStatus === 'active' && Number.isFinite(startsAtMs) && startsAtMs >= nowMs;
 }
 
 function stableJson(value: unknown): string {

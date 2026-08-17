@@ -133,7 +133,6 @@ export const eventsControls: ControlDescriptor[] = [
       options: '/api/v1/plugins/official.community-events/profiles/:scopeId/options',
       renameQuestion: '/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename',
       calendarState: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId',
-      setFunnel: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/funnel',
       publish: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish',
       rotateToken: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token'
     }

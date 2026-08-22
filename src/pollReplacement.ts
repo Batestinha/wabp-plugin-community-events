@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
 import { isPluginServiceNotInvokedError } from '../../../platform/pluginRuntime/pluginServices';
 import {
   isDefinitelyNotSentTransportError,
@@ -110,7 +111,7 @@ export async function runEventPollReplacement(input: {
   context: EventPollReplacementContext;
   db: PluginDatabase;
   operationId: string;
-  deleteMessage?: ((messageId: string) => Promise<void>) | undefined;
+  deleteMessage?: ((messageId: string) => Promise<MessageDeletionResult | void>) | undefined;
   clock?: (() => Date) | undefined;
   now?: Date | undefined;
 }): Promise<EventPollReplacementRunResult> {

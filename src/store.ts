@@ -2,12 +2,15 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
 import type {
   CreatedGroupParticipantResult,
+  MessageDeletionResult,
   PersistedRequiredCreatorReference
 } from '../../../platform/transport/transportTypes';
 import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
+import type { EventSpanKind } from './span';
+import { inferredEventSpanKind } from './span';
 
 export type EventStatus = 'active' | 'completed' | 'cancelled' | 'failed';
 export type EventGroupLifecycleStatus = 'poll_open' | 'poll_closed' | 'cleanup_failed' | 'cleaned' | 'missed' | 'none';
@@ -16,8 +19,9 @@ export type EventCalendarOwnershipStatus = 'assigned' | 'none' | 'unresolved';
 export type EventOrigin = 'created' | 'unplanned' | 'adopted_poll' | 'adopted_group' | 'adopted_pair';
 export type EventWeatherDeliveryScheduleKind = 'poll-close' | 'daily';
 export type EventWeatherDeliveryStatus = 'pending' | 'sending' | 'sent' | 'skipped';
-export type EventAnnouncementMessageKind = 'poll' | 'calendar_hint' | 'event_group_hint' | 'event_edit';
-export type EventAnnouncementDeliveryKind = Exclude<EventAnnouncementMessageKind, 'poll'>;
+export type EventAnnouncementMessageKind = 'poll' | 'calendar_hint' | 'event_group_hint' | 'event_edit' | 'cancellation_notice';
+export type EventAnnouncementDeliveryKind = Exclude<EventAnnouncementMessageKind, 'poll' | 'cancellation_notice'>;
+export type EventArtifactDeletionStatus = 'pending' | 'confirmed' | 'unconfirmed' | 'rejected' | 'failed';
 export type EventAnnouncementDeliveryClaimStatus = 'pending' | 'sending' | 'sent' | 'uncertain' | 'superseded';
 export type EventAnnouncementDeliveryClaimResult = 'claimed' | 'already_sent' | 'already_claimed' | 'superseded';
 export type EventEditRepairStatus = 'pending' | 'completed';
@@ -244,6 +248,8 @@ export interface StoredEventRecord {
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc?: string | undefined;
+  endsAt: string;
+  spanKind: EventSpanKind;
   timezone: string;
   localDate?: string | undefined;
   localTime?: string | undefined;
@@ -287,11 +293,13 @@ export interface StoredUnplannedEventFinalization {
 
 export type NewStoredEventRecord = Omit<
   StoredEventRecord,
-  'actorIdentityId' | 'calendarOwnershipStatus' | 'pollGeneration'
+  'actorIdentityId' | 'calendarOwnershipStatus' | 'pollGeneration' | 'endsAt' | 'spanKind'
 > & {
   actorIdentityId: string;
   calendarOwnershipStatus: Exclude<EventCalendarOwnershipStatus, 'unresolved'>;
   pollGeneration?: number | undefined;
+  endsAt?: string | undefined;
+  spanKind?: EventSpanKind | undefined;
 };
 
 export interface EventPollReplacementTarget {
@@ -304,6 +312,8 @@ export interface EventPollReplacementTarget {
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
+  endsAt?: string | undefined;
+  spanKind?: EventSpanKind | undefined;
   timezone: string;
   localDate: string;
   localTime?: string | undefined;
@@ -501,6 +511,13 @@ export interface StoredEventAnnouncementMessage {
   createdAt: string;
   deletedAt?: string | undefined;
   deleteError?: string | undefined;
+  deletionStatus?: EventArtifactDeletionStatus | undefined;
+  deletionAttemptCount: number;
+  deletionNextAttemptAt?: string | undefined;
+  deletionSubmittedAt?: string | undefined;
+  deletionConfirmedAt?: string | undefined;
+  deletionFinalizedAt?: string | undefined;
+  deletionLastError?: string | undefined;
 }
 
 export interface StoredEventAnnouncementDeliveryClaim {
@@ -573,6 +590,8 @@ interface EventRow extends PluginDatabaseRow {
   event_location_json: string | null;
   starts_at: string;
   starts_at_utc: string | null;
+  ends_at: string | null;
+  span_kind: EventSpanKind | null;
   timezone: string;
   local_date: string | null;
   local_time: string | null;
@@ -728,6 +747,13 @@ interface EventAnnouncementMessageRow extends PluginDatabaseRow {
   created_at: string;
   deleted_at: string | null;
   delete_error: string | null;
+  deletion_status: EventArtifactDeletionStatus | null;
+  deletion_attempt_count: number;
+  deletion_next_attempt_at: string | null;
+  deletion_submitted_at: string | null;
+  deletion_confirmed_at: string | null;
+  deletion_finalized_at: string | null;
+  deletion_last_error: string | null;
 }
 
 interface EventAnnouncementDeliveryClaimRow extends PluginDatabaseRow {
@@ -1127,6 +1153,10 @@ export function insertEvent(
   }
   const calendarId = event.calendarId?.trim() || null;
   const calendarOwnershipStatus = event.calendarOwnershipStatus;
+  const endsAt = event.endsAt ?? new Date(
+    new Date(event.startsAt).getTime() + event.calendarDurationMinutes * 60_000
+  ).toISOString();
+  const spanKind = event.spanKind ?? inferredEventSpanKind(event.calendarDurationMinutes);
   if (
     (calendarOwnershipStatus === 'assigned' && !calendarId) ||
     (calendarOwnershipStatus === 'none' && calendarId !== null)
@@ -1139,13 +1169,13 @@ export function insertEvent(
       event_status, group_lifecycle_status, calendar_status, calendar_id, calendar_ownership_status,
       actor_identity_id, actor_wid, actor_label,
       announcement_group_wid, poll_wa_msg_id, poll_generation, poll_question, poll_options_json, response_classes_json,
-      answers_json, event_location_json, starts_at, starts_at_utc, timezone, local_date, local_time, place, style,
+      answers_json, event_location_json, starts_at, starts_at_utc, ends_at, span_kind, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
       provisioning_recovery_next_run_at, provisioning_recovery_halted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -1172,6 +1202,8 @@ export function insertEvent(
     event.eventLocation ? JSON.stringify(event.eventLocation) : null,
     event.startsAt,
     event.startsAtUtc || event.startsAt,
+    endsAt,
+    spanKind,
     event.timezone,
     event.localDate ?? null,
     event.localTime ?? null,
@@ -1211,6 +1243,8 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
+  endsAt?: string | undefined;
+  spanKind?: EventSpanKind | undefined;
   timezone: string;
   localDate: string;
   localTime?: string | undefined;
@@ -1227,6 +1261,10 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   announcementIntent?: EventAnnouncementDeliveryIntent | undefined;
   repairIntent?: EventEditRepairIntent | undefined;
 }): boolean {
+  const endsAt = input.endsAt ?? new Date(
+    new Date(input.startsAt).getTime() + input.calendarDurationMinutes * 60_000
+  ).toISOString();
+  const spanKind = input.spanKind ?? inferredEventSpanKind(input.calendarDurationMinutes);
   return db.transaction(() => {
     const result = db.run(
       `UPDATE event_records
@@ -1239,6 +1277,8 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             event_location_json = ?,
             starts_at = ?,
             starts_at_utc = ?,
+            ends_at = ?,
+            span_kind = ?,
             timezone = ?,
             local_date = ?,
             local_time = ?,
@@ -1285,6 +1325,8 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
       input.eventLocation ? JSON.stringify(input.eventLocation) : null,
       input.startsAt,
       input.startsAtUtc,
+      endsAt,
+      spanKind,
       input.timezone,
       input.localDate,
       input.localTime ?? null,
@@ -1358,6 +1400,111 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
         throw new Error(`Event edit repair operation ${repair.operationId} already exists.`);
       }
     }
+    return true;
+  });
+}
+
+export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  expectedPollWaMsgId: string;
+  profileLabel: string;
+  profileRevision: string;
+  responseClasses: StoredEventResponseClass[];
+  answers: Record<string, string>;
+  eventLocation?: StoredEventLocation | undefined;
+  startsAt: string;
+  startsAtUtc: string;
+  endsAt: string;
+  spanKind: EventSpanKind;
+  timezone: string;
+  localDate: string;
+  localTime?: string | undefined;
+  place?: string | undefined;
+  closeAt: string;
+  cleanupAt: string;
+  groupTitle: string;
+  calendarDurationMinutes: number;
+  calendarLocation?: string | undefined;
+  calendarDescription?: string | undefined;
+  provisioningGeneration: string;
+  provisioningAttempt: number;
+  provisioningNextRunAt: string;
+  updatedAt: string;
+}): boolean {
+  return db.transaction(() => {
+    const result = db.run(
+      `UPDATE event_records
+          SET profile_label = ?, profile_revision = ?, origin = 'unplanned',
+              event_status = 'failed', group_lifecycle_status = 'none', calendar_status = 'hidden',
+              poll_wa_msg_id = NULL, poll_generation = poll_generation + 1, poll_question = NULL,
+              poll_options_json = '[]', response_classes_json = ?, answers_json = ?,
+              event_location_json = ?, starts_at = ?, starts_at_utc = ?, ends_at = ?, span_kind = ?,
+              timezone = ?, local_date = ?, local_time = ?, place = ?, style = NULL,
+              close_at = ?, cleanup_at = ?, group_title = ?, calendar_duration_minutes = ?,
+              calendar_location = ?, calendar_description = ?, closed_at = NULL, error = NULL,
+              provisioning_recovery_generation = ?, provisioning_recovery_attempt = ?,
+              provisioning_recovery_next_run_at = ?, provisioning_recovery_halted_at = NULL,
+              updated_at = ?
+        WHERE id = ? AND scope_id = ?
+          AND event_status = 'active' AND group_lifecycle_status = 'poll_open'
+          AND updated_at = ? AND poll_wa_msg_id = ?
+          AND cleanup_at > ?
+          AND subgroup_chat_id IS NULL
+          AND provisioning_recovery_generation IS NULL
+          AND provisioning_recovery_attempt IS NULL
+          AND provisioning_recovery_next_run_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements
+             WHERE event_poll_replacements.event_id = event_records.id
+               AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM event_announcement_delivery_claims
+             WHERE event_announcement_delivery_claims.event_id = event_records.id
+               AND event_announcement_delivery_claims.status = 'sending'
+          )`,
+      input.profileLabel,
+      input.profileRevision,
+      JSON.stringify(input.responseClasses),
+      JSON.stringify(input.answers),
+      input.eventLocation ? JSON.stringify(input.eventLocation) : null,
+      input.startsAt,
+      input.startsAtUtc,
+      input.endsAt,
+      input.spanKind,
+      input.timezone,
+      input.localDate,
+      input.localTime ?? null,
+      input.place ?? null,
+      input.closeAt,
+      input.cleanupAt,
+      input.groupTitle,
+      input.calendarDurationMinutes,
+      input.calendarLocation ?? null,
+      input.calendarDescription ?? null,
+      input.provisioningGeneration,
+      input.provisioningAttempt,
+      input.provisioningNextRunAt,
+      input.updatedAt,
+      input.eventId,
+      input.scopeId,
+      input.expectedUpdatedAt,
+      input.expectedPollWaMsgId,
+      input.updatedAt
+    );
+    if (result.changes !== 1) {
+      return false;
+    }
+    db.run('DELETE FROM event_votes WHERE event_id = ?', input.eventId);
+    db.run(
+      `UPDATE event_announcement_delivery_claims
+          SET status = 'superseded', lease_expires_at = NULL, updated_at = ?
+        WHERE event_id = ? AND status IN ('pending', 'uncertain')`,
+      input.updatedAt,
+      input.eventId
+    );
     return true;
   });
 }
@@ -1819,6 +1966,10 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       );
     }
     const target = replacement.target;
+    const targetEndsAt = target.endsAt ?? new Date(
+      new Date(target.startsAt).getTime() + target.calendarDurationMinutes * 60_000
+    ).toISOString();
+    const targetSpanKind = target.spanKind ?? inferredEventSpanKind(target.calendarDurationMinutes);
     const swappedAt = nextEventRevisionTimestamp(
       replacement.expectedEventUpdatedAt,
       input.swappedAt ? new Date(input.swappedAt) : new Date()
@@ -1831,6 +1982,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
               poll_generation = ?, poll_question = ?, poll_options_json = ?,
               response_classes_json = ?, answers_json = ?, event_location_json = ?,
               starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
+              ends_at = ?, span_kind = ?,
               local_time = ?, place = ?, style = NULL, close_at = ?, cleanup_at = ?,
               group_title = ?,
               subgroup_title = CASE WHEN subgroup_chat_id IS NOT NULL THEN ? ELSE subgroup_title END,
@@ -1859,6 +2011,8 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       target.startsAtUtc,
       target.timezone,
       target.localDate,
+      targetEndsAt,
+      targetSpanKind,
       target.localTime ?? null,
       target.place ?? null,
       target.closeAt,
@@ -2385,14 +2539,20 @@ export function listEventsBySubgroupChatId(
   return rows.map(eventFromRow);
 }
 
-export function listCancellableEvents(db: PluginDatabase, scopeId: string): StoredEventRecord[] {
+export function listCancellableEvents(
+  db: PluginDatabase,
+  scopeId: string,
+  now: string = new Date().toISOString()
+): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
       WHERE scope_id = ?
         AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
+        AND ends_at > ?
       ORDER BY starts_at ASC, id ASC`,
-    scopeId
+    scopeId,
+    now
   ).map(eventFromRow);
 }
 
@@ -2413,6 +2573,28 @@ export function listPendingCleanupEvents(db: PluginDatabase): StoredEventRecord[
         )
       ORDER BY cleanup_at ASC, id ASC`
   ).map(eventFromRow);
+}
+
+export function listPendingCompletionEvents(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE event_status = 'active'
+        AND ends_at IS NOT NULL
+      ORDER BY ends_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
+export function markEventCompletedAtEnd(db: PluginDatabase, input: {
+  eventId: string;
+  completedAt: string;
+}): boolean {
+  return db.run(
+    `UPDATE event_records
+        SET event_status = 'completed', updated_at = ?
+      WHERE id = ? AND event_status = 'active'`,
+    input.completedAt,
+    input.eventId
+  ).changes === 1;
 }
 
 export function listWeatherForecastCandidateEvents(db: PluginDatabase): StoredEventRecord[] {
@@ -4257,6 +4439,7 @@ export function markEventCancelled(db: PluginDatabase, input: {
   cancelledByLabel: string;
   calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
   reason?: string | undefined;
+  deleteAnnouncementMessages?: boolean | undefined;
 }): boolean {
   return db.transaction(() => {
     const result = db.run(
@@ -4313,6 +4496,9 @@ export function markEventCancelled(db: PluginDatabase, input: {
       return false;
     }
     supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cancelledAt);
+    if (input.deleteAnnouncementMessages) {
+      initializeEventCancellationArtifactCleanup(db, input.eventId, input.cancelledAt);
+    }
     return true;
   });
 }
@@ -4326,6 +4512,7 @@ export function markClaimedEventCancelled(db: PluginDatabase, input: {
   cancelledByLabel: string;
   calendarStatus?: Extract<EventCalendarStatus, 'cancelled' | 'hidden'> | undefined;
   reason?: string | undefined;
+  deleteAnnouncementMessages?: boolean | undefined;
 }): boolean {
   return db.transaction(() => {
     const result = db.run(
@@ -4377,6 +4564,9 @@ export function markClaimedEventCancelled(db: PluginDatabase, input: {
       return false;
     }
     supersedeEventEditPresentationForTerminalTransition(db, input.eventId, input.cancelledAt);
+    if (input.deleteAnnouncementMessages) {
+      initializeEventCancellationArtifactCleanup(db, input.eventId, input.cancelledAt);
+    }
     if (!releaseEventCleanupClaim(db, { eventId: input.eventId, claimId: input.claimId })) {
       throw new Error(`Cancellation claim ${input.claimId} disappeared for event ${input.eventId}.`);
     }
@@ -4411,6 +4601,76 @@ function supersedeEventEditPresentationForTerminalTransition(
     transitionedAt,
     eventId
   );
+}
+
+function initializeEventCancellationArtifactCleanup(
+  db: PluginDatabase,
+  eventId: string,
+  initializedAt: string
+): void {
+  db.run(
+    `UPDATE event_announcement_messages
+        SET deletion_status = 'pending',
+            deletion_attempt_count = 0,
+            deletion_next_attempt_at = ?,
+            deletion_submitted_at = NULL,
+            deletion_confirmed_at = NULL,
+            deletion_finalized_at = NULL,
+            deletion_last_error = NULL,
+            delete_error = NULL
+      WHERE event_id = ?
+        AND kind <> 'cancellation_notice'
+        AND deleted_at IS NULL
+        AND deletion_status IS NULL`,
+    initializedAt,
+    eventId
+  );
+}
+
+export function beginEventArtifactDeletionCleanup(
+  db: PluginDatabase,
+  eventId: string,
+  artifactIds: readonly string[],
+  initializedAt: string
+): number {
+  let changed = 0;
+  db.transaction(() => {
+    for (const artifactId of new Set(artifactIds)) {
+      changed += db.run(
+        `UPDATE event_announcement_messages
+            SET deletion_status = 'pending', deletion_attempt_count = 0,
+                deletion_next_attempt_at = ?, deletion_submitted_at = NULL,
+                deletion_confirmed_at = NULL, deletion_finalized_at = NULL,
+                deletion_last_error = NULL, delete_error = NULL
+          WHERE id = ? AND event_id = ? AND kind <> 'cancellation_notice'
+            AND deleted_at IS NULL AND deletion_status IS NULL`,
+        initializedAt,
+        artifactId,
+        eventId
+      ).changes;
+    }
+  });
+  return changed;
+}
+
+export function retryEventArtifactDeletionCleanup(
+  db: PluginDatabase,
+  eventId: string,
+  retryAt: string
+): number {
+  return db.run(
+    `UPDATE event_announcement_messages
+        SET deletion_status = 'pending', deletion_attempt_count = 0,
+            deletion_next_attempt_at = ?, deletion_submitted_at = NULL,
+            deletion_confirmed_at = NULL, deletion_finalized_at = NULL,
+            deletion_last_error = NULL, delete_error = NULL
+      WHERE event_id = ?
+        AND kind <> 'cancellation_notice'
+        AND deleted_at IS NULL
+        AND deletion_status IN ('pending', 'unconfirmed', 'rejected', 'failed')`,
+    retryAt,
+    eventId
+  ).changes;
 }
 
 export function updateEventCalendarStatus(db: PluginDatabase, input: {
@@ -5562,16 +5822,216 @@ export function listEventAnnouncementMessages(db: PluginDatabase, eventId: strin
   return rows.map(eventAnnouncementMessageFromRow);
 }
 
+export function listDueEventCancellationArtifacts(
+  db: PluginDatabase,
+  now: string,
+  eventId?: string | undefined
+): StoredEventAnnouncementMessage[] {
+  return db.all<EventAnnouncementMessageRow>(
+    `SELECT * FROM event_announcement_messages
+      WHERE deletion_status IN ('pending', 'unconfirmed')
+        AND deletion_next_attempt_at IS NOT NULL
+        AND deletion_next_attempt_at <= ?
+        AND (? IS NULL OR event_id = ?)
+      ORDER BY deletion_next_attempt_at ASC, created_at ASC, id ASC`,
+    now,
+    eventId ?? null,
+    eventId ?? null
+  ).map(eventAnnouncementMessageFromRow);
+}
+
+export function listEventCancellationCleanupCandidates(
+  db: PluginDatabase
+): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT DISTINCT event_records.*
+       FROM event_records
+       JOIN event_announcement_messages artifact ON artifact.event_id = event_records.id
+      WHERE (event_records.event_status = 'cancelled' OR event_records.origin = 'unplanned')
+        AND artifact.deletion_status IN ('pending', 'unconfirmed')
+        AND artifact.deletion_next_attempt_at IS NOT NULL
+      ORDER BY event_records.cancelled_at ASC, event_records.id ASC`,
+  ).map(eventFromRow);
+}
+
+export function listEventCancellationNoticeCandidates(
+  db: PluginDatabase,
+  now: string
+): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT DISTINCT event_records.*
+       FROM event_records
+       JOIN event_announcement_messages artifact ON artifact.event_id = event_records.id
+      WHERE event_records.event_status = 'cancelled'
+        AND event_records.ends_at > ?
+        AND artifact.deletion_status IN ('rejected', 'failed', 'unconfirmed')
+        AND artifact.deletion_next_attempt_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_announcement_messages notice
+           WHERE notice.event_id = event_records.id
+             AND notice.kind = 'cancellation_notice'
+        )
+      ORDER BY event_records.cancelled_at ASC, event_records.id ASC`,
+    now
+  ).map(eventFromRow);
+}
+
+export function claimEventCancellationArtifactDeletion(db: PluginDatabase, input: {
+  artifactId: string;
+  expectedNextAttemptAt: string;
+  claimedAt: string;
+  claimedUntil: string;
+}): boolean {
+  return db.run(
+    `UPDATE event_announcement_messages
+        SET deletion_next_attempt_at = ?
+      WHERE id = ?
+        AND deletion_status IN ('pending', 'unconfirmed')
+        AND deletion_next_attempt_at = ?
+        AND deletion_next_attempt_at <= ?`,
+    input.claimedUntil,
+    input.artifactId,
+    input.expectedNextAttemptAt,
+    input.claimedAt
+  ).changes === 1;
+}
+
+export function recordEventCancellationArtifactDeletionOutcome(db: PluginDatabase, input: {
+  artifactId: string;
+  result: MessageDeletionResult | { status: 'error'; reason: string };
+  attemptedAt: string;
+  claimExpiresAt: string;
+}): StoredEventAnnouncementMessage | undefined {
+  return db.transaction(() => {
+    const row = db.get<EventAnnouncementMessageRow>(
+      `SELECT * FROM event_announcement_messages WHERE id = ?`,
+      input.artifactId
+    );
+    if (!row || row.deletion_next_attempt_at !== input.claimExpiresAt ||
+      !row.deletion_status || row.deletion_status === 'confirmed' ||
+      row.deletion_status === 'rejected' || row.deletion_status === 'failed') {
+      return row ? eventAnnouncementMessageFromRow(row) : undefined;
+    }
+    const attempt = Number(row.deletion_attempt_count ?? 0) + 1;
+    if (input.result.status === 'confirmed') {
+      db.run(
+        `UPDATE event_announcement_messages
+            SET deletion_status = 'confirmed', deletion_attempt_count = ?,
+                deletion_next_attempt_at = NULL, deletion_submitted_at = COALESCE(deletion_submitted_at, ?),
+                deletion_confirmed_at = ?, deletion_finalized_at = ?, deletion_last_error = NULL,
+                deleted_at = ?, delete_error = NULL
+          WHERE id = ? AND deletion_status IN ('pending', 'unconfirmed')
+            AND deletion_next_attempt_at = ?`,
+        attempt,
+        input.attemptedAt,
+        input.attemptedAt,
+        input.attemptedAt,
+        input.attemptedAt,
+        input.artifactId,
+        input.claimExpiresAt
+      );
+    } else if (input.result.status === 'rejected') {
+      db.run(
+        `UPDATE event_announcement_messages
+            SET deletion_status = 'rejected', deletion_attempt_count = ?, deletion_next_attempt_at = NULL,
+                deletion_finalized_at = ?, deletion_last_error = ?, delete_error = ?
+          WHERE id = ? AND deletion_status IN ('pending', 'unconfirmed')
+            AND deletion_next_attempt_at = ?`,
+        attempt,
+        input.attemptedAt,
+        input.result.reason,
+        input.result.reason,
+        input.artifactId,
+        input.claimExpiresAt
+      );
+    } else {
+      const reason = input.result.status === 'error'
+        ? input.result.reason
+        : 'Deletion submitted; provider confirmation pending.';
+      const finalAttempt = attempt >= 3;
+      const nextAttemptAt = finalAttempt
+        ? null
+        : new Date(new Date(input.attemptedAt).getTime() + (attempt === 1 ? 60_000 : 4 * 60_000)).toISOString();
+      db.run(
+        `UPDATE event_announcement_messages
+            SET deletion_status = ?, deletion_attempt_count = ?, deletion_next_attempt_at = ?,
+                deletion_submitted_at = CASE WHEN ? = 'unconfirmed' THEN COALESCE(deletion_submitted_at, ?) ELSE deletion_submitted_at END,
+                deletion_finalized_at = ?, deletion_last_error = ?, delete_error = ?
+          WHERE id = ? AND deletion_status IN ('pending', 'unconfirmed')
+            AND deletion_next_attempt_at = ?`,
+        input.result.status === 'submitted' ? 'unconfirmed' : finalAttempt ? 'failed' : 'pending',
+        attempt,
+        nextAttemptAt,
+        input.result.status === 'submitted' ? 'unconfirmed' : 'pending',
+        input.attemptedAt,
+        finalAttempt ? input.attemptedAt : null,
+        reason,
+        reason,
+        input.artifactId,
+        input.claimExpiresAt
+      );
+    }
+    const updated = db.get<EventAnnouncementMessageRow>(
+      `SELECT * FROM event_announcement_messages WHERE id = ?`,
+      input.artifactId
+    );
+    return updated ? eventAnnouncementMessageFromRow(updated) : undefined;
+  });
+}
+
+export function confirmEventAnnouncementMessageDeleted(
+  db: PluginDatabase,
+  targetMessageId: string,
+  confirmedAt: string
+): StoredEventAnnouncementMessage[] {
+  const matches = db.all<EventAnnouncementMessageRow>(
+    `SELECT * FROM event_announcement_messages
+      WHERE deleted_at IS NULL`
+  ).filter((row) => equivalentWhatsAppMessageIds(row.message_id, targetMessageId));
+  for (const row of matches) {
+    db.run(
+      `UPDATE event_announcement_messages
+          SET deletion_status = CASE WHEN deletion_status IS NULL THEN NULL ELSE 'confirmed' END,
+              deletion_next_attempt_at = NULL,
+              deletion_confirmed_at = CASE WHEN deletion_status IS NULL THEN deletion_confirmed_at ELSE ? END,
+              deletion_finalized_at = CASE WHEN deletion_status IS NULL THEN deletion_finalized_at ELSE ? END,
+              deletion_last_error = NULL,
+              deleted_at = ?, delete_error = NULL
+        WHERE id = ? AND deleted_at IS NULL`,
+      confirmedAt,
+      confirmedAt,
+      confirmedAt,
+      row.id
+    );
+  }
+  return matches.map((row) => ({
+    ...eventAnnouncementMessageFromRow(row),
+    ...(row.deletion_status ? {
+      deletionStatus: 'confirmed' as const,
+      deletionConfirmedAt: confirmedAt,
+      deletionFinalizedAt: confirmedAt
+    } : {}),
+    deletedAt: confirmedAt
+  }));
+}
+
 export function markEventAnnouncementMessageDeleted(
   db: PluginDatabase,
   id: string,
   deletedAt: string
 ): void {
   db.run(
-    `UPDATE event_announcement_messages
+      `UPDATE event_announcement_messages
         SET deleted_at = ?,
-            delete_error = NULL
+            delete_error = NULL,
+            deletion_status = CASE WHEN deletion_status IS NULL THEN NULL ELSE 'confirmed' END,
+            deletion_next_attempt_at = NULL,
+            deletion_confirmed_at = CASE WHEN deletion_status IS NULL THEN deletion_confirmed_at ELSE ? END,
+            deletion_finalized_at = CASE WHEN deletion_status IS NULL THEN deletion_finalized_at ELSE ? END,
+            deletion_last_error = NULL
       WHERE id = ?`,
+    deletedAt,
+    deletedAt,
     deletedAt,
     id
   );
@@ -7078,6 +7538,21 @@ export function getEventWeatherDelivery(
   return row ? eventWeatherDeliveryFromRow(row) : undefined;
 }
 
+export function hasSentEventWeatherDeliveryForKind(
+  db: PluginDatabase,
+  eventId: string,
+  kind: string
+): boolean {
+  return Boolean(db.get<{ present: number }>(
+    `SELECT 1 AS present
+       FROM event_weather_deliveries
+      WHERE event_id = ? AND kind = ? AND status = 'sent'
+      LIMIT 1`,
+    eventId,
+    kind
+  ));
+}
+
 export function listRecoverableEventWeatherDeliveries(
   db: PluginDatabase
 ): StoredEventWeatherDelivery[] {
@@ -7789,6 +8264,10 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(eventLocation ? { eventLocation } : {}),
     startsAt: row.starts_at,
     startsAtUtc: row.starts_at_utc || row.starts_at,
+    endsAt: row.ends_at || new Date(
+      new Date(row.starts_at).getTime() + Number(row.calendar_duration_minutes) * 60_000
+    ).toISOString(),
+    spanKind: row.span_kind ?? inferredEventSpanKind(Number(row.calendar_duration_minutes)),
     timezone: row.timezone,
     ...(row.local_date ? { localDate: row.local_date } : {}),
     ...(row.local_time ? { localTime: row.local_time } : {}),
@@ -7854,6 +8333,8 @@ function eventPollReplacementFromRow(row: EventPollReplacementRow): StoredEventP
       answers: {},
       startsAt: '',
       startsAtUtc: '',
+      endsAt: '',
+      spanKind: 'day_trip',
       timezone: 'UTC',
       localDate: '',
       closeAt: '',
@@ -7908,7 +8389,14 @@ function eventAnnouncementMessageFromRow(row: EventAnnouncementMessageRow): Stor
     messageId: row.message_id,
     createdAt: row.created_at,
     ...(row.deleted_at ? { deletedAt: row.deleted_at } : {}),
-    ...(row.delete_error ? { deleteError: row.delete_error } : {})
+    ...(row.delete_error ? { deleteError: row.delete_error } : {}),
+    ...(row.deletion_status ? { deletionStatus: row.deletion_status } : {}),
+    deletionAttemptCount: Number(row.deletion_attempt_count ?? 0),
+    ...(row.deletion_next_attempt_at ? { deletionNextAttemptAt: row.deletion_next_attempt_at } : {}),
+    ...(row.deletion_submitted_at ? { deletionSubmittedAt: row.deletion_submitted_at } : {}),
+    ...(row.deletion_confirmed_at ? { deletionConfirmedAt: row.deletion_confirmed_at } : {}),
+    ...(row.deletion_finalized_at ? { deletionFinalizedAt: row.deletion_finalized_at } : {}),
+    ...(row.deletion_last_error ? { deletionLastError: row.deletion_last_error } : {})
   };
 }
 

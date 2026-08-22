@@ -116,7 +116,7 @@ function renderEvent(
   now: Date
 ): string[] {
   const startsAt = new Date(event.startsAt);
-  const endsAt = new Date(startsAt.getTime() + event.calendarDurationMinutes * 60_000);
+  const endsAt = new Date(event.endsAt);
   return [
     'BEGIN:VEVENT',
     `UID:${escapeText(`${event.id}@official.community-events.whatsapp-bot-platform`)}`,
@@ -126,6 +126,7 @@ function renderEvent(
     `LAST-MODIFIED:${formatUtc(new Date(event.updatedAt))}`,
     `SEQUENCE:${event.calendarStatus === 'cancelled' ? 1 : 0}`,
     ...(event.calendarStatus === 'cancelled' ? ['STATUS:CANCELLED'] : ['STATUS:CONFIRMED']),
+    `CATEGORIES:${event.spanKind === 'day_trip' ? 'DAY TRIP' : 'MULTI-DAY'}`,
     `SUMMARY:${escapeText(calendarEventSummary(event, config))}`,
     ...(event.calendarLocation ? [`LOCATION:${escapeText(event.calendarLocation)}`] : []),
     ...(event.calendarDescription ? [`DESCRIPTION:${escapeText(event.calendarDescription)}`] : []),
@@ -149,6 +150,8 @@ function calendarEventSummary(
     profile,
     answers: event.answers,
     startsAt: new Date(event.startsAt),
+    endsAt: new Date(event.endsAt),
+    spanKind: event.spanKind,
     timezone: event.timezone,
     creatorDisplayName: event.actorLabel
   }).trim();

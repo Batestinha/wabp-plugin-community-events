@@ -54,7 +54,10 @@ export interface EventDraft {
 
 const eventFlowPrefillSchema = z.object({
   profileId: z.string().trim().min(1).optional(),
-  answers: z.record(z.string())
+  answers: z.record(z.string()),
+  spanKind: z.enum(['day_trip', 'multi_day']).optional(),
+  endLocalDate: z.string().trim().min(1).optional(),
+  endLocalTime: z.string().trim().min(1).optional()
 }).strict();
 
 const privateDeliveryFallbackSchema = z.object({
@@ -510,6 +513,9 @@ export function eventDraftKey(scopeId: string, flowSessionId: string): string {
 export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]): EventFlowPrefill {
   const answers: Record<string, string> = {};
   let profileId: string | undefined;
+  let spanKind: EventFlowPrefill['spanKind'];
+  let endLocalDate: string | undefined;
+  let endLocalTime: string | undefined;
   const questionKeys = new Map<string, string>();
   for (const profile of profiles) {
     for (const question of profile.questions) {
@@ -532,6 +538,28 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
       }
       continue;
     }
+    if (flag === 'span') {
+      const normalized = next?.trim().toLowerCase().replace(/[- ]/g, '_');
+      if (normalized === 'day_trip' || normalized === 'multi_day') {
+        spanKind = normalized;
+        if (consumedNext) index += 1;
+      }
+      continue;
+    }
+    if (flag === 'enddate') {
+      if (next && !next.startsWith('--')) {
+        endLocalDate = next.trim();
+        if (consumedNext) index += 1;
+      }
+      continue;
+    }
+    if (flag === 'endtime') {
+      if (next && !next.startsWith('--')) {
+        endLocalTime = next.trim();
+        if (consumedNext) index += 1;
+      }
+      continue;
+    }
     if (flag === 'answer') {
       const parsed = next && !next.startsWith('--') ? splitAnswer(next) : undefined;
       if (parsed) {
@@ -548,13 +576,21 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
     }
   }
 
-  if (!profileId && profiles.length === 1 && Object.keys(answers).length > 0) {
+  if (!profileId && profiles.length === 1 && (
+    Object.keys(answers).length > 0 || spanKind || endLocalDate || endLocalTime
+  )) {
     profileId = profiles[0]?.id;
   }
   const validProfileId = profileId && profiles.some((profile) => profile.id === profileId)
     ? profileId
     : undefined;
-  return { ...(validProfileId ? { profileId: validProfileId } : {}), answers };
+  return {
+    ...(validProfileId ? { profileId: validProfileId } : {}),
+    answers,
+    ...(spanKind ? { spanKind } : {}),
+    ...(endLocalDate ? { endLocalDate } : {}),
+    ...(endLocalTime ? { endLocalTime } : {})
+  };
 }
 
 function splitFlag(arg: string): [string, string | undefined] {

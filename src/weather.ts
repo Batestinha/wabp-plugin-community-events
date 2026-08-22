@@ -28,6 +28,7 @@ import {
   eventsDatabase,
   getEvent,
   getEventWeatherDelivery,
+  hasSentEventWeatherDeliveryForKind,
   prepareEventWeatherDelivery,
   skipEventWeatherDelivery,
   supersedeEventWeatherDelivery,
@@ -277,6 +278,25 @@ export async function handleEventWeatherForecastJob(
     await markWeatherSkipped(context, db, event, payloadDeliveryKind, 'invalid_schedule');
     return [audit('events.weather_forecast.skipped', { eventId, reason: 'invalid_schedule' })];
   }
+  if (hasSentEventWeatherDeliveryForKind(db, event.id, schedule.deliveryKind)) {
+    await markWeatherSkipped(
+      context,
+      db,
+      event,
+      schedule.deliveryKind,
+      'event_date_already_sent',
+      schedule.scheduledAt,
+      schedule.scheduleKind
+    );
+    return [
+      audit('events.weather_forecast.skipped', {
+        eventId,
+        deliveryKind: schedule.deliveryKind,
+        reason: 'event_date_already_sent'
+      }),
+      ...nextDailyWeatherForecastActions(event, profile, schedule, new Date())
+    ];
+  }
 
   const now = new Date();
   const existing = getEventWeatherDelivery(
@@ -403,7 +423,7 @@ async function prepareWeatherDeliveryIntent(
     throw new WeatherDeliveryFenceError(postQueryFenceReason);
   }
   const report = result.report;
-  const forecastDay = selectForecastDay(report, event);
+  const forecastDay = selectForecastDay(report, event, schedule);
   if (!forecastDay) {
     throw new Error('event_day_forecast_unavailable');
   }
@@ -779,6 +799,8 @@ export function renderEventWeatherForecast(input: {
     profile: input.profile,
     answers: input.event.answers,
     startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
+    endsAt: new Date(input.event.endsAt),
+    spanKind: input.event.spanKind,
     timezone: input.event.timezone,
     locale: input.locale,
     creatorDisplayName: input.event.actorLabel || input.event.actorWid,
@@ -848,9 +870,15 @@ function requireWeatherEventActorIdentityId(event: StoredEventRecord): string {
   return actorIdentityId;
 }
 
-function selectForecastDay(report: WeatherForecastOutput, event: StoredEventRecord): WeatherForecastDay | undefined {
-  const eventDate = event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone);
-  return report.days.find((day) => day.date === eventDate);
+function selectForecastDay(
+  report: WeatherForecastOutput,
+  event: StoredEventRecord,
+  schedule: EventWeatherForecastSchedule
+): WeatherForecastDay | undefined {
+  const forecastDate = schedule.scheduleKind === 'daily'
+    ? localDateKey(schedule.scheduledAt, event.timezone)
+    : event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone);
+  return report.days.find((day) => day.date === forecastDate);
 }
 
 function weatherSummary(day: WeatherForecastDay, t: TranslateFn, locale: string): string {
@@ -944,7 +972,7 @@ function nextDailyWeatherForecastActions(
   const searchFrom = completedSchedule.scheduleKind === 'daily'
     ? new Date(Math.max(now.getTime(), completedSchedule.scheduledAt.getTime() + 60_000))
     : now;
-  const scheduledAt = eventWeatherNextDailyForecastScheduledAt(event, profile, searchFrom);
+  const scheduledAt = eventWeatherNextDailyForecastScheduledAt(event, profile, searchFrom, false);
   if (!scheduledAt || !weatherForecastScheduleAllowed(event, scheduledAt, now)) {
     return [];
   }
@@ -973,31 +1001,66 @@ function eventWeatherPollCloseScheduledAt(event: StoredEventRecord): Date | unde
 function eventWeatherNextDailyForecastScheduledAt(
   event: StoredEventRecord,
   profile: EventProfile,
-  now: Date
+  now: Date,
+  allowCurrentDayCatchUp = true
 ): Date | undefined {
-  const eventDateKey = event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone);
-  const eventDate = parseLocalDate(eventDateKey);
+  const occupied = eventOccupiedLocalDateRange(event);
+  const eventStartDate = occupied?.start;
+  const eventEndDate = occupied?.end;
   const nowDate = parseLocalDate(localDateKey(now, event.timezone));
   const time = parseLocalTime(profile.weather.sendAtLocalTime);
-  if (!eventDate || !nowDate || !time) {
+  if (!eventStartDate || !eventEndDate || !nowDate || !time) {
     return undefined;
   }
-  let candidateDate = nowDate;
+  let candidateDate = datePartsKey(nowDate) < datePartsKey(eventStartDate) ? eventStartDate : nowDate;
   let scheduledAt = eventDateAndTimeToUtc(candidateDate, time, event.timezone);
   if (!scheduledAt) {
     return undefined;
   }
   if (scheduledAt.getTime() <= now.getTime()) {
-    candidateDate = addLocalDays(candidateDate, 1);
-    scheduledAt = eventDateAndTimeToUtc(candidateDate, time, event.timezone);
-    if (!scheduledAt) {
-      return undefined;
+    const isCurrentOccupiedDay = datePartsKey(candidateDate) === datePartsKey(nowDate)
+      && datePartsKey(candidateDate) >= datePartsKey(eventStartDate)
+      && datePartsKey(candidateDate) <= datePartsKey(eventEndDate);
+    if (!allowCurrentDayCatchUp || !isCurrentOccupiedDay) {
+      candidateDate = addLocalDays(candidateDate, 1);
+      scheduledAt = eventDateAndTimeToUtc(candidateDate, time, event.timezone);
+      if (!scheduledAt) {
+        return undefined;
+      }
     }
   }
-  return datePartsKey(candidateDate) <= datePartsKey(eventDate) ? scheduledAt : undefined;
+  return datePartsKey(candidateDate) <= datePartsKey(eventEndDate) ? scheduledAt : undefined;
+}
+
+function eventOccupiedLocalDateRange(event: StoredEventRecord): {
+  start: { year: number; month: number; day: number };
+  end: { year: number; month: number; day: number };
+} | undefined {
+  const start = parseLocalDate(event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone));
+  let end = parseLocalDate(localDateKey(new Date(event.endsAt), event.timezone));
+  if (!start || !end) {
+    return undefined;
+  }
+  const endLocalTime = new Intl.DateTimeFormat('en-GB', {
+    timeZone: event.timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).format(new Date(event.endsAt));
+  if (endLocalTime === '00:00' && datePartsKey(end) > datePartsKey(start)) {
+    end = addLocalDays(end, -1);
+  }
+  return { start, end };
 }
 
 function weatherForecastScheduleAllowed(event: StoredEventRecord, scheduledAt: Date, now: Date): boolean {
+  const endsAt = new Date(event.endsAt);
+  if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() <= now.getTime()) {
+    return false;
+  }
+  if (Number.isFinite(endsAt.getTime()) && scheduledAt.getTime() >= endsAt.getTime()) {
+    return false;
+  }
   const cleanupAt = new Date(event.cleanupAt);
   if (Number.isFinite(cleanupAt.getTime()) && cleanupAt.getTime() <= now.getTime()) {
     return false;
@@ -1032,6 +1095,13 @@ function weatherRuntimeSkipReason(event: StoredEventRecord, scheduledAt: Date, n
   }
   if (!event.subgroupChatId) {
     return 'no_event_group';
+  }
+  const endsAt = new Date(event.endsAt);
+  if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() <= now.getTime()) {
+    return 'event_ended';
+  }
+  if (Number.isFinite(endsAt.getTime()) && scheduledAt.getTime() >= endsAt.getTime()) {
+    return 'scheduled_after_event_end';
   }
   const cleanupAt = new Date(event.cleanupAt);
   if (Number.isFinite(cleanupAt.getTime()) && cleanupAt.getTime() <= now.getTime()) {

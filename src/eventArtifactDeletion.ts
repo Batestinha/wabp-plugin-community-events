@@ -1,4 +1,5 @@
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
 import {
   listEventAnnouncementMessages,
   markEventAnnouncementMessageDeleted,
@@ -11,6 +12,7 @@ export interface EventArtifactDeletionResult {
   requested: true;
   attempted: number;
   deleted: EventArtifactDeletionRecord[];
+  unconfirmed: EventArtifactDeletionRecord[];
   failed: EventArtifactDeletionFailure[];
   skippedReason?: 'message_delete_unavailable' | undefined;
 }
@@ -35,7 +37,7 @@ export interface EventArtifactDeletionFailure extends EventArtifactDeletionRecor
 export async function deleteEventArtifacts(input: {
   db: PluginDatabase;
   event: Pick<StoredEventRecord, 'id' | 'scopeId'>;
-  deleteMessage?: ((messageId: string) => Promise<void>) | undefined;
+  deleteMessage?: ((messageId: string) => Promise<MessageDeletionResult | void>) | undefined;
   artifactIds?: readonly string[] | undefined;
 }): Promise<EventArtifactDeletionResult> {
   if (!input.deleteMessage) {
@@ -43,6 +45,7 @@ export async function deleteEventArtifacts(input: {
       requested: true,
       attempted: 0,
       deleted: [],
+      unconfirmed: [],
       failed: [],
       skippedReason: 'message_delete_unavailable'
     };
@@ -58,6 +61,7 @@ export async function deleteEventArtifacts(input: {
     requested: true,
     attempted: messages.length,
     deleted: [],
+    unconfirmed: [],
     failed: []
   };
   for (const message of messages) {
@@ -68,9 +72,17 @@ export async function deleteEventArtifacts(input: {
       messageId: message.messageId
     };
     try {
-      await input.deleteMessage(message.messageId);
-      markEventAnnouncementMessageDeleted(input.db, message.id, new Date().toISOString());
-      result.deleted.push(artifact);
+      const deletion = await input.deleteMessage(message.messageId) ?? { status: 'confirmed' as const };
+      if (deletion.status === 'confirmed') {
+        markEventAnnouncementMessageDeleted(input.db, message.id, new Date().toISOString());
+        result.deleted.push(artifact);
+      } else if (deletion.status === 'rejected') {
+        markEventAnnouncementMessageDeleteFailed(input.db, message.id, deletion.reason);
+        result.failed.push({ ...artifact, reason: deletion.reason });
+      } else {
+        markEventAnnouncementMessageDeleteFailed(input.db, message.id, 'Deletion submitted; provider confirmation pending.');
+        result.unconfirmed.push(artifact);
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       markEventAnnouncementMessageDeleteFailed(input.db, message.id, reason);

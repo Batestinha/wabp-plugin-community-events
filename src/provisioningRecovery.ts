@@ -923,6 +923,30 @@ export async function finalizeUnplannedEventLifecycle(input: {
     });
   }
 
+  try {
+    assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.complete,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: new Date(event.endsAt),
+      payload: { eventId: event.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
+    });
+  } catch (error) {
+    if (error instanceof UnplannedEventFinalizationSupersededError) {
+      throw error;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    failures.push(`completion job: ${reason}`);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.unplanned.completion_enqueue_failed',
+      metadata: { reason }
+    });
+  }
+
   const weatherRequest = eventWeatherForecastJobRequest({
     event,
     profile: input.profile,

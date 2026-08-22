@@ -221,6 +221,8 @@ export async function sendEventCalendarHint(input: {
       profile: input.profile,
       answers: input.event.answers,
       startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
+      endsAt: new Date(input.event.endsAt),
+      spanKind: input.event.spanKind,
       timezone: input.timezone,
       locale: input.locale,
       creatorDisplayName: input.creatorDisplayName,

@@ -15,9 +15,11 @@ export const EVENTS_DATABASE = 'events';
 
 export const EVENTS_JOBS = {
   close: 'event.close',
+  complete: 'event.complete',
   provisioningRecovery: 'event.provisioningRecovery',
   unplannedFinalization: 'event.unplannedFinalization',
   cleanup: 'event.cleanup',
+  cancellationCleanup: 'event.cancellationCleanup',
   announcementDelivery: 'event.announcementDelivery',
   editRepair: 'event.editRepair',
   pollReplacement: 'event.pollReplacement',
@@ -42,7 +44,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.9.0',
+  version: '0.10.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -122,7 +124,7 @@ export const eventsManifest: PluginManifest = {
       }
     ]
   },
-  eventSubscriptions: ['poll.vote', 'plugin.job', 'group.dismantled'],
+  eventSubscriptions: ['message', 'poll.vote', 'plugin.job', 'group.dismantled'],
   services: [
     {
       serviceId: EVENT_ALBUM_SOURCE_SERVICE_ID,
@@ -152,9 +154,11 @@ export const eventsManifest: PluginManifest = {
   dangerousActions: ['message.delete'],
   backgroundJobs: [
     EVENTS_JOBS.close,
+    EVENTS_JOBS.complete,
     EVENTS_JOBS.provisioningRecovery,
     EVENTS_JOBS.unplannedFinalization,
     EVENTS_JOBS.cleanup,
+    EVENTS_JOBS.cancellationCleanup,
     EVENTS_JOBS.announcementDelivery,
     EVENTS_JOBS.editRepair,
     EVENTS_JOBS.pollReplacement,
@@ -232,7 +236,7 @@ export const eventsManifest: PluginManifest = {
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '12',
+  dataVersion: '13',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

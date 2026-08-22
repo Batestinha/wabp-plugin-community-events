@@ -12,15 +12,14 @@ import {
   releaseEventCleanupClaim,
   renewEventCleanupClaim,
   resolvedEventCalendarId,
+  listEventAnnouncementMessages,
   type EventCalendarStatus,
   type EventCleanupClaim,
   type StoredEventRecord
 } from './store';
 import type { OfficialPluginCommandRuntime } from '../shared';
-import {
-  deleteEventArtifacts,
-  type EventArtifactDeletionResult
-} from './eventArtifactDeletion';
+import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
+import type { EventArtifactDeletionResult } from './eventArtifactDeletion';
 import { EVENTS_JOBS } from './manifest';
 import { releaseEligibleEventPollReplacementReceipts } from './pollReplacement';
 
@@ -53,8 +52,9 @@ export async function cancelEventLifecycle(input: {
   actor: EventCancellationActor;
   calendarDisposition?: EventCancellationCalendarDisposition | undefined;
   deleteAnnouncementMessages?: boolean | undefined;
-  deleteMessage?: ((messageId: string) => Promise<void>) | undefined;
+  deleteMessage?: ((messageId: string) => Promise<MessageDeletionResult | void>) | undefined;
   reason?: string | undefined;
+  now?: Date | undefined;
 }): Promise<EventCancellationResult> {
   const { context, runtime, db, event, actor } = input;
   const calendarDisposition = input.calendarDisposition ?? 'cancelled';
@@ -73,7 +73,11 @@ export async function cancelEventLifecycle(input: {
     return { status: 'not_cancellable', reason: 'event poll replacement is in progress' };
   }
 
-  const cancelledAt = new Date().toISOString();
+  const now = input.now ?? new Date();
+  if (new Date(event.endsAt).getTime() <= now.getTime()) {
+    return { status: 'not_cancellable', reason: 'event has already ended' };
+  }
+  const cancelledAt = now.toISOString();
   let cancelled = false;
   const cancellationClaim = event.groupLifecycleStatus === 'poll_closed' ||
     event.groupLifecycleStatus === 'cleanup_failed'
@@ -97,6 +101,7 @@ export async function cancelEventLifecycle(input: {
       cancelledByWid: actor.wid,
       cancelledByLabel: actor.label,
       calendarStatus: calendarDisposition,
+      deleteAnnouncementMessages: input.deleteAnnouncementMessages !== false,
       ...(input.reason ? { reason: input.reason } : {})
     });
     if (!cancelled) {
@@ -162,6 +167,7 @@ export async function cancelEventLifecycle(input: {
         cancelledByWid: actor.wid,
         cancelledByLabel: actor.label,
         calendarStatus: calendarDisposition,
+        deleteAnnouncementMessages: input.deleteAnnouncementMessages !== false,
         ...(input.reason ? { reason: input.reason } : {})
       });
     } catch (error) {
@@ -173,13 +179,41 @@ export async function cancelEventLifecycle(input: {
       return { status: 'not_cancellable', reason: 'event lifecycle changed during cancellation' };
     }
   }
+  const cancellationArtifacts = input.deleteAnnouncementMessages !== false
+    ? listEventAnnouncementMessages(db, event.id).filter((artifact) => artifact.deletionStatus === 'pending')
+    : [];
   const announcementMessageDeletion = input.deleteAnnouncementMessages !== false
-    ? await deleteEventArtifacts({
-      db,
-      event,
-      deleteMessage: input.deleteMessage
-    })
+    ? {
+        requested: true as const,
+        attempted: 0,
+        deleted: [],
+        unconfirmed: cancellationArtifacts.map((artifact) => ({
+          id: artifact.id,
+          kind: artifact.kind,
+          chatId: artifact.chatId,
+          messageId: artifact.messageId
+        })),
+        failed: []
+      }
     : undefined;
+  if (cancellationArtifacts.length > 0) {
+    try {
+      await runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.cancellationCleanup,
+        scopeId: event.scopeId,
+        ...(event.groupId ? { groupId: event.groupId } : {}),
+        ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+        payload: { eventId: event.id },
+        dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${event.id}:initial:${cancelledAt}`
+      });
+    } catch (error) {
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.cancellation_artifact_cleanup_enqueue_failed',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
   const receiptReleaseRetries = await releaseEligibleEventPollReplacementReceipts({
     context,
     db,

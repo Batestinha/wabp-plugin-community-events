@@ -6,6 +6,8 @@ import {
 } from './flow';
 import type { EventProfile } from './config';
 import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseClass } from './store';
+import type { EventSpanKind } from './span';
+import { eventDurationMinutes, validEventSpanDuration } from './span';
 
 export interface MaterializedEventLifecycle {
   pollQuestion: string;
@@ -15,6 +17,8 @@ export interface MaterializedEventLifecycle {
   answers: Record<string, string>;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: Date;
+  endsAt: Date;
+  spanKind: EventSpanKind;
   localDate: string;
   localTime?: string | undefined;
   place?: string | undefined;
@@ -25,20 +29,31 @@ export interface MaterializedEventLifecycle {
   calendarDescription?: string | undefined;
 }
 
+type MaterializableEventFlowAnswers = Omit<EventFlowAnswers, 'endsAt' | 'spanKind'> & {
+  endsAt?: Date | undefined;
+  spanKind?: EventSpanKind | undefined;
+};
+
 export function materializeEventLifecycle(input: {
   profile: EventProfile;
-  answers: EventFlowAnswers;
+  answers: MaterializableEventFlowAnswers;
   timezone: string;
   locale?: string | undefined;
   creatorDisplayName: string;
   eventLocation?: StoredEventLocation | undefined;
 }): MaterializedEventLifecycle {
   const { profile, answers, timezone, locale, creatorDisplayName } = input;
+  const spanKind = answers.spanKind ?? 'day_trip';
+  const endsAt = answers.endsAt ?? new Date(
+    answers.startsAt.getTime() + profile.calendar.durationMinutes * 60_000
+  );
   const pollQuestion = renderEventTemplate({
     template: profile.poll.titleTemplate,
     profile,
     answers: answers.answers,
     startsAt: answers.startsAt,
+    endsAt,
+    spanKind,
     timezone,
     locale,
     creatorDisplayName
@@ -48,14 +63,28 @@ export function materializeEventLifecycle(input: {
     profile,
     answers: answers.answers,
     startsAt: answers.startsAt,
+    endsAt,
+    spanKind,
     timezone,
     locale,
     creatorDisplayName
   });
   const closeAt = new Date(answers.startsAt.getTime() - profile.poll.closeOffsetHoursBeforeStart * 3_600_000);
-  const cleanupAt = new Date(answers.startsAt.getTime() + profile.group.cleanupOffsetHoursAfterStart * 3_600_000);
+  const durationMinutes = eventDurationMinutes(answers.startsAt, endsAt);
+  if (!validEventSpanDuration(spanKind, durationMinutes)) {
+    throw new Error(`Invalid ${spanKind} event duration: ${durationMinutes} minutes.`);
+  }
+  const cleanupAt = new Date(endsAt.getTime() + profile.group.cleanupOffsetHoursAfterEnd * 3_600_000);
   const location = input.eventLocation?.displayLabel ?? calendarLocation(profile, answers.answers);
-  const description = calendarDescription(profile, answers.answers, answers.startsAt, timezone, locale);
+  const description = calendarDescription(
+    profile,
+    answers.answers,
+    answers.startsAt,
+    timezone,
+    locale,
+    endsAt,
+    spanKind
+  );
   return {
     pollQuestion,
     groupTitle,
@@ -73,12 +102,14 @@ export function materializeEventLifecycle(input: {
     answers: answers.answers,
     ...(input.eventLocation ? { eventLocation: input.eventLocation } : {}),
     startsAt: answers.startsAt,
+    endsAt,
+    spanKind,
     localDate: answers.localDate,
     ...(answers.localTime ? { localTime: answers.localTime } : {}),
     ...(location ? { place: input.eventLocation?.displayLabel ?? location } : {}),
     closeAt,
     cleanupAt,
-    calendarDurationMinutes: profile.calendar.durationMinutes,
+    calendarDurationMinutes: durationMinutes,
     ...(location ? { calendarLocation: location } : {}),
     ...(description ? { calendarDescription: description } : {})
   };

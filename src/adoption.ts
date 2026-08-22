@@ -272,6 +272,8 @@ export async function adoptEventLifecycle(input: {
     ...(materialized.eventLocation ? { eventLocation: materialized.eventLocation } : {}),
     startsAt: materialized.startsAt.toISOString(),
     startsAtUtc: materialized.startsAt.toISOString(),
+    endsAt: materialized.endsAt.toISOString(),
+    spanKind: materialized.spanKind,
     timezone: config.timezone,
     localDate: materialized.localDate,
     ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
@@ -404,6 +406,13 @@ export async function adoptEventLifecycle(input: {
     dedupeKey: origin === 'adopted_poll'
       ? `${EVENTS_JOBS.close}:${event.id}`
       : `${EVENTS_JOBS.cleanup}:${event.id}:adopted`
+  });
+  await runtime.enqueuePluginJob({
+    jobName: EVENTS_JOBS.complete,
+    scopeId: event.scopeId,
+    runAt: new Date(event.endsAt),
+    payload: { eventId: event.id },
+    dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
   });
   if (origin !== 'adopted_poll') {
     const weatherRequest = eventWeatherForecastJobRequest({ event, profile, now });

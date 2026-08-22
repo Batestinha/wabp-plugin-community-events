@@ -21,6 +21,7 @@ import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../
 import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
+import { formatEventDateTime } from './datetime';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { voterWidsForResponseBehavior } from './attendance';
 import {
@@ -84,6 +85,8 @@ import {
   getEventAnnouncementSendingLeaseExpiresAt,
   getEventEditRepairExecutionLeaseExpiresAt,
   getEventWeatherDelivery,
+  confirmEventAnnouncementMessageDeleted,
+  claimEventCancellationArtifactDeletion,
   listCreatedGroupParticipants,
   listDirtyEventCalendarPublications,
   listEventCalendarPublicationGenerations,
@@ -92,6 +95,11 @@ import {
   listFailedProvisioningEvents,
   listPendingUnplannedEventFinalizations,
   listPendingCleanupEvents,
+  listPendingCompletionEvents,
+  listDueEventCancellationArtifacts,
+  listEventCancellationCleanupCandidates,
+  listEventCancellationNoticeCandidates,
+  listEventAnnouncementMessages,
   listPendingEventEditRepairs,
   listRecoverableEventAnnouncementDeliveries,
   listPendingEventPollReplacements,
@@ -107,6 +115,9 @@ import {
   markClaimedEventCleaned,
   markClaimedEventCleanupFailed,
   markEventCleaned,
+  markEventCompletedAtEnd,
+  recordEventCancellationArtifactDeletionOutcome,
+  recordEventAnnouncementMessage,
   markClaimedEventReadyForCommunityLink,
   nextEventRevisionTimestamp,
   completeClaimedEventCommunityLink,
@@ -203,6 +214,27 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
     startEventQueueHandoffRecovery(context);
   }
   return {
+    async onMessage(event) {
+      if (event.message.type !== 'message_deleted' || !event.message.replyTo?.messageId) {
+        return [];
+      }
+      const confirmed = confirmEventAnnouncementMessageDeleted(
+        eventsDatabase(context.databases),
+        event.message.replyTo.messageId,
+        event.receivedAt.toISOString()
+      );
+      return [...new Map(confirmed
+        .filter((artifact) => artifact.deletionStatus === 'confirmed')
+        .map((artifact) => [artifact.eventId, artifact])).values()].map((artifact) => ({
+          type: 'plugin.enqueueJob' as const,
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.cancellationCleanup,
+          scopeId: artifact.scopeId,
+          runAt: event.receivedAt,
+          payload: { eventId: artifact.eventId },
+          dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${artifact.eventId}:confirmation:${artifact.id}`
+        }));
+    },
     async onPollVote(event) {
       await handlePollVote(context, event);
     },
@@ -290,12 +322,14 @@ export async function recoverEventJobs(
   const announcementDeliveryJobs = await recoverEventAnnouncementDeliveryJobs(context, options);
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
+  const completionJobs = await recoverEventCompletionJobs(context, options);
   const cleanupJobs = await recoverEventCleanupJobs(context);
+  const cancellationCleanupJobs = await recoverEventCancellationArtifactJobs(context, options);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
   const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + cleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + completionJobs + cleanupJobs + cancellationCleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (
     enqueued > 0 ||
     interruptedPreCreateClaims > 0 ||
@@ -304,7 +338,7 @@ export async function recoverEventJobs(
     questionKeyRenames.unresolved > 0
   ) {
     context.logger.info(
-      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, cleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, completionJobs, cleanupJobs, cancellationCleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -816,6 +850,57 @@ export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Pr
   return enqueued;
 }
 
+export async function recoverEventCompletionJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const now = options.now ?? new Date();
+  const records = listPendingCompletionEvents(eventsDatabase(context.databases));
+  for (const record of records) {
+    const endsAt = new Date(record.endsAt);
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.complete,
+      scopeId: record.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      ...(Number.isFinite(endsAt.getTime()) && endsAt.getTime() > now.getTime() ? { runAt: endsAt } : {}),
+      payload: { eventId: record.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:startup:${record.endsAt}`
+    });
+  }
+  return records.length;
+}
+
+export async function recoverEventCancellationArtifactJobs(
+  context: PluginRuntimeContext,
+  options: EventRecoveryOptions = {}
+): Promise<number> {
+  const db = eventsDatabase(context.databases);
+  const now = options.now ?? new Date();
+  const candidates = new Map([
+    ...listEventCancellationCleanupCandidates(db),
+    ...listEventCancellationNoticeCandidates(db, now.toISOString())
+  ].map((event) => [event.id, event]));
+  for (const event of candidates.values()) {
+    const nextAttemptAt = listEventAnnouncementMessages(db, event.id)
+      .map((artifact) => artifact.deletionNextAttemptAt ? new Date(artifact.deletionNextAttemptAt) : undefined)
+      .filter((date): date is Date => Boolean(date && Number.isFinite(date.getTime())))
+      .sort((left, right) => left.getTime() - right.getTime())[0];
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.cancellationCleanup,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      ...(nextAttemptAt && nextAttemptAt.getTime() > now.getTime() ? { runAt: nextAttemptAt } : {}),
+      payload: { eventId: event.id },
+      dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${event.id}:startup:${nextAttemptAt?.toISOString() ?? 'notice'}`
+    });
+  }
+  return candidates.size;
+}
+
 export async function recoverEventEditRepairJobs(context: PluginRuntimeContext): Promise<number> {
   const db = eventsDatabase(context.databases);
   const repairs = listPendingEventEditRepairs(db);
@@ -1067,6 +1152,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.close) {
     return closeEvent(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.complete) {
+    return completeEventAtEnd(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.provisioningRecovery) {
     return recoverFailedEventProvisioning(context, event);
   }
@@ -1075,6 +1163,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   }
   if (event.jobName === EVENTS_JOBS.cleanup) {
     return cleanupEvent(context, event);
+  }
+  if (event.jobName === EVENTS_JOBS.cancellationCleanup) {
+    return cleanupCancelledEventArtifacts(context, event);
   }
   if (event.jobName === EVENTS_JOBS.weatherForecast) {
     const db = eventsDatabase(context.databases);
@@ -1089,6 +1180,45 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
     return handleEventWeatherForecastJob(context, db, event, profile);
   }
   return [];
+}
+
+async function completeEventAtEnd(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {
+  const eventId = jobPayloadEventId(job.payload);
+  if (!eventId) {
+    return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
+  }
+  const db = eventsDatabase(context.databases);
+  const record = getEvent(db, eventId);
+  if (!record || record.eventStatus !== 'active') {
+    return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or no longer active' })];
+  }
+  const endsAt = new Date(record.endsAt);
+  const now = new Date();
+  if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() > now.getTime()) {
+    return [{
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.complete,
+      scopeId: record.scopeId,
+      runAt: endsAt,
+      payload: { eventId: record.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:deferred:${record.endsAt}`
+    }];
+  }
+  const completedAt = nextEventRevisionTimestamp(record.updatedAt, now);
+  if (!markEventCompletedAtEnd(db, { eventId: record.id, completedAt })) {
+    return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event changed before completion' })];
+  }
+  appendEventLog(db, {
+    eventId: record.id,
+    action: 'events.completed_at_end',
+    metadata: { endsAt: record.endsAt, spanKind: record.spanKind }
+  });
+  return [audit('events.completed_at_end', {
+    eventId: record.id,
+    endsAt: record.endsAt,
+    spanKind: record.spanKind
+  })];
 }
 
 async function replaceEventPollJob(
@@ -1235,7 +1365,10 @@ async function replaceEventPollJob(
   }
 
   const closeAt = new Date(run.event.closeAt);
-  const actions: PluginAction[] = [eventCloseAction(run.event, closeAt)];
+  const actions: PluginAction[] = [
+    eventCloseAction(run.event, closeAt),
+    eventCompleteAction(run.event)
+  ];
   actions.push(...presentationRepairActions);
   actions.push(...run.receiptReleaseRetries.map((retry) =>
     eventPollReceiptReleaseRetryAction(run.event, retry)
@@ -1284,6 +1417,20 @@ function eventPollReplacementRetryAction(
     runAt: input.retryAt,
     payload: { operationId: input.operationId },
     dedupeKey: `${EVENTS_JOBS.pollReplacement}:${input.operationId}:${input.kind}:${input.attempt}`
+  };
+}
+
+function eventCompleteAction(event: StoredEventRecord): PluginEnqueueJobAction {
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.complete,
+    scopeId: event.scopeId,
+    ...(event.groupId ? { groupId: event.groupId } : {}),
+    ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+    runAt: new Date(event.endsAt),
+    payload: { eventId: event.id },
+    dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
   };
 }
 
@@ -4661,6 +4808,149 @@ async function cleanupEvent(context: PluginRuntimeContext, job: PluginJobEvent):
     const reason = error instanceof Error ? error.message : String(error);
     return cleanupFailed(context, db, record, config, attempt, reason, { retryable: true }, claim.claimId);
   }
+}
+
+async function cleanupCancelledEventArtifacts(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const eventId = jobPayloadEventId(job.payload);
+  if (!eventId) {
+    return [audit('events.cancellation_artifact_cleanup.skipped', { reason: 'missing eventId' })];
+  }
+  const db = eventsDatabase(context.databases);
+  const event = getEvent(db, eventId);
+  const supportedLifecycle = event?.eventStatus === 'cancelled' || event?.origin === 'unplanned';
+  if (!event || event.scopeId !== job.scopeId || !supportedLifecycle) {
+    return [audit('events.cancellation_artifact_cleanup.skipped', {
+      eventId,
+      reason: 'event missing, scope mismatch, or not cancelled'
+    })];
+  }
+  const now = new Date();
+  const due = listDueEventCancellationArtifacts(db, now.toISOString(), event.id);
+  for (const artifact of due) {
+    const attemptedAt = new Date().toISOString();
+    const claimExpiresAt = new Date(new Date(attemptedAt).getTime() + 60_000).toISOString();
+    if (!artifact.deletionNextAttemptAt || !claimEventCancellationArtifactDeletion(db, {
+      artifactId: artifact.id,
+      expectedNextAttemptAt: artifact.deletionNextAttemptAt,
+      claimedAt: attemptedAt,
+      claimedUntil: claimExpiresAt
+    })) {
+      continue;
+    }
+    try {
+      const result = context.deleteMessage
+        ? await context.deleteMessage(artifact.messageId)
+        : { status: 'error' as const, reason: 'Plugin runtime does not expose message deletion.' };
+      recordEventCancellationArtifactDeletionOutcome(db, {
+        artifactId: artifact.id,
+        result,
+        attemptedAt,
+        claimExpiresAt
+      });
+    } catch (error) {
+      recordEventCancellationArtifactDeletionOutcome(db, {
+        artifactId: artifact.id,
+        result: { status: 'error', reason: error instanceof Error ? error.message : String(error) },
+        attemptedAt,
+        claimExpiresAt
+      });
+    }
+  }
+
+  const artifacts = listEventAnnouncementMessages(db, event.id);
+  const nextAttemptAt = artifacts
+    .map((artifact) => artifact.deletionNextAttemptAt ? new Date(artifact.deletionNextAttemptAt) : undefined)
+    .filter((date): date is Date => Boolean(date && Number.isFinite(date.getTime())))
+    .sort((left, right) => left.getTime() - right.getTime())[0];
+  if (nextAttemptAt) {
+    return [audit('events.cancellation_artifact_cleanup.pending', {
+      eventId: event.id,
+      nextAttemptAt: nextAttemptAt.toISOString()
+    }), {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.cancellationCleanup,
+      scopeId: event.scopeId,
+      runAt: nextAttemptAt,
+      payload: { eventId: event.id },
+      dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${event.id}:retry:${nextAttemptAt.toISOString()}`
+    }];
+  }
+
+  const unresolved = artifacts.filter((artifact) =>
+    artifact.deletionStatus === 'rejected' || artifact.deletionStatus === 'failed' ||
+    artifact.deletionStatus === 'unconfirmed'
+  );
+  const allArtifacts = listEventAnnouncementMessages(db, event.id, { includeDeleted: true });
+  const existingNotice = allArtifacts.find((artifact) => artifact.kind === 'cancellation_notice');
+  const ended = new Date(event.endsAt).getTime() <= now.getTime();
+  if (event.eventStatus === 'cancelled' && unresolved.length > 0 && !existingNotice && !ended) {
+    const announcementChatId = event.announcementGroupWid || event.groupWid;
+    if (!announcementChatId || !context.sendText || !event.actorIdentityId) {
+      return [cancellationNoticeRetryAction(event, now, 'notice delivery unavailable')];
+    }
+    try {
+      const t = await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId);
+      const poll = unresolved.find((artifact) => artifact.kind === 'poll')
+        ?? artifacts.find((artifact) => artifact.kind === 'poll');
+      const receipt = await context.sendText(
+        announcementChatId,
+        t('official.community-events.cancel.staleArtifactNotice', {
+          title: event.subgroupTitle || event.groupTitle || event.pollQuestion || event.id,
+          startsAt: formatEventDateTime(new Date(event.startsAt), event.timezone),
+          endsAt: formatEventDateTime(new Date(event.endsAt), event.timezone),
+          eventId: event.id
+        }),
+        {
+          idempotencyKey: `community-events:${event.id}:cancellation-notice`,
+          ...(poll ? { quotedMessageId: poll.messageId } : {})
+        }
+      );
+      if (!receipt.messageId) {
+        throw new Error('Cancellation notice send returned no WhatsApp message id.');
+      }
+      recordEventAnnouncementMessage(db, {
+        eventId: event.id,
+        scopeId: event.scopeId,
+        kind: 'cancellation_notice',
+        deliveryKey: 'cancellation',
+        chatId: announcementChatId,
+        messageId: receipt.messageId,
+        createdAt: new Date().toISOString()
+      });
+    } catch (error) {
+      context.logger.warn({ error, eventId: event.id }, 'Unable to publish event cancellation stale-artifact notice');
+      return [cancellationNoticeRetryAction(event, now, error instanceof Error ? error.message : String(error))];
+    }
+  }
+  return [audit('events.cancellation_artifact_cleanup.completed', {
+    eventId: event.id,
+    confirmed: allArtifacts.filter((artifact) => artifact.deletionStatus === 'confirmed').length,
+    unconfirmed: allArtifacts.filter((artifact) => artifact.deletionStatus === 'unconfirmed').length,
+    rejected: allArtifacts.filter((artifact) => artifact.deletionStatus === 'rejected').length,
+    failed: allArtifacts.filter((artifact) => artifact.deletionStatus === 'failed').length,
+    noticePublished: Boolean(existingNotice || (unresolved.length > 0 && !ended))
+  })];
+}
+
+function cancellationNoticeRetryAction(
+  event: StoredEventRecord,
+  now: Date,
+  reason: string
+): PluginEnqueueJobAction {
+  const retryAt = new Date(now.getTime() + 60_000);
+  return {
+    type: 'plugin.enqueueJob',
+    pluginId: EVENTS_PLUGIN_ID,
+    jobName: EVENTS_JOBS.cancellationCleanup,
+    scopeId: event.scopeId,
+    runAt: retryAt,
+    payload: { eventId: event.id },
+    dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${event.id}:notice:${retryAt.toISOString()}:${reason}`
+  };
 }
 
 async function withEventCleanupClaimHeartbeat<T>(

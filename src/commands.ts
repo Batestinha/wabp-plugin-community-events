@@ -13,6 +13,7 @@ import {
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import type {
   OutboundSendResult,
+  MessageDeletionResult,
   PrivateDeliveryFallback,
   SendTextOptions
 } from '../../../platform/transport/transportTypes';
@@ -78,6 +79,7 @@ import {
   attemptUnplannedEventFinalization,
   eventCommunityLinkRecoveryRunAt,
   EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+  eventProvisioningRecoveryCursor,
   eventProvisioningRecoveryDedupeKey,
   eventProvisioningRecoveryRunAt
 } from './provisioningRecovery';
@@ -96,11 +98,14 @@ import {
 import {
   appendEventLog,
   beginEventPollReplacement,
+  beginEventArtifactDeletionCleanup,
   checkpointClaimedEventProvisioningChild,
   checkpointClaimedEventParticipantOutcomes,
   advanceEventProvisioningRecovery,
   claimInitialEventPreCreateProvisioningAttempt,
+  claimScheduledEventPreCreateProvisioningAttempt,
   completeUnplannedEventProvisioning,
+  convertOpenPollEventToUnplanned,
   markClaimedEventReadyForCommunityLink,
   nextEventRevisionTimestamp,
   configuredEventCalendarOwnership,
@@ -110,6 +115,7 @@ import {
   insertEvent,
   listCancellableEvents,
   listScopeEvents,
+  listEventAnnouncementMessages,
   haltClaimedEventPreCreateProvisioning,
   haltClaimedKnownChildEventProvisioning,
   markClaimedEventPreCreateProvisioningMissed,
@@ -218,14 +224,15 @@ interface EventTextTransport {
     text: string,
     options?: SendTextOptions | undefined
   ): Promise<OutboundSendResult>;
-  deleteMessage(messageId: string): Promise<void>;
+  deleteMessage(messageId: string): Promise<MessageDeletionResult>;
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
 export type EventFlowCompletionContext = PluginCommandContext | PluginRuntimeContext;
 
-type PendingEventFlowAnswers = Omit<EventFlowAnswers, 'startsAt'> & {
+type PendingEventFlowAnswers = Omit<EventFlowAnswers, 'startsAt' | 'endsAt'> & {
   startsAt: string;
+  endsAt: string;
 };
 
 interface PendingCreateEventLocationSelection {
@@ -690,22 +697,34 @@ async function listFutureEvents(context: PluginCommandContext, ctx: CommandConte
   }
   const now = Date.now();
   const events = listScopeEvents(eventsDatabase(runtime.databases), scopeId)
-    .filter((event) => event.eventStatus === 'active' && new Date(event.startsAt).getTime() >= now)
+    .filter((event) => event.eventStatus === 'active' && new Date(event.endsAt).getTime() > now)
     .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime() || left.id.localeCompare(right.id));
   if (events.length === 0) {
     return { handled: true, text: ctx.t('official.community-events.list.none') };
   }
-  const items = events.map((event) => ctx.t('official.community-events.list.item', {
-    title: eventDisplayTitle(event),
-    startsAt: eventStartsAtLabel(event, ctx.locale),
-    status: eventLifecycleLabel(event, ctx.t),
-    eventId: event.id
-  }));
+  const section = (spanKind: StoredEventRecord['spanKind'], key: string): string => {
+    const items = events
+      .filter((event) => event.spanKind === spanKind)
+      .map((event) => ctx.t('official.community-events.list.item', {
+        title: eventDisplayTitle(event),
+        range: eventRangeLabel(event, ctx.locale),
+        span: ctx.t(spanKind === 'day_trip'
+          ? 'official.community-events.span.dayTrip'
+          : 'official.community-events.span.multiDay'),
+        status: eventLifecycleLabel(event, ctx.t),
+        eventId: event.id
+      }));
+    return items.length > 0 ? ctx.t(key, { events: items.join('\n') }) : '';
+  };
+  const sections = [
+    section('day_trip', 'official.community-events.list.dayTrips'),
+    section('multi_day', 'official.community-events.list.multiDay')
+  ].filter(Boolean);
   return {
     handled: true,
     text: ctx.t('official.community-events.list.result', {
-      count: String(items.length),
-      events: items.join('\n')
+      count: String(events.length),
+      events: sections.join('\n\n')
     })
   };
 }
@@ -1167,8 +1186,8 @@ async function completeEventUpdate(input: {
       eventLocation: input.eventLocation
     });
     const now = new Date();
-    const startsInPast = materialized.startsAt.getTime() <= now.getTime();
-    if (event.eventStatus === 'active' && startsInPast && !input.pastCompletionConfirmed) {
+    const eventEnded = materialized.endsAt.getTime() <= now.getTime();
+    if (event.eventStatus === 'active' && eventEnded && !input.pastCompletionConfirmed) {
       await input.activeTransport.sendText(
         input.responseChatId,
         input.t('official.community-events.update.pastCompletionConfirmationRequired')
@@ -1181,15 +1200,26 @@ async function completeEventUpdate(input: {
       profiles: input.draft.profiles
     });
     const openPollEdit = event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open';
-    if (openPollEdit && materialized.closeAt.getTime() <= now.getTime()) {
-      await input.activeTransport.sendText(
-        input.responseChatId,
-        input.t('official.community-events.update.openPollPastUnsupported')
-      );
-      return;
-    }
-    const outcome = openPollEdit
-      ? await replaceOpenEventPollLifecycle({
+    const outcome = openPollEdit && materialized.closeAt.getTime() <= now.getTime()
+      ? await convertOpenPollEditToUnplannedLifecycle({
+          context: input.context,
+          runtime: input.runtime,
+          activeTransport: input.activeTransport,
+          db,
+          event,
+          profile: input.draft.profile,
+          config,
+          materialized,
+          actorWid: input.draft.actorWid,
+          actorLabel: input.draft.actorLabel,
+          locale: input.draft.locale,
+          t: input.t,
+          now,
+          operationId: input.draft.flowSessionId,
+          sourcePluginId: input.draft.sourcePluginId
+        })
+      : openPollEdit
+        ? await replaceOpenEventPollLifecycle({
           context: input.context,
           runtime: input.runtime,
           activeTransport: input.activeTransport,
@@ -1206,8 +1236,8 @@ async function completeEventUpdate(input: {
           now,
           operationId: input.draft.flowSessionId,
           sourcePluginId: input.draft.sourcePluginId
-        })
-      : await updateEventLifecycle({
+          })
+        : await updateEventLifecycle({
           context: input.context,
           runtime: input.runtime,
           activeTransport: input.activeTransport,
@@ -1224,7 +1254,7 @@ async function completeEventUpdate(input: {
           now,
           operationId: input.draft.flowSessionId,
           sourcePluginId: input.draft.sourcePluginId
-        });
+          });
     if ('replacementStatus' in outcome && outcome.replacementStatus !== 'completed') {
       await input.activeTransport.sendText(
         input.responseChatId,
@@ -1247,7 +1277,9 @@ async function completeEventUpdate(input: {
       );
       return;
     }
-    const doneMessageKey = outcome.repairPending
+    const doneMessageKey = 'convertedToUnplanned' in outcome && outcome.convertedToUnplanned
+      ? 'official.community-events.update.convertedToUnplanned'
+      : outcome.repairPending
       ? outcome.completedNow
         ? 'official.community-events.update.donePastCompletionRepairPending'
         : 'official.community-events.update.doneRepairPending'
@@ -1259,6 +1291,8 @@ async function completeEventUpdate(input: {
       input.t(doneMessageKey, {
         title: materialized.groupTitle,
         eventId: event.id,
+        startsAt: formatEventDateTime(materialized.startsAt, event.timezone, input.draft.locale),
+        endsAt: formatEventDateTime(materialized.endsAt, event.timezone, input.draft.locale),
         cleanupAt: formatEventDateTime(outcome.cleanupAt, event.timezone, input.draft.locale)
       })
     );
@@ -1349,6 +1383,8 @@ async function replaceOpenEventPollLifecycle(input: {
       eventLocation: input.materialized.eventLocation,
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
+      endsAt: input.materialized.endsAt.toISOString(),
+      spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
       localTime: input.materialized.localTime,
@@ -1417,6 +1453,8 @@ async function replaceOpenEventPollLifecycle(input: {
       ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
+      endsAt: input.materialized.endsAt.toISOString(),
+      spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
       ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
@@ -1633,6 +1671,19 @@ async function replaceOpenEventPollLifecycle(input: {
       );
     }
   }
+  try {
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.complete,
+      scopeId: updatedEvent.scopeId,
+      ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
+      ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
+      runAt: new Date(updatedEvent.endsAt),
+      payload: { eventId: updatedEvent.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${updatedEvent.id}:${updatedEvent.endsAt}`
+    });
+  } catch (error) {
+    repairFailures.push(`completion_job: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (run.retirementPending) {
     const followUpAt = run.replacement.nextAttemptAt
       ? new Date(run.replacement.nextAttemptAt)
@@ -1707,6 +1758,243 @@ async function replaceOpenEventPollLifecycle(input: {
   };
 }
 
+async function convertOpenPollEditToUnplannedLifecycle(input: {
+  context: PluginCommandContext;
+  runtime: OfficialPluginCommandRuntime;
+  activeTransport: EventTextTransport;
+  db: ReturnType<typeof eventsDatabase>;
+  event: StoredEventRecord;
+  profile: EventProfile;
+  config: ReturnType<typeof parseEventsConfig>;
+  materialized: MaterializedEventLifecycle;
+  actorWid: string;
+  actorLabel: string;
+  locale: string;
+  t: CommandContext['t'];
+  now: Date;
+  operationId: string;
+  sourcePluginId?: string | undefined;
+}): Promise<{
+  changed: true;
+  completedNow: false;
+  repairPending: boolean;
+  cleanupAt: Date;
+  convertedToUnplanned: true;
+}> {
+  if (!input.event.pollWaMsgId) {
+    throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
+  }
+  const oldPollWaMsgId = input.event.pollWaMsgId;
+  const artifactIds = listEventAnnouncementMessages(input.db, input.event.id)
+    .filter((artifact) => artifact.scopeId === input.event.scopeId)
+    .map((artifact) => artifact.id);
+  const updatedAt = nextEventRevisionTimestamp(input.event.updatedAt, input.now);
+  const provisioningGeneration = randomUUID();
+  const converted = convertOpenPollEventToUnplanned(input.db, {
+    eventId: input.event.id,
+    scopeId: input.event.scopeId,
+    expectedUpdatedAt: input.event.updatedAt,
+    expectedPollWaMsgId: oldPollWaMsgId,
+    profileLabel: input.profile.label,
+    profileRevision: eventProfileQuestionSchemaRevision(input.profile),
+    responseClasses: input.materialized.responseClasses,
+    answers: input.materialized.answers,
+    ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
+    startsAt: input.materialized.startsAt.toISOString(),
+    startsAtUtc: input.materialized.startsAt.toISOString(),
+    endsAt: input.materialized.endsAt.toISOString(),
+    spanKind: input.materialized.spanKind,
+    timezone: input.event.timezone || input.config.timezone,
+    localDate: input.materialized.localDate,
+    ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
+    ...(input.materialized.place ? { place: input.materialized.place } : {}),
+    closeAt: input.materialized.closeAt.toISOString(),
+    cleanupAt: input.materialized.cleanupAt.toISOString(),
+    groupTitle: input.materialized.groupTitle,
+    calendarDurationMinutes: input.materialized.calendarDurationMinutes,
+    ...(input.materialized.calendarLocation ? { calendarLocation: input.materialized.calendarLocation } : {}),
+    ...(input.materialized.calendarDescription ? { calendarDescription: input.materialized.calendarDescription } : {}),
+    provisioningGeneration,
+    provisioningAttempt: 1,
+    provisioningNextRunAt: updatedAt,
+    updatedAt
+  });
+  if (!converted) {
+    throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
+  }
+  appendEventLog(input.db, {
+    eventId: input.event.id,
+    action: 'events.open_poll_converted_to_unplanned',
+    metadata: {
+      operationId: input.operationId,
+      oldPollWaMsgId,
+      editorWid: input.actorWid,
+      sourcePluginId: input.sourcePluginId,
+      closeAt: input.materialized.closeAt.toISOString()
+    }
+  });
+  let intent = getEvent(input.db, input.event.id);
+  if (!intent) {
+    throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
+  }
+  let repairPending = false;
+  const cleanupInitializedAt = new Date().toISOString();
+  const cleanupStarted = beginEventArtifactDeletionCleanup(
+    input.db,
+    intent.id,
+    artifactIds,
+    cleanupInitializedAt
+  );
+  if (cleanupStarted > 0) {
+    repairPending = true;
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.cancellationCleanup,
+        scopeId: intent.scopeId,
+        ...(intent.groupId ? { groupId: intent.groupId } : {}),
+        ...(intent.groupWid ? { groupWid: intent.groupWid } : {}),
+        payload: { eventId: intent.id },
+        dedupeKey: `${EVENTS_JOBS.cancellationCleanup}:${intent.id}:unplanned-conversion:${input.operationId}`
+      });
+    } catch (error) {
+      appendEventLog(input.db, {
+        eventId: intent.id,
+        action: 'events.open_poll_conversion.artifact_cleanup_enqueue_failed',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+  let provisioning: ProvisionUnplannedEventSubgroupResult | undefined;
+  try {
+    provisioning = await provisionUnplannedEventSubgroup({
+      context: input.context,
+      runtime: input.runtime,
+      db: input.db,
+      event: intent
+    });
+  } catch (error) {
+    repairPending = true;
+    appendEventLog(input.db, {
+      eventId: intent.id,
+      action: 'events.open_poll_conversion.provisioning_failed',
+      metadata: { reason: error instanceof Error ? error.message : String(error) }
+    });
+  }
+  if (provisioning?.status !== 'completed') {
+    repairPending = true;
+    intent = getEvent(input.db, input.event.id) ?? intent;
+    try {
+      const receipt = await input.activeTransport.sendText(
+        intent.announcementGroupWid || intent.groupWid || '',
+        input.t('official.community-events.update.convertedNoticePending', {
+          title: intent.groupTitle,
+          eventId: intent.id,
+          startsAt: formatEventDateTime(new Date(intent.startsAt), intent.timezone, input.locale),
+          endsAt: formatEventDateTime(new Date(intent.endsAt), intent.timezone, input.locale)
+        }),
+        {
+          quotedMessageId: oldPollWaMsgId,
+          idempotencyKey: `community-events:${intent.id}:unplanned-conversion-pending:${input.operationId}`
+        }
+      );
+      if (receipt.messageId) {
+        recordEventAnnouncementMessage(input.db, {
+          eventId: intent.id,
+          scopeId: intent.scopeId,
+          kind: 'event_edit',
+          deliveryKey: `unplanned-conversion-pending:${input.operationId}`,
+          chatId: intent.announcementGroupWid || intent.groupWid || '',
+          messageId: receipt.messageId,
+          createdAt: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      appendEventLog(input.db, {
+        eventId: intent.id,
+        action: 'events.open_poll_conversion.notice_failed',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+  if (provisioning?.status === 'completed') {
+    const event = getEvent(input.db, input.event.id);
+    if (!event?.subgroupChatId) {
+      throw new Error(`Converted event ${input.event.id} has no subgroup.`);
+    }
+    let groupJoinUrl = '';
+    try {
+      groupJoinUrl = await eventGroupJoinUrl(input.context, '{groupJoinUrl}', event.subgroupChatId);
+    } catch {
+      repairPending = true;
+    }
+    try {
+      const notice = input.t('official.community-events.update.convertedNotice', {
+        title: event.groupTitle,
+        eventId: event.id,
+        startsAt: formatEventDateTime(new Date(event.startsAt), event.timezone, input.locale),
+        endsAt: formatEventDateTime(new Date(event.endsAt), event.timezone, input.locale),
+        groupJoinUrl,
+        subgroupChatId: event.subgroupChatId
+      });
+      const receipt = await input.activeTransport.sendText(
+        event.announcementGroupWid || event.groupWid || '',
+        notice,
+        {
+          quotedMessageId: oldPollWaMsgId,
+          idempotencyKey: `community-events:${event.id}:unplanned-conversion:${input.operationId}`
+        }
+      );
+      if (receipt.messageId) {
+        recordEventAnnouncementMessage(input.db, {
+          eventId: event.id,
+          scopeId: event.scopeId,
+          kind: 'event_edit',
+          deliveryKey: `unplanned-conversion:${input.operationId}`,
+          chatId: event.announcementGroupWid || event.groupWid || '',
+          messageId: receipt.messageId,
+          createdAt: new Date().toISOString()
+        });
+      }
+    } catch {
+      repairPending = true;
+    }
+    try {
+      await attemptUnplannedEventFinalization({
+        context: input.context,
+        runtime: input.runtime,
+        activeTransport: input.activeTransport,
+        event,
+        profile: {
+          ...input.profile,
+          eventGroupHint: {
+            ...input.profile.eventGroupHint,
+            sendForUnplannedEvents: false
+          }
+        },
+        config: input.config,
+        locale: input.locale,
+        creatorDisplayName: event.actorLabel || event.actorWid,
+        trigger: 'unplanned_created',
+        now: input.now
+      });
+    } catch (error) {
+      repairPending = true;
+      appendEventLog(input.db, {
+        eventId: event.id,
+        action: 'events.open_poll_conversion.finalization_failed',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+  }
+  return {
+    changed: true,
+    completedNow: false,
+    repairPending,
+    cleanupAt: input.materialized.cleanupAt,
+    convertedToUnplanned: true
+  };
+}
+
 async function updateEventLifecycle(input: {
   context: PluginCommandContext;
   runtime: OfficialPluginCommandRuntime;
@@ -1775,6 +2063,8 @@ async function updateEventLifecycle(input: {
       eventLocation: input.materialized.eventLocation,
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
+      endsAt: input.materialized.endsAt.toISOString(),
+      spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
       localTime: input.materialized.localTime,
@@ -1822,6 +2112,8 @@ async function updateEventLifecycle(input: {
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
+    endsAt: input.materialized.endsAt.toISOString(),
+    spanKind: input.materialized.spanKind,
     timezone,
     localDate: input.materialized.localDate,
     ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
@@ -1895,6 +2187,21 @@ async function updateEventLifecycle(input: {
       repairFailures.push(`cleanup_job: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  if (!completionRequested) {
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.complete,
+        scopeId: input.event.scopeId,
+        ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+        ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
+        runAt: input.materialized.endsAt,
+        payload: { eventId: input.event.id },
+        dedupeKey: `${EVENTS_JOBS.complete}:${input.event.id}:${input.materialized.endsAt.toISOString()}`
+      });
+    } catch (error) {
+      repairFailures.push(`completion_job: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   if (
     input.event.eventStatus === 'active' &&
     !completionRequested &&
@@ -1906,6 +2213,8 @@ async function updateEventLifecycle(input: {
         updatedAt,
         startsAt: input.materialized.startsAt.toISOString(),
         startsAtUtc: input.materialized.startsAt.toISOString(),
+        endsAt: input.materialized.endsAt.toISOString(),
+        spanKind: input.materialized.spanKind,
         timezone,
         ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
         localDate: input.materialized.localDate,
@@ -1986,6 +2295,8 @@ function eventStructuredDataChanged(
     stableJson(event.eventLocation) !== stableJson(materialized.eventLocation) ||
     new Date(event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
     new Date(event.startsAtUtc ?? event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
+    new Date(event.endsAt).toISOString() !== materialized.endsAt.toISOString() ||
+    event.spanKind !== materialized.spanKind ||
     event.timezone !== input.timezone ||
     event.localDate !== materialized.localDate ||
     normalizedOptional(event.localTime) !== normalizedOptional(materialized.localTime) ||
@@ -2091,7 +2402,29 @@ function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfile): Ev
   }
   return {
     profileId: profile.id,
-    answers
+    answers,
+    spanKind: event.spanKind,
+    ...(event.spanKind === 'multi_day'
+      ? eventEndPrefill(event)
+      : {})
+  };
+}
+
+function eventEndPrefill(event: StoredEventRecord): Pick<EventFlowPrefill, 'endLocalDate' | 'endLocalTime'> {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: event.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date(event.endsAt));
+  const value = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? '';
+  return {
+    endLocalDate: `${value('year')}-${value('month')}-${value('day')}`,
+    endLocalTime: `${value('hour')}:${value('minute')}`
   };
 }
 
@@ -2156,7 +2489,8 @@ function registerEventCancelFlowCompletionHandler(
     if (result.status === 'cancelled') {
       const deletionIncomplete = Boolean(
         result.announcementMessageDeletion?.skippedReason ||
-        result.announcementMessageDeletion?.failed.length
+        result.announcementMessageDeletion?.failed.length ||
+        result.announcementMessageDeletion?.unconfirmed.length
       );
       await activeTransport.sendText(responseChatId, t(deletionIncomplete
         ? 'official.community-events.cancel.doneDeletionPending'
@@ -2167,7 +2501,9 @@ function registerEventCancelFlowCompletionHandler(
       return true;
     }
     if (result.status === 'not_cancellable') {
-      await activeTransport.sendText(responseChatId, t('official.community-events.cancel.notCancellable', {
+      await activeTransport.sendText(responseChatId, t(result.reason === 'event has already ended'
+        ? 'official.community-events.cancel.ended'
+        : 'official.community-events.cancel.notCancellable', {
         title: eventDisplayTitle(event),
         status: eventLifecycleLabel(event, t)
       }));
@@ -2252,11 +2588,14 @@ async function resolveEventCancelCandidates(
   | { status: 'none' }
   | { status: 'permission_denied' }
 > {
-  const allCandidates = listCancellableEvents(input.db, input.scopeId);
+  const now = new Date();
+  const allCandidates = listCancellableEvents(input.db, input.scopeId, now.toISOString());
   const subgroupCandidates = input.query
     ? []
     : listEventsBySubgroupChatId(input.db, input.scopeId, input.chatId)
-      .filter((candidate) => candidate.eventStatus === 'active');
+      .filter((candidate) =>
+        candidate.eventStatus === 'active' && new Date(candidate.endsAt).getTime() > now.getTime()
+      );
   const matched = subgroupCandidates.length > 0
     ? subgroupCandidates
     : input.query
@@ -2367,6 +2706,7 @@ function eventCancelConfirmationSummary(input: {
   return input.t('official.community-events.cancel.summary', {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, input.locale),
+    range: eventRangeLabel(event, input.locale),
     status: eventLifecycleLabel(event, input.t),
     eventId: event.id
   });
@@ -2376,6 +2716,7 @@ function eventChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], loca
   return t('official.community-events.cancel.choiceLabel', {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, locale),
+    range: eventRangeLabel(event, locale),
     status: eventLifecycleLabel(event, t),
     eventId: event.id
   });
@@ -2385,6 +2726,7 @@ function eventEditChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], 
   const params = {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, locale),
+    range: eventRangeLabel(event, locale),
     status: eventLifecycleLabel(event, t),
     eventId: event.id
   };
@@ -2417,6 +2759,12 @@ function eventStartsAtLabel(event: StoredEventRecord, locale = 'en'): string {
   return formatEventDateTime(new Date(event.startsAt), event.timezone, locale);
 }
 
+function eventRangeLabel(event: StoredEventRecord, locale = 'en'): string {
+  return `${formatEventDateTime(new Date(event.startsAt), event.timezone, locale)} – ${
+    formatEventDateTime(new Date(event.endsAt), event.timezone, locale)
+  }`;
+}
+
 function eventDisplayTitle(event: StoredEventRecord): string {
   return event.groupTitle || event.pollQuestion || event.id;
 }
@@ -2428,7 +2776,9 @@ function eventSearchFields(event: StoredEventRecord, locale = 'en'): string[] {
     event.pollQuestion,
     event.subgroupTitle,
     event.profileLabel,
-    eventStartsAtLabel(event, locale)
+    eventStartsAtLabel(event, locale),
+    eventRangeLabel(event, locale),
+    event.spanKind
   ].filter((value): value is string => Boolean(value));
 }
 
@@ -3226,6 +3576,8 @@ async function publishConfirmedEvent(input: {
       eventLocation: input.eventLocation,
       startsAt: materialized.startsAt.toISOString(),
       startsAtUtc: materialized.startsAt.toISOString(),
+      endsAt: materialized.endsAt.toISOString(),
+      spanKind: materialized.spanKind,
       timezone: input.draft.timezone,
       localDate: materialized.localDate,
       ...(materialized.localTime ? { localTime: materialized.localTime } : {}),
@@ -3316,6 +3668,15 @@ async function publishConfirmedEvent(input: {
       runAt: materialized.closeAt,
       payload: { eventId, pollGeneration: 1, pollWaMsgId: sent.messageId },
       dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
+    });
+    await input.runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.complete,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: new Date(event.endsAt),
+      payload: { eventId: event.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
     });
     await sendEventCalendarHint({
       context: input.context,
@@ -3422,6 +3783,8 @@ async function createUnplannedEventLifecycle(input: {
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
+    endsAt: input.materialized.endsAt.toISOString(),
+    spanKind: input.materialized.spanKind,
     timezone: input.draft.timezone,
     localDate: input.materialized.localDate,
     ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
@@ -3504,8 +3867,9 @@ async function provisionUnplannedEventSubgroup(input: {
   db: ReturnType<typeof eventsDatabase>;
   event: StoredEventRecord;
 }): Promise<ProvisionUnplannedEventSubgroupResult> {
-  const generation = randomUUID();
-  const attempt = 1;
+  const scheduledCursor = eventProvisioningRecoveryCursor(input.event);
+  const generation = scheduledCursor?.nextRunAt ? scheduledCursor.generation : randomUUID();
+  const attempt = scheduledCursor?.nextRunAt ? scheduledCursor.attempt : 1;
   const claimedAt = new Date();
   const cleanupAt = new Date(input.event.cleanupAt);
   if (
@@ -3514,14 +3878,23 @@ async function provisionUnplannedEventSubgroup(input: {
   ) {
     throw new Error(`Unplanned event ${input.event.id} reached its cleanup deadline before subgroup creation.`);
   }
-  const claimed = claimInitialEventPreCreateProvisioningAttempt(input.db, {
-    eventId: input.event.id,
-    scopeId: input.event.scopeId,
-    expectedUpdatedAt: input.event.updatedAt,
-    generation,
-    attempt,
-    claimedAt: claimedAt.toISOString()
-  });
+  const claimed = scheduledCursor?.nextRunAt
+    ? claimScheduledEventPreCreateProvisioningAttempt(input.db, {
+        eventId: input.event.id,
+        scopeId: input.event.scopeId,
+        generation,
+        attempt,
+        expectedNextRunAt: scheduledCursor.nextRunAt,
+        claimedAt: claimedAt.toISOString()
+      })
+    : claimInitialEventPreCreateProvisioningAttempt(input.db, {
+        eventId: input.event.id,
+        scopeId: input.event.scopeId,
+        expectedUpdatedAt: input.event.updatedAt,
+        generation,
+        attempt,
+        claimedAt: claimedAt.toISOString()
+      });
   if (!claimed) {
     throw new Error(
       `Unplanned event ${input.event.id} already has a claimed subgroup creation attempt; ` +
@@ -3531,7 +3904,13 @@ async function provisionUnplannedEventSubgroup(input: {
   appendEventLog(input.db, {
     eventId: input.event.id,
     action: 'events.provisioning.precreate_claimed',
-    metadata: { generation, attempt, claimedAt: claimedAt.toISOString(), origin: 'unplanned' }
+    metadata: {
+      generation,
+      attempt,
+      claimedAt: claimedAt.toISOString(),
+      origin: 'unplanned',
+      scheduledBeforeProviderCall: Boolean(scheduledCursor?.nextRunAt)
+    }
   });
 
   let created: Awaited<ReturnType<typeof createEventCommunitySubgroupCandidate>>['created'] | undefined;
@@ -4495,17 +4874,20 @@ function eventLocationCandidateOptions(candidates: GeocoderPlace[]): Array<{ id:
 function pendingEventFlowAnswers(answers: EventFlowAnswers): PendingEventFlowAnswers {
   return {
     ...answers,
-    startsAt: answers.startsAt.toISOString()
+    startsAt: answers.startsAt.toISOString(),
+    endsAt: answers.endsAt.toISOString()
   };
 }
 
 function eventFlowAnswersFromPending(answers: PendingEventFlowAnswers): EventFlowAnswers | undefined {
   const startsAt = new Date(answers.startsAt);
-  if (!Number.isFinite(startsAt.getTime())) {
+  const endsAt = new Date(answers.endsAt);
+  if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) {
     return undefined;
   }
   return {
     ...answers,
-    startsAt
+    startsAt,
+    endsAt
   };
 }

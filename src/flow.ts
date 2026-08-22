@@ -17,8 +17,13 @@ import {
   parseEventDateInput,
   parseEventTimeInput
 } from './datetime';
+import type { EventSpanKind } from './span';
+import { eventDurationMinutes, validEventSpanDuration } from './span';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
+export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
+export const EVENT_END_DATE_STEP_ID_PREFIX = 'end-date-';
+export const EVENT_END_TIME_STEP_ID_PREFIX = 'end-time-';
 const EVENT_CONFIRM_VALUE = 'yes';
 const EVENT_PAST_COMPLETION_CONFIRM_VALUE = 'yes-complete';
 
@@ -26,13 +31,20 @@ export interface EventFlowAnswers {
   profileId: string;
   answers: Record<string, string>;
   startsAt: Date;
+  endsAt: Date;
+  spanKind: EventSpanKind;
   localDate: string;
   localTime?: string | undefined;
+  endLocalDate?: string | undefined;
+  endLocalTime?: string | undefined;
 }
 
 export interface EventFlowPrefill {
   profileId?: string | undefined;
   answers: Record<string, string>;
+  spanKind?: EventSpanKind | undefined;
+  endLocalDate?: string | undefined;
+  endLocalTime?: string | undefined;
 }
 
 export const EVENT_CREATION_FLOW_TYPE_PREFIX = 'official.community-events.create.';
@@ -140,7 +152,11 @@ function buildEventFlowDefinition(input: {
     for (const [index, question] of visibleQuestions.entries()) {
       const nextQuestion = visibleQuestions[index + 1];
       const stepId = questionStepId(profile, question);
-      const nextStepId = nextQuestion ? questionStepId(profile, nextQuestion) : confirmStepId(profile);
+      const nextStepId = nextQuestion
+        ? questionStepId(profile, nextQuestion)
+        : input.askPrefilledQuestions
+          ? spanStepId(profile)
+          : firstMissingSpanStepId(profile, initialData) ?? confirmStepId(profile);
       if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
         steps[stepId] = {
           id: stepId,
@@ -186,6 +202,48 @@ function buildEventFlowDefinition(input: {
             : {})
       };
     }
+    steps[spanStepId(profile)] = {
+      id: spanStepId(profile),
+      kind: 'choice',
+      prompt: input.t('official.community-events.flow.spanKind'),
+      options: [
+        { label: input.t('official.community-events.span.dayTrip'), value: 'day_trip' },
+        { label: input.t('official.community-events.span.multiDay'), value: 'multi_day' }
+      ],
+      minSelections: 1,
+      maxSelections: 1,
+      nextStepIdByValue: {
+        day_trip: confirmStepId(profile),
+        multi_day: endDateStepId(profile)
+      }
+    };
+    steps[endDateStepId(profile)] = {
+      id: endDateStepId(profile),
+      kind: 'text',
+      prompt: input.t('official.community-events.flow.endDate'),
+      nextStepId: endTimeStepId(profile),
+      resolveInput: (resolutionInput) => resolveDateQuestionInput({
+        t: input.t,
+        timezone,
+        locale,
+        now: input.now,
+        allowPast: input.allowPastStartsAt,
+        input: resolutionInput
+      })
+    };
+    steps[endTimeStepId(profile)] = {
+      id: endTimeStepId(profile),
+      kind: 'text',
+      prompt: input.t('official.community-events.flow.endTime'),
+      nextStepId: confirmStepId(profile),
+      resolveInput: (resolutionInput) => resolveEventEndTimeInput({
+        t: input.t,
+        profile,
+        timezone,
+        locale,
+        input: resolutionInput
+      })
+    };
     steps[confirmStepId(profile)] = {
       id: confirmStepId(profile),
       kind: 'choice',
@@ -224,7 +282,9 @@ function buildEventFlowDefinition(input: {
     initialStepId: initialProfile
       ? input.askPrefilledQuestions
         ? firstQuestionStepId(initialProfile)
-        : firstMissingQuestionStepId(initialProfile, initialData) ?? confirmStepId(initialProfile)
+        : firstMissingQuestionStepId(initialProfile, initialData)
+          ?? firstMissingSpanStepId(initialProfile, initialData)
+          ?? confirmStepId(initialProfile)
       : EVENT_PROFILE_STEP_ID,
     context: 'either',
     timeoutMinutes: 30,
@@ -260,6 +320,26 @@ export function eventInitialFlowData(
     const value = prefill?.answers[question.key]?.trim();
     if (value) {
       data[questionStepId(profile, question)] = initialQuestionValue(question, value, options);
+    }
+  }
+  if (prefill?.spanKind) {
+    data[spanStepId(profile)] = [prefill.spanKind];
+  }
+  if (prefill?.endLocalDate) {
+    const parsed = parseEventDateInput(prefill.endLocalDate, {
+      timezone: options?.timezone ?? 'UTC',
+      locale: options?.locale ?? 'en',
+      now: options?.now,
+      allowPast: options?.allowPast
+    });
+    if (parsed.status === 'ok') {
+      data[endDateStepId(profile)] = eventDateAnswer(parsed);
+    }
+  }
+  if (prefill?.endLocalTime) {
+    const parsed = parseEventTimeInput(prefill.endLocalTime);
+    if (parsed.status === 'ok') {
+      data[endTimeStepId(profile)] = eventTimeAnswer(parsed);
     }
   }
   return data;
@@ -306,6 +386,9 @@ export function eventFlowAnswersFromRaw(input: {
   timezone: string;
   locale: string;
   now?: Date | undefined;
+  spanKind?: EventSpanKind | undefined;
+  endLocalDate?: string | undefined;
+  endLocalTime?: string | undefined;
 }): EventFlowAnswers | undefined {
   const data: Record<string, unknown> = {
     [EVENT_PROFILE_STEP_ID]: input.profile.id
@@ -345,6 +428,22 @@ export function eventFlowAnswersFromRaw(input: {
     }
     data[questionStepId(input.profile, question)] = value;
   }
+  data[spanStepId(input.profile)] = [input.spanKind ?? 'day_trip'];
+  if (input.endLocalDate) {
+    const parsed = parseEventDateInput(input.endLocalDate, {
+      timezone: input.timezone,
+      locale: input.locale,
+      now: input.now,
+      allowPast: true
+    });
+    if (parsed.status !== 'ok') return undefined;
+    data[endDateStepId(input.profile)] = eventDateAnswer(parsed);
+  }
+  if (input.endLocalTime) {
+    const parsed = parseEventTimeInput(input.endLocalTime);
+    if (parsed.status !== 'ok') return undefined;
+    data[endTimeStepId(input.profile)] = eventTimeAnswer(parsed);
+  }
   return eventFlowAnswersFromData(data, input.profile, input.timezone, input.locale, input.now);
 }
 
@@ -353,6 +452,8 @@ export function renderEventTemplate(input: {
   profile: EventProfile;
   answers: Record<string, string>;
   startsAt: Date;
+  endsAt?: Date | undefined;
+  spanKind?: EventSpanKind | undefined;
   timezone: string;
   locale?: string | undefined;
   creatorDisplayName: string;
@@ -365,6 +466,12 @@ export function renderEventTemplate(input: {
     profileId: input.profile.id,
     profileLabel: input.profile.label,
     creatorDisplayName: input.creatorDisplayName,
+    ...(input.spanKind ? { spanKind: input.spanKind } : {}),
+    ...(input.endsAt ? {
+      endsAt: formatEventDateTime(input.endsAt, input.timezone, input.locale),
+      endDate: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, dateStyle: 'medium' }).format(input.endsAt),
+      endTime: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, timeStyle: 'short' }).format(input.endsAt)
+    } : {}),
     ...Object.fromEntries(Object.entries(input.extraTokens ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])))
   };
   return input.template.replace(/\{([A-Za-z][A-Za-z0-9_-]*)\}/g, (_match, key: string) => tokens[key] ?? '');
@@ -380,10 +487,28 @@ export function calendarLocation(profile: EventProfile, answers: Record<string, 
     : answers[profile.location.questionKey];
 }
 
-export function calendarDescription(profile: EventProfile, answers: Record<string, string>, startsAt: Date, timezone: string, locale = 'en'): string | undefined {
+export function calendarDescription(
+  profile: EventProfile,
+  answers: Record<string, string>,
+  startsAt: Date,
+  timezone: string,
+  locale = 'en',
+  endsAt?: Date | undefined,
+  spanKind?: EventSpanKind | undefined
+): string | undefined {
   const template = profile.calendar.descriptionTemplate;
   return template
-    ? renderEventTemplate({ template, profile, answers, startsAt, timezone, locale, creatorDisplayName: '' }).trim()
+    ? renderEventTemplate({
+        template,
+        profile,
+        answers,
+        startsAt,
+        ...(endsAt ? { endsAt } : {}),
+        ...(spanKind ? { spanKind } : {}),
+        timezone,
+        locale,
+        creatorDisplayName: ''
+      }).trim()
     : undefined;
 }
 
@@ -422,12 +547,46 @@ function eventFlowAnswersFromData(
   if (!startsAt) {
     return undefined;
   }
+  const rawSpanKind = data[spanStepId(profile)];
+  const selectedSpanKind = Array.isArray(rawSpanKind) ? rawSpanKind[0] : rawSpanKind;
+  if (selectedSpanKind !== 'day_trip' && selectedSpanKind !== 'multi_day') {
+    return undefined;
+  }
+  let endsAt: Date;
+  let endLocalDate: string | undefined;
+  let endLocalTime: string | undefined;
+  if (selectedSpanKind === 'day_trip') {
+    endsAt = new Date(startsAt.getTime() + profile.calendar.durationMinutes * 60_000);
+  } else {
+    const endDate = eventDatePartsFromRaw(data[endDateStepId(profile)]);
+    const endTime = eventTimePartsFromRaw(data[endTimeStepId(profile)]);
+    if (!endDate || !endTime) {
+      return undefined;
+    }
+    const materializedEnd = eventDateAndTimeToUtc(endDate, endTime, timezone);
+    const durationMinutes = materializedEnd
+      ? eventDurationMinutes(startsAt, materializedEnd)
+      : 0;
+    if (
+      !materializedEnd
+      || !validEventSpanDuration('multi_day', durationMinutes)
+    ) {
+      return undefined;
+    }
+    endsAt = materializedEnd;
+    endLocalDate = formatEventDateParts(endDate);
+    endLocalTime = formatEventTimeParts(endTime);
+  }
   return {
     profileId: profile.id,
     answers,
     startsAt,
+    endsAt,
+    spanKind: selectedSpanKind,
     localDate: formatEventDateParts(startDate),
-    ...(explicitStartTime ? { localTime: formatEventTimeParts(explicitStartTime) } : {})
+    ...(explicitStartTime ? { localTime: formatEventTimeParts(explicitStartTime) } : {}),
+    ...(endLocalDate ? { endLocalDate } : {}),
+    ...(endLocalTime ? { endLocalTime } : {})
   };
 }
 
@@ -440,12 +599,37 @@ function firstMissingQuestionStepId(profile: EventProfile, data: Record<string, 
   return question ? questionStepId(profile, question) : undefined;
 }
 
+function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unknown>): string | undefined {
+  const rawSpanKind = data[spanStepId(profile)];
+  const spanKind = Array.isArray(rawSpanKind) ? rawSpanKind[0] : rawSpanKind;
+  if (spanKind !== 'day_trip' && spanKind !== 'multi_day') {
+    return spanStepId(profile);
+  }
+  if (spanKind === 'multi_day') {
+    if (!isEventDateAnswer(data[endDateStepId(profile)])) return endDateStepId(profile);
+    if (!isEventTimeAnswer(data[endTimeStepId(profile)])) return endTimeStepId(profile);
+  }
+  return undefined;
+}
+
 function questionStepId(profile: EventProfile, question: EventQuestion): string {
   return `q-${profile.id}-${question.key}`;
 }
 
 function confirmStepId(profile: EventProfile): string {
   return `confirm-${profile.id}`;
+}
+
+function spanStepId(profile: EventProfile): string {
+  return `${EVENT_SPAN_STEP_ID_PREFIX}${profile.id}`;
+}
+
+function endDateStepId(profile: EventProfile): string {
+  return `${EVENT_END_DATE_STEP_ID_PREFIX}${profile.id}`;
+}
+
+function endTimeStepId(profile: EventProfile): string {
+  return `${EVENT_END_TIME_STEP_ID_PREFIX}${profile.id}`;
 }
 
 function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, currentValue?: string | undefined): string {
@@ -549,6 +733,33 @@ function resolveTimeQuestionInput(input: {
   };
 }
 
+function resolveEventEndTimeInput(input: {
+  t: TranslateFn;
+  profile: EventProfile;
+  timezone: string;
+  locale: string;
+  input: {
+    definition: FlowDefinition;
+    state: FlowState;
+    step: FlowStep;
+    input: string;
+  };
+}): ReturnType<NonNullable<FlowStep['resolveInput']>> {
+  const parsed = parseEventTimeInput(input.input.input);
+  if (parsed.status !== 'ok') {
+    return { status: 'error', reply: input.t('official.community-events.flow.timeInvalid') };
+  }
+  const candidateData = {
+    ...input.input.state.data,
+    [endTimeStepId(input.profile)]: eventTimeAnswer(parsed)
+  };
+  const answers = eventFlowAnswersFromData(candidateData, input.profile, input.timezone, input.locale);
+  if (!answers) {
+    return { status: 'error', reply: input.t('official.community-events.flow.endInvalid') };
+  }
+  return { status: 'use-value', value: eventTimeAnswer(parsed) };
+}
+
 function initialQuestionValue(
   question: EventQuestion,
   value: string,
@@ -643,7 +854,7 @@ function eventFlowStartsInPast(
   now: Date
 ): boolean {
   const answers = eventFlowAnswersFromData(state.data, profile, timezone, locale);
-  return Boolean(answers && answers.startsAt.getTime() <= now.getTime());
+  return Boolean(answers && answers.endsAt.getTime() <= now.getTime());
 }
 
 function initialChoiceValue(question: EventQuestion, value: string): unknown {
@@ -661,7 +872,11 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
   }
   return t('official.community-events.flow.confirmSummary', {
     profile: profile.label,
-    startsAt: formatEventDateTime(answers.startsAt, timezone, locale)
+    startsAt: formatEventDateTime(answers.startsAt, timezone, locale),
+    endsAt: formatEventDateTime(answers.endsAt, timezone, locale),
+    span: t(answers.spanKind === 'day_trip'
+      ? 'official.community-events.span.dayTrip'
+      : 'official.community-events.span.multiDay')
   });
 }
 

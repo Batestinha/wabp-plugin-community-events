@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
 import { eventsMessages } from './messages';
+import { MAX_DAY_TRIP_DURATION_MINUTES, MIN_DAY_TRIP_DURATION_MINUTES } from './span';
 
 export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
@@ -34,13 +35,15 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'windDirection',
   'weatherCode'
 ] as const;
+export const EVENT_SPAN_TEMPLATE_TOKENS = ['spanKind', 'endsAt', 'endDate', 'endTime'] as const;
 export const EVENT_SYSTEM_TEMPLATE_TOKENS = [...new Set<string>([
   ...EVENT_DATE_TEMPLATE_TOKENS,
   ...EVENT_PROFILE_TEMPLATE_TOKENS,
   ...EVENT_GROUP_HINT_TEMPLATE_TOKENS,
   ...EVENT_EDIT_ANNOUNCEMENT_TEMPLATE_TOKENS,
   ...EVENT_CALENDAR_HINT_TEMPLATE_TOKENS,
-  ...EVENT_WEATHER_TEMPLATE_TOKENS
+  ...EVENT_WEATHER_TEMPLATE_TOKENS,
+  ...EVENT_SPAN_TEMPLATE_TOKENS
 ])];
 export const DEFAULT_EVENT_CALENDAR_ID = 'events';
 export const DEFAULT_EVENT_GROUP_HINT_TEMPLATE = eventsMessages[
@@ -189,7 +192,7 @@ const eventProfileObjectSchema = z.object({
   }).strict(),
   group: z.object({
     titleTemplate: authoredTextSchema,
-    cleanupOffsetHoursAfterStart: z.number().int().min(0).max(24 * 365).default(48)
+    cleanupOffsetHoursAfterEnd: z.number().int().min(0).max(24 * 365).default(48)
   }).strict(),
   eventGroupHint: z.object({
     template: authoredTextSchema.default(DEFAULT_EVENT_GROUP_HINT_TEMPLATE),
@@ -203,7 +206,7 @@ const eventProfileObjectSchema = z.object({
   }).strict().default({}),
   calendar: z.object({
     calendarId: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).or(z.literal('')).default(DEFAULT_EVENT_CALENDAR_ID),
-    durationMinutes: z.number().int().positive().max(24 * 60 * 7).default(240),
+    durationMinutes: z.number().int().min(MIN_DAY_TRIP_DURATION_MINUTES).max(MAX_DAY_TRIP_DURATION_MINUTES).default(240),
     titleTemplate: optionalAuthoredTextSchema.optional(),
     descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
@@ -398,7 +401,7 @@ export const defaultClimbingEventProfile: EventProfile = {
   },
   group: {
     titleTemplate: '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
-    cleanupOffsetHoursAfterStart: 48
+    cleanupOffsetHoursAfterEnd: 48
   },
   eventGroupHint: {
     template: DEFAULT_EVENT_GROUP_HINT_TEMPLATE,
@@ -729,7 +732,9 @@ function normalizeEventProfileInput(profile: unknown): unknown {
   const normalizedProfile = {
     ...profileWithoutLegacyFields,
     ...normalizedStartQuestions.keys,
-    eventGroupHint: normalizeEventGroupHintInput(profile.eventGroupHint, previousEventGroupHint)
+    eventGroupHint: normalizeEventGroupHintInput(profile.eventGroupHint, previousEventGroupHint),
+    group: normalizeEventGroupInput(profile.group),
+    calendar: normalizeEventCalendarInput(profile.calendar)
   };
   const rawResponseClasses = Array.isArray(profile.poll.responseClasses)
     ? profile.poll.responseClasses.filter(isRecord)
@@ -767,6 +772,34 @@ function normalizeEventProfileInput(profile: unknown): unknown {
       responseClasses,
       options
     }
+  };
+}
+
+function normalizeEventGroupInput(input: unknown): unknown {
+  if (!isRecord(input)) {
+    return input;
+  }
+  const {
+    cleanupOffsetHoursAfterStart,
+    ...current
+  } = input;
+  return {
+    ...current,
+    cleanupOffsetHoursAfterEnd: current.cleanupOffsetHoursAfterEnd ?? cleanupOffsetHoursAfterStart
+  };
+}
+
+function normalizeEventCalendarInput(input: unknown): unknown {
+  if (!isRecord(input)) {
+    return input;
+  }
+  const durationMinutes = input.durationMinutes;
+  return {
+    ...input,
+    ...(typeof durationMinutes === 'number' && Number.isInteger(durationMinutes) &&
+      durationMinutes >= MIN_DAY_TRIP_DURATION_MINUTES && durationMinutes <= 7 * 24 * 60
+      ? { durationMinutes: Math.min(durationMinutes, MAX_DAY_TRIP_DURATION_MINUTES) }
+      : {})
   };
 }
 

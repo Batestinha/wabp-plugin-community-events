@@ -64,6 +64,7 @@ const eventsPanelControl = defineControl({
     builderEndpoints: {
       state: '/api/v1/plugins/official.community-events/events/:scopeId',
       terminate: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/terminate',
+      retryCancellationCleanup: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/cancellation-cleanup/retry',
       calendarHintReplay: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar-hint/replay',
       calendarDisposition: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar',
       calendarOwnership: '/api/v1/plugins/official.community-events/events/:scopeId/:eventId/calendar-ownership'

@@ -26,6 +26,7 @@ export const EVENT_END_DATE_STEP_ID_PREFIX = 'end-date-';
 export const EVENT_END_TIME_STEP_ID_PREFIX = 'end-time-';
 const EVENT_CONFIRM_VALUE = 'yes';
 const EVENT_PAST_COMPLETION_CONFIRM_VALUE = 'yes-complete';
+const DEFAULT_MULTI_DAY_END_TIME = { hour: 23, minute: 59, raw: '23:59' } as const;
 
 export interface EventFlowAnswers {
   profileId: string;
@@ -234,8 +235,16 @@ function buildEventFlowDefinition(input: {
     steps[endTimeStepId(profile)] = {
       id: endTimeStepId(profile),
       kind: 'text',
-      prompt: input.t('official.community-events.flow.endTime'),
+      prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime')),
       nextStepId: confirmStepId(profile),
+      skipOnSymbolInput: true,
+      resolveSkippedInput: (resolutionInput) => resolveSkippedEventEndTime({
+        t: input.t,
+        profile,
+        timezone,
+        locale,
+        input: resolutionInput
+      }),
       resolveInput: (resolutionInput) => resolveEventEndTimeInput({
         t: input.t,
         profile,
@@ -443,6 +452,8 @@ export function eventFlowAnswersFromRaw(input: {
     const parsed = parseEventTimeInput(input.endLocalTime);
     if (parsed.status !== 'ok') return undefined;
     data[endTimeStepId(input.profile)] = eventTimeAnswer(parsed);
+  } else if ((input.spanKind ?? 'day_trip') === 'multi_day' && input.endLocalDate) {
+    data[endTimeStepId(input.profile)] = null;
   }
   return eventFlowAnswersFromData(data, input.profile, input.timezone, input.locale, input.now);
 }
@@ -559,7 +570,9 @@ function eventFlowAnswersFromData(
     endsAt = new Date(startsAt.getTime() + profile.calendar.durationMinutes * 60_000);
   } else {
     const endDate = eventDatePartsFromRaw(data[endDateStepId(profile)]);
-    const endTime = eventTimePartsFromRaw(data[endTimeStepId(profile)]);
+    const rawEndTime = data[endTimeStepId(profile)];
+    const endTime = eventTimePartsFromRaw(rawEndTime)
+      ?? (rawEndTime === null ? DEFAULT_MULTI_DAY_END_TIME : undefined);
     if (!endDate || !endTime) {
       return undefined;
     }
@@ -607,7 +620,8 @@ function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unkn
   }
   if (spanKind === 'multi_day') {
     if (!isEventDateAnswer(data[endDateStepId(profile)])) return endDateStepId(profile);
-    if (!isEventTimeAnswer(data[endTimeStepId(profile)])) return endTimeStepId(profile);
+    const endTime = data[endTimeStepId(profile)];
+    if (endTime !== null && !isEventTimeAnswer(endTime)) return endTimeStepId(profile);
   }
   return undefined;
 }
@@ -655,6 +669,15 @@ function optionalQuestionPromptSuffix(t: TranslateFn, profile: EventProfile, que
   if (question.required) {
     return '';
   }
+  return profileOptionalPromptSuffix(t, profile);
+}
+
+function optionalFlowPrompt(t: TranslateFn, profile: EventProfile, prompt: string): string {
+  const suffix = profileOptionalPromptSuffix(t, profile);
+  return suffix ? `${prompt}\n${suffix}` : prompt;
+}
+
+function profileOptionalPromptSuffix(t: TranslateFn, profile: EventProfile): string {
   return profile.optionalPromptSuffix.trim()
     ? profile.optionalPromptSuffix
     : t('official.community-events.flow.optionalPromptSuffix');
@@ -758,6 +781,29 @@ function resolveEventEndTimeInput(input: {
     return { status: 'error', reply: input.t('official.community-events.flow.endInvalid') };
   }
   return { status: 'use-value', value: eventTimeAnswer(parsed) };
+}
+
+function resolveSkippedEventEndTime(input: {
+  t: TranslateFn;
+  profile: EventProfile;
+  timezone: string;
+  locale: string;
+  input: {
+    definition: FlowDefinition;
+    state: FlowState;
+    step: FlowStep;
+    input: string;
+  };
+}): ReturnType<NonNullable<FlowStep['resolveSkippedInput']>> {
+  const candidateData = {
+    ...input.input.state.data,
+    [endTimeStepId(input.profile)]: null
+  };
+  const answers = eventFlowAnswersFromData(candidateData, input.profile, input.timezone, input.locale);
+  if (!answers) {
+    return { status: 'error', reply: input.t('official.community-events.flow.endInvalid') };
+  }
+  return { status: 'use-value', value: null };
 }
 
 function initialQuestionValue(

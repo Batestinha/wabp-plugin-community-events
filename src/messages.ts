@@ -92,7 +92,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.flow.profile': 'What type of event?',
   'official.community-events.flow.spanKind': 'Is this a day trip or a multi-day event?',
   'official.community-events.flow.endDate': 'What date does the event end? (for example: 2026-07-13)',
-  'official.community-events.flow.endTime': 'What time does the event end? (for example: 18:30)',
+  'official.community-events.flow.endTime': 'What time does the event end? (optional; default: 23:59; for example: 18:30)',
   'official.community-events.flow.endInvalid': 'A multi-day event must last at least 24 hours and no more than 30 elapsed days. Check the end date and time.',
   'official.community-events.span.dayTrip': 'Day trip',
   'official.community-events.span.multiDay': 'Multi-day event',

@@ -28,7 +28,7 @@ import { repairEventEdit } from './editRepair';
 import { eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { sendEventCalendarHint } from './calendarHint';
-import { formatEventDateTime } from './datetime';
+import { eventLifecycleCompleteAt, formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
 import { eventCleanupJobRequest } from './cleanupScheduling';
@@ -58,6 +58,10 @@ import {
   renderEventGroupAnnouncement
 } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
+import {
+  createEventStartTimeAgreement,
+  markEventStartTimeAgreementExternallyResolved
+} from './startTimeAgreementStore';
 import {
   eventPollReplacementPublishIdempotencyKey,
   runEventPollReplacement
@@ -697,7 +701,7 @@ async function listFutureEvents(context: PluginCommandContext, ctx: CommandConte
   }
   const now = Date.now();
   const events = listScopeEvents(eventsDatabase(runtime.databases), scopeId)
-    .filter((event) => event.eventStatus === 'active' && new Date(event.endsAt).getTime() > now)
+    .filter((event) => event.eventStatus === 'active' && new Date(event.lifecycleCompleteAt).getTime() > now)
     .sort((left, right) => new Date(left.startsAt).getTime() - new Date(right.startsAt).getTime() || left.id.localeCompare(right.id));
   if (events.length === 0) {
     return { handled: true, text: ctx.t('official.community-events.list.none') };
@@ -998,7 +1002,14 @@ function registerEventUpdateFlowCompletionHandler(
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
-    const startsInPast = answers.startsAt.getTime() <= Date.now();
+    const lifecycleCompleteAt = eventLifecycleCompleteAt({
+      localDate: answers.localDate,
+      ...(answers.localTime ? { localTime: answers.localTime } : {}),
+      endsAt: answers.endsAt,
+      spanKind: answers.spanKind,
+      timezone: draft.timezone
+    });
+    const startsInPast = Boolean(lifecycleCompleteAt && lifecycleCompleteAt.getTime() <= Date.now());
     const pastCompletionConfirmed = eventFlowPastCompletionConfirmed(snapshot, draft.profile);
     if (event.eventStatus === 'active' && startsInPast && !pastCompletionConfirmed) {
       await activeTransport.sendText(
@@ -1186,7 +1197,7 @@ async function completeEventUpdate(input: {
       eventLocation: input.eventLocation
     });
     const now = new Date();
-    const eventEnded = materialized.endsAt.getTime() <= now.getTime();
+    const eventEnded = materialized.lifecycleCompleteAt.getTime() <= now.getTime();
     if (event.eventStatus === 'active' && eventEnded && !input.pastCompletionConfirmed) {
       await input.activeTransport.sendText(
         input.responseChatId,
@@ -1384,6 +1395,7 @@ async function replaceOpenEventPollLifecycle(input: {
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
       endsAt: input.materialized.endsAt.toISOString(),
+      lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
       spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
@@ -1454,6 +1466,7 @@ async function replaceOpenEventPollLifecycle(input: {
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
       endsAt: input.materialized.endsAt.toISOString(),
+      lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
       spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
@@ -1600,6 +1613,13 @@ async function replaceOpenEventPollLifecycle(input: {
 
   const repairFailures: string[] = [];
   const updatedEvent = run.event;
+  if (updatedEvent.localTime) {
+    markEventStartTimeAgreementExternallyResolved(input.db, {
+      eventId: updatedEvent.id,
+      localTime: updatedEvent.localTime,
+      resolvedAt: updatedEvent.updatedAt
+    });
+  }
   let repairNeedsJob = false;
   let repairRetryAt: Date | undefined;
   try {
@@ -1677,9 +1697,9 @@ async function replaceOpenEventPollLifecycle(input: {
       scopeId: updatedEvent.scopeId,
       ...(updatedEvent.groupId ? { groupId: updatedEvent.groupId } : {}),
       ...(updatedEvent.groupWid ? { groupWid: updatedEvent.groupWid } : {}),
-      runAt: new Date(updatedEvent.endsAt),
+      runAt: new Date(updatedEvent.lifecycleCompleteAt),
       payload: { eventId: updatedEvent.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${updatedEvent.id}:${updatedEvent.endsAt}`
+      dedupeKey: `${EVENTS_JOBS.complete}:${updatedEvent.id}:${updatedEvent.lifecycleCompleteAt}`
     });
   } catch (error) {
     repairFailures.push(`completion_job: ${error instanceof Error ? error.message : String(error)}`);
@@ -1803,6 +1823,7 @@ async function convertOpenPollEditToUnplannedLifecycle(input: {
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
     endsAt: input.materialized.endsAt.toISOString(),
+    lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
     spanKind: input.materialized.spanKind,
     timezone: input.event.timezone || input.config.timezone,
     localDate: input.materialized.localDate,
@@ -2020,7 +2041,7 @@ async function updateEventLifecycle(input: {
   )).toISOString();
   const completionRequested = input.event.eventStatus === 'active' &&
     input.pastCompletionConfirmed &&
-    input.materialized.startsAt.getTime() <= input.now.getTime();
+    input.materialized.lifecycleCompleteAt.getTime() <= input.now.getTime();
   const cleanupAt = input.materialized.cleanupAt;
   const timezone = input.event.timezone || input.config.timezone;
   const changed = completionRequested || eventStructuredDataChanged(input.event, {
@@ -2064,6 +2085,7 @@ async function updateEventLifecycle(input: {
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
       endsAt: input.materialized.endsAt.toISOString(),
+      lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
       spanKind: input.materialized.spanKind,
       timezone,
       localDate: input.materialized.localDate,
@@ -2113,6 +2135,7 @@ async function updateEventLifecycle(input: {
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
     endsAt: input.materialized.endsAt.toISOString(),
+    lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
     spanKind: input.materialized.spanKind,
     timezone,
     localDate: input.materialized.localDate,
@@ -2139,6 +2162,13 @@ async function updateEventLifecycle(input: {
   });
   if (!updated) {
     throw new Error(EVENT_UPDATE_CONFLICT_ERROR);
+  }
+  if (input.materialized.localTime) {
+    markEventStartTimeAgreementExternallyResolved(input.db, {
+      eventId: input.event.id,
+      localTime: input.materialized.localTime,
+      resolvedAt: updatedAt
+    });
   }
 
   const repair = await repairEventEdit({
@@ -2194,9 +2224,9 @@ async function updateEventLifecycle(input: {
         scopeId: input.event.scopeId,
         ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
         ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),
-        runAt: input.materialized.endsAt,
+        runAt: input.materialized.lifecycleCompleteAt,
         payload: { eventId: input.event.id },
-        dedupeKey: `${EVENTS_JOBS.complete}:${input.event.id}:${input.materialized.endsAt.toISOString()}`
+        dedupeKey: `${EVENTS_JOBS.complete}:${input.event.id}:${input.materialized.lifecycleCompleteAt.toISOString()}`
       });
     } catch (error) {
       repairFailures.push(`completion_job: ${error instanceof Error ? error.message : String(error)}`);
@@ -2214,6 +2244,7 @@ async function updateEventLifecycle(input: {
         startsAt: input.materialized.startsAt.toISOString(),
         startsAtUtc: input.materialized.startsAt.toISOString(),
         endsAt: input.materialized.endsAt.toISOString(),
+        lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
         spanKind: input.materialized.spanKind,
         timezone,
         ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
@@ -2296,6 +2327,7 @@ function eventStructuredDataChanged(
     new Date(event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
     new Date(event.startsAtUtc ?? event.startsAt).toISOString() !== materialized.startsAt.toISOString() ||
     new Date(event.endsAt).toISOString() !== materialized.endsAt.toISOString() ||
+    new Date(event.lifecycleCompleteAt).toISOString() !== materialized.lifecycleCompleteAt.toISOString() ||
     event.spanKind !== materialized.spanKind ||
     event.timezone !== input.timezone ||
     event.localDate !== materialized.localDate ||
@@ -2318,8 +2350,10 @@ function eventIsBareEditDiscoveryCandidate(
   event: StoredEventRecord,
   nowMs: number
 ): boolean {
-  const startsAtMs = new Date(event.startsAt).getTime();
-  return event.eventStatus === 'active' && Number.isFinite(startsAtMs) && startsAtMs >= nowMs;
+  const lifecycleCompleteAtMs = new Date(event.lifecycleCompleteAt).getTime();
+  return event.eventStatus === 'active'
+    && Number.isFinite(lifecycleCompleteAtMs)
+    && lifecycleCompleteAtMs > nowMs;
 }
 
 function stableJson(value: unknown): string {
@@ -2594,7 +2628,8 @@ async function resolveEventCancelCandidates(
     ? []
     : listEventsBySubgroupChatId(input.db, input.scopeId, input.chatId)
       .filter((candidate) =>
-        candidate.eventStatus === 'active' && new Date(candidate.endsAt).getTime() > now.getTime()
+        candidate.eventStatus === 'active'
+        && new Date(candidate.lifecycleCompleteAt).getTime() > now.getTime()
       );
   const matched = subgroupCandidates.length > 0
     ? subgroupCandidates
@@ -2756,13 +2791,27 @@ function eventLifecycleLabel(event: StoredEventRecord, t: CommandContext['t']): 
 }
 
 function eventStartsAtLabel(event: StoredEventRecord, locale = 'en'): string {
+  if (!event.localTime) {
+    return formatEventDateOnly(new Date(event.startsAt), event.timezone, locale);
+  }
   return formatEventDateTime(new Date(event.startsAt), event.timezone, locale);
 }
 
 function eventRangeLabel(event: StoredEventRecord, locale = 'en'): string {
+  if (!event.localTime) {
+    const start = formatEventDateOnly(new Date(event.startsAt), event.timezone, locale);
+    if (event.spanKind === 'day_trip') {
+      return start;
+    }
+    return `${start} – ${formatEventDateOnly(new Date(event.endsAt), event.timezone, locale)}`;
+  }
   return `${formatEventDateTime(new Date(event.startsAt), event.timezone, locale)} – ${
     formatEventDateTime(new Date(event.endsAt), event.timezone, locale)
   }`;
+}
+
+function formatEventDateOnly(date: Date, timezone: string, locale: string): string {
+  return new Intl.DateTimeFormat(locale, { timeZone: timezone, dateStyle: 'medium' }).format(date);
 }
 
 function eventDisplayTitle(event: StoredEventRecord): string {
@@ -3549,6 +3598,7 @@ async function publishConfirmedEvent(input: {
     if (!sent?.messageId) {
       throw new Error('doas poll service did not return a message id');
     }
+    const pollMessageId = sent.messageId;
     const nowIso = now.toISOString();
     const event: NewStoredEventRecord & StoredEventRecord = {
       id: eventId,
@@ -3567,7 +3617,7 @@ async function publishConfirmedEvent(input: {
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
       announcementGroupWid: input.announcementGroupWid,
-      pollWaMsgId: sent.messageId,
+      pollWaMsgId: pollMessageId,
       pollGeneration: 1,
       pollQuestion: materialized.pollQuestion,
       pollOptions: materialized.pollOptions,
@@ -3577,6 +3627,7 @@ async function publishConfirmedEvent(input: {
       startsAt: materialized.startsAt.toISOString(),
       startsAtUtc: materialized.startsAt.toISOString(),
       endsAt: materialized.endsAt.toISOString(),
+      lifecycleCompleteAt: materialized.lifecycleCompleteAt.toISOString(),
       spanKind: materialized.spanKind,
       timezone: input.draft.timezone,
       localDate: materialized.localDate,
@@ -3591,15 +3642,25 @@ async function publishConfirmedEvent(input: {
       createdAt: nowIso,
       updatedAt: nowIso
     };
-    insertEvent(db, event);
-    recordEventAnnouncementMessage(db, {
-      eventId: event.id,
-      scopeId: event.scopeId,
-      kind: 'poll',
-      deliveryKey: 'initial',
-      chatId: input.announcementGroupWid,
-      messageId: sent.messageId,
-      createdAt: nowIso
+    db.transaction(() => {
+      insertEvent(db, event);
+      if (input.profile.startTimeAgreement.enabled && !materialized.localTime) {
+        createEventStartTimeAgreement(db, {
+          eventId: event.id,
+          profile: input.profile,
+          createdAt: nowIso,
+          nextRunAt: new Date(Math.max(now.getTime(), materialized.closeAt.getTime())).toISOString()
+        });
+      }
+      recordEventAnnouncementMessage(db, {
+        eventId: event.id,
+        scopeId: event.scopeId,
+        kind: 'poll',
+        deliveryKey: 'initial',
+        chatId: input.announcementGroupWid,
+        messageId: pollMessageId,
+        createdAt: nowIso
+      });
     });
     try {
       const calendarConfig = draftEventsConfig(input.draft);
@@ -3674,9 +3735,9 @@ async function publishConfirmedEvent(input: {
       scopeId: event.scopeId,
       ...(event.groupId ? { groupId: event.groupId } : {}),
       ...(event.groupWid ? { groupWid: event.groupWid } : {}),
-      runAt: new Date(event.endsAt),
+      runAt: new Date(event.lifecycleCompleteAt),
       payload: { eventId: event.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
+      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.lifecycleCompleteAt}`
     });
     await sendEventCalendarHint({
       context: input.context,
@@ -3784,6 +3845,7 @@ async function createUnplannedEventLifecycle(input: {
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
     endsAt: input.materialized.endsAt.toISOString(),
+    lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
     spanKind: input.materialized.spanKind,
     timezone: input.draft.timezone,
     localDate: input.materialized.localDate,
@@ -3799,7 +3861,17 @@ async function createUnplannedEventLifecycle(input: {
     updatedAt: nowIso
   };
 
-  insertEvent(input.db, intent);
+  input.db.transaction(() => {
+    insertEvent(input.db, intent);
+    if (input.profile.startTimeAgreement.enabled && !input.materialized.localTime) {
+      createEventStartTimeAgreement(input.db, {
+        eventId: intent.id,
+        profile: input.profile,
+        createdAt: nowIso,
+        nextRunAt: nowIso
+      });
+    }
+  });
   appendEventLog(input.db, {
     eventId: intent.id,
     action: 'events.unplanned.provisioning_intent_created',

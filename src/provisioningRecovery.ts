@@ -930,9 +930,9 @@ export async function finalizeUnplannedEventLifecycle(input: {
       scopeId: event.scopeId,
       ...(event.groupId ? { groupId: event.groupId } : {}),
       ...(event.groupWid ? { groupWid: event.groupWid } : {}),
-      runAt: new Date(event.endsAt),
+      runAt: new Date(event.lifecycleCompleteAt),
       payload: { eventId: event.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
+      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.lifecycleCompleteAt}`
     });
   } catch (error) {
     if (error instanceof UnplannedEventFinalizationSupersededError) {

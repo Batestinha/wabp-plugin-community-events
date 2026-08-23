@@ -7,6 +7,7 @@ import {
   combineEventDateAndTime,
   eventDateAnswer,
   eventDateAndTimeToUtc,
+  eventLifecycleCompleteAt,
   eventDateTemplateTokens,
   eventTimeAnswer,
   formatEventDateParts,
@@ -19,6 +20,7 @@ import {
 } from './datetime';
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
+import { renderEventTemplateText } from './template';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
 export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
@@ -485,7 +487,7 @@ export function renderEventTemplate(input: {
     } : {}),
     ...Object.fromEntries(Object.entries(input.extraTokens ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])))
   };
-  return input.template.replace(/\{([A-Za-z][A-Za-z0-9_-]*)\}/g, (_match, key: string) => tokens[key] ?? '');
+  return renderEventTemplateText(input.template, tokens);
 }
 
 export function selectedOptionLabels(profile: EventProfile): string[] {
@@ -900,7 +902,14 @@ function eventFlowStartsInPast(
   now: Date
 ): boolean {
   const answers = eventFlowAnswersFromData(state.data, profile, timezone, locale);
-  return Boolean(answers && answers.endsAt.getTime() <= now.getTime());
+  const completion = answers ? eventLifecycleCompleteAt({
+    localDate: answers.localDate,
+    ...(answers.localTime ? { localTime: answers.localTime } : {}),
+    endsAt: answers.endsAt,
+    spanKind: answers.spanKind,
+    timezone
+  }) : undefined;
+  return Boolean(completion && completion.getTime() <= now.getTime());
 }
 
 function initialChoiceValue(question: EventQuestion, value: string): unknown {

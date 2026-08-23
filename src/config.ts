@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
 import { eventsMessages } from './messages';
 import { MAX_DAY_TRIP_DURATION_MINUTES, MIN_DAY_TRIP_DURATION_MINUTES } from './span';
+import { validateEventTemplateText } from './template';
 
 export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
@@ -66,6 +67,57 @@ export const DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE = events
 const authoredTextSchema = z.string().refine((value) => value.trim().length > 0, 'Required');
 const optionalAuthoredTextSchema = z.string().transform((value) => value.trim() ? value : '');
 const localTimeSchema = z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+
+export const DEFAULT_EVENT_START_TIME_CANDIDATES = {
+  morning: ['06:00', '06:30', '07:00', '07:30', '08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30'],
+  afternoon: ['12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00', '17:30'],
+  evening: ['18:00', '18:30', '19:00', '19:30', '20:00', '20:30', '21:00', '21:30', '22:00', '22:30', '23:00', '23:30']
+} as const;
+
+const eventStartTimeAgreementSchema = z.object({
+  enabled: z.boolean().default(false),
+  voterDisclosure: z.enum(['named', 'hidden']).default('named'),
+  bandVotingWindowMinutes: z.number().int().min(1).max(24 * 60).default(60),
+  exactTimeVotingWindowMinutes: z.number().int().min(1).max(24 * 60).default(60),
+  candidateTimes: z.object({
+    morning: z.array(localTimeSchema).min(1).max(12).default([...DEFAULT_EVENT_START_TIME_CANDIDATES.morning]),
+    afternoon: z.array(localTimeSchema).min(1).max(12).default([...DEFAULT_EVENT_START_TIME_CANDIDATES.afternoon]),
+    evening: z.array(localTimeSchema).min(1).max(12).default([...DEFAULT_EVENT_START_TIME_CANDIDATES.evening])
+  }).strict().default({})
+}).strict().superRefine((agreement, ctx) => {
+  const bandHourRanges = {
+    morning: [6, 11],
+    afternoon: [12, 17],
+    evening: [18, 23]
+  } as const;
+  for (const [band, values] of Object.entries(agreement.candidateTimes) as Array<
+    [keyof typeof agreement.candidateTimes, string[]]
+  >) {
+    const [minimumHour, maximumHour] = bandHourRanges[band];
+    values.forEach((value, index) => {
+      const hour = Number(value.slice(0, 2));
+      if (hour < minimumHour || hour > maximumHour) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${band} candidate times must be between ${String(minimumHour).padStart(2, '0')}:00 and ${maximumHour}:59`,
+          path: ['candidateTimes', band, index]
+        });
+      }
+    });
+  }
+  const all = [
+    ...agreement.candidateTimes.morning,
+    ...agreement.candidateTimes.afternoon,
+    ...agreement.candidateTimes.evening
+  ];
+  if (new Set(all).size !== all.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'start-time candidates must be unique across all bands',
+      path: ['candidateTimes']
+    });
+  }
+});
 
 export const eventQuestionChoiceSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
@@ -181,6 +233,7 @@ const eventProfileObjectSchema = z.object({
   optionalPromptSuffix: z.string().max(500).default(''),
   startsAtDateQuestionKey: z.string().trim().min(1).default('startDate'),
   startsAtTimeQuestionKey: z.string().trim().min(1).default('startTime'),
+  startTimeAgreement: eventStartTimeAgreementSchema.default({}),
   location: eventLocationConfigSchema,
   questions: z.array(eventQuestionSchema).min(1),
   poll: z.object({
@@ -294,6 +347,13 @@ const eventProfileObjectSchema = z.object({
       path: ['startsAtTimeQuestionKey']
     });
   }
+  if (profile.startTimeAgreement.enabled && startsAtTime?.required !== false) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'start-time agreement requires the configured time question to be optional',
+      path: ['startTimeAgreement', 'enabled']
+    });
+  }
   if (profile.location.source === 'question' && !questionKeys.has(profile.location.questionKey)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -372,6 +432,17 @@ export const defaultClimbingEventProfile: EventProfile = {
   optionalPromptSuffix: '',
   startsAtDateQuestionKey: 'startDate',
   startsAtTimeQuestionKey: 'startTime',
+  startTimeAgreement: {
+    enabled: false,
+    voterDisclosure: 'named',
+    bandVotingWindowMinutes: 60,
+    exactTimeVotingWindowMinutes: 60,
+    candidateTimes: {
+      morning: [...DEFAULT_EVENT_START_TIME_CANDIDATES.morning],
+      afternoon: [...DEFAULT_EVENT_START_TIME_CANDIDATES.afternoon],
+      evening: [...DEFAULT_EVENT_START_TIME_CANDIDATES.evening]
+    }
+  },
   location: {
     source: 'question',
     questionKey: 'place'
@@ -383,7 +454,7 @@ export const defaultClimbingEventProfile: EventProfile = {
     { key: 'style', prompt: 'Climbing style', type: 'text', required: true, choices: [] }
   ],
   poll: {
-    titleTemplate: '{style} in {place}: {weekday}, {dd}-{mm}-{yy} By: {creatorDisplayName}',
+    titleTemplate: eventsMessages['official.community-events.profile.climbing.poll.titleTemplate']!,
     responseClasses: [
       {
         id: 'event_group_member',
@@ -400,7 +471,7 @@ export const defaultClimbingEventProfile: EventProfile = {
     closeOffsetHoursBeforeStart: 8
   },
   group: {
-    titleTemplate: '{style} in {place}: {weekday}, {dd}-{mm}-{yy}',
+    titleTemplate: eventsMessages['official.community-events.profile.climbing.group.titleTemplate']!,
     cleanupOffsetHoursAfterEnd: 48
   },
   eventGroupHint: {
@@ -991,14 +1062,11 @@ function validateEventTemplate(
   path: Array<string | number>,
   ctx: z.RefinementCtx
 ): void {
-  for (const match of template.matchAll(/\{([A-Za-z][A-Za-z0-9_-]*)\}/g)) {
-    const token = match[1] ?? '';
-    if (!allowedTokens.has(token)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `unknown template variable {${token}}`,
-        path
-      });
-    }
+  for (const issue of validateEventTemplateText(template, allowedTokens)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: issue.message,
+      path
+    });
   }
 }

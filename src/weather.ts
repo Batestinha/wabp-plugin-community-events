@@ -70,7 +70,7 @@ export function eventWeatherForecastJobRequests(input: {
   now?: Date | undefined;
 }): EventWeatherForecastJobRequest[] {
   const { event, profile } = input;
-  if (!profile?.weather.enabled || !event.subgroupChatId || !event.eventLocation) {
+  if (!profile?.weather.enabled || !event.subgroupChatId || !event.eventLocation || !event.localTime) {
     return [];
   }
   const now = input.now ?? new Date();

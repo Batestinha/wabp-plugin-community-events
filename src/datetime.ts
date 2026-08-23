@@ -1,5 +1,6 @@
 import type { ParsedResult } from 'chrono-node';
 import { chronoParserForLocale } from '../../../platform/naturalDate/chronoLocale';
+import type { EventSpanKind } from './span';
 
 const MAX_FUTURE_YEARS = 2;
 const STRICT_LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/;
@@ -172,6 +173,29 @@ export function eventDateAndTimeToUtc(date: EventDateParts, time: EventTimeParts
     minute: time.minute,
     timezone
   });
+}
+
+export function eventLifecycleCompleteAt(input: {
+  localDate: string;
+  localTime?: string | undefined;
+  endsAt: Date;
+  spanKind: EventSpanKind;
+  timezone: string;
+}): Date | undefined {
+  if (input.localTime) {
+    return validDate(input.endsAt);
+  }
+  const finalLocalDate = input.spanKind === 'day_trip'
+    ? strictLocalDateParts(input.localDate)
+    : localDateTimeParts(input.endsAt, input.timezone);
+  if (!finalLocalDate) {
+    return undefined;
+  }
+  return eventDateAndTimeToUtc(
+    datePartsPlusDays(finalLocalDate, 1),
+    { hour: 0, minute: 0 },
+    input.timezone
+  );
 }
 
 export function parseEventDateTimeInput(input: string, options: EventDateTimeParseOptions): EventDateTimeParseResult {
@@ -688,6 +712,20 @@ function datePartsPlusDays(parts: EventDateParts, days: number): EventDateParts 
     month: date.getUTCMonth() + 1,
     day: date.getUTCDate()
   };
+}
+
+function strictLocalDateParts(value: string): EventDateParts | undefined {
+  const match = STRICT_LOCAL_DATE.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  const parts = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+  const canonical = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12));
+  return canonical.getUTCFullYear() === parts.year
+    && canonical.getUTCMonth() + 1 === parts.month
+    && canonical.getUTCDate() === parts.day
+    ? parts
+    : undefined;
 }
 
 function localDateTimeParts(date: Date, timezone: string): (EventDateParts & EventTimeParts) | undefined {

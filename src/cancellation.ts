@@ -22,6 +22,11 @@ import type { MessageDeletionResult } from '../../../platform/transport/transpor
 import type { EventArtifactDeletionResult } from './eventArtifactDeletion';
 import { EVENTS_JOBS } from './manifest';
 import { releaseEligibleEventPollReplacementReceipts } from './pollReplacement';
+import { cancelEventStartTimeAgreementPolls } from './startTimeAgreement';
+import {
+  cancelEventStartTimeAgreement,
+  getEventStartTimeAgreement
+} from './startTimeAgreementStore';
 
 export interface EventCancellationActor {
   wid: string;
@@ -74,7 +79,7 @@ export async function cancelEventLifecycle(input: {
   }
 
   const now = input.now ?? new Date();
-  if (new Date(event.endsAt).getTime() <= now.getTime()) {
+  if (new Date(event.lifecycleCompleteAt).getTime() <= now.getTime()) {
     return { status: 'not_cancellable', reason: 'event has already ended' };
   }
   const cancelledAt = now.toISOString();
@@ -178,6 +183,20 @@ export async function cancelEventLifecycle(input: {
       releaseCancellationClaim(db, cancellationClaim);
       return { status: 'not_cancellable', reason: 'event lifecycle changed during cancellation' };
     }
+  }
+  const startTimeAgreement = getEventStartTimeAgreement(db, event.id);
+  if (startTimeAgreement) {
+    await cancelEventStartTimeAgreementPolls(
+      context,
+      event,
+      startTimeAgreement,
+      input.reason ?? 'event cancelled'
+    );
+    cancelEventStartTimeAgreement(db, {
+      eventId: event.id,
+      cancelledAt,
+      reason: input.reason ?? 'event cancelled'
+    });
   }
   const cancellationArtifacts = input.deleteAnnouncementMessages !== false
     ? listEventAnnouncementMessages(db, event.id).filter((artifact) => artifact.deletionStatus === 'pending')

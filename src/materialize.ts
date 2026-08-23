@@ -8,6 +8,7 @@ import type { EventProfile } from './config';
 import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseClass } from './store';
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
+import { eventLifecycleCompleteAt } from './datetime';
 
 export interface MaterializedEventLifecycle {
   pollQuestion: string;
@@ -18,6 +19,7 @@ export interface MaterializedEventLifecycle {
   eventLocation?: StoredEventLocation | undefined;
   startsAt: Date;
   endsAt: Date;
+  lifecycleCompleteAt: Date;
   spanKind: EventSpanKind;
   localDate: string;
   localTime?: string | undefined;
@@ -74,7 +76,19 @@ export function materializeEventLifecycle(input: {
   if (!validEventSpanDuration(spanKind, durationMinutes)) {
     throw new Error(`Invalid ${spanKind} event duration: ${durationMinutes} minutes.`);
   }
-  const cleanupAt = new Date(endsAt.getTime() + profile.group.cleanupOffsetHoursAfterEnd * 3_600_000);
+  const lifecycleCompleteAt = eventLifecycleCompleteAt({
+    localDate: answers.localDate,
+    ...(answers.localTime ? { localTime: answers.localTime } : {}),
+    endsAt,
+    spanKind,
+    timezone
+  });
+  if (!lifecycleCompleteAt) {
+    throw new Error(`Unable to materialize event lifecycle boundary in ${timezone}.`);
+  }
+  const cleanupAt = new Date(
+    lifecycleCompleteAt.getTime() + profile.group.cleanupOffsetHoursAfterEnd * 3_600_000
+  );
   const location = input.eventLocation?.displayLabel ?? calendarLocation(profile, answers.answers);
   const description = calendarDescription(
     profile,
@@ -103,6 +117,7 @@ export function materializeEventLifecycle(input: {
     ...(input.eventLocation ? { eventLocation: input.eventLocation } : {}),
     startsAt: answers.startsAt,
     endsAt,
+    lifecycleCompleteAt,
     spanKind,
     localDate: answers.localDate,
     ...(answers.localTime ? { localTime: answers.localTime } : {}),

@@ -117,21 +117,47 @@ function renderEvent(
 ): string[] {
   const startsAt = new Date(event.startsAt);
   const endsAt = new Date(event.endsAt);
+  const dateOnly = !event.localTime;
   return [
     'BEGIN:VEVENT',
     `UID:${escapeText(`${event.id}@official.community-events.whatsapp-bot-platform`)}`,
     `DTSTAMP:${formatUtc(now)}`,
-    `DTSTART:${formatUtc(startsAt)}`,
-    `DTEND:${formatUtc(endsAt)}`,
+    ...(dateOnly
+      ? [
+          `DTSTART;VALUE=DATE:${formatLocalIcsDate(event.localDate ?? localDate(startsAt, event.timezone))}`,
+          `DTEND;VALUE=DATE:${formatLocalIcsDate(localDate(new Date(event.lifecycleCompleteAt), event.timezone))}`
+        ]
+      : [`DTSTART:${formatUtc(startsAt)}`, `DTEND:${formatUtc(endsAt)}`]),
     `LAST-MODIFIED:${formatUtc(new Date(event.updatedAt))}`,
     `SEQUENCE:${event.calendarStatus === 'cancelled' ? 1 : 0}`,
-    ...(event.calendarStatus === 'cancelled' ? ['STATUS:CANCELLED'] : ['STATUS:CONFIRMED']),
+    ...(event.calendarStatus === 'cancelled'
+      ? ['STATUS:CANCELLED']
+      : [dateOnly ? 'STATUS:TENTATIVE' : 'STATUS:CONFIRMED']),
     `CATEGORIES:${event.spanKind === 'day_trip' ? 'DAY TRIP' : 'MULTI-DAY'}`,
     `SUMMARY:${escapeText(calendarEventSummary(event, config))}`,
     ...(event.calendarLocation ? [`LOCATION:${escapeText(event.calendarLocation)}`] : []),
     ...(event.calendarDescription ? [`DESCRIPTION:${escapeText(event.calendarDescription)}`] : []),
     'END:VEVENT'
   ];
+}
+
+function localDate(date: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? '';
+  return `${value('year')}-${value('month')}-${value('day')}`;
+}
+
+function formatLocalIcsDate(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`Invalid local event date ${value}.`);
+  }
+  return value.replace(/-/g, '');
 }
 
 function calendarEventSummary(

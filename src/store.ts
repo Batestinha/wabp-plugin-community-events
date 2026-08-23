@@ -249,6 +249,8 @@ export interface StoredEventRecord {
   startsAt: string;
   startsAtUtc?: string | undefined;
   endsAt: string;
+  /** Authoritative lifecycle boundary. Date-only events may complete later than their nominal duration. */
+  lifecycleCompleteAt: string;
   spanKind: EventSpanKind;
   timezone: string;
   localDate?: string | undefined;
@@ -293,12 +295,13 @@ export interface StoredUnplannedEventFinalization {
 
 export type NewStoredEventRecord = Omit<
   StoredEventRecord,
-  'actorIdentityId' | 'calendarOwnershipStatus' | 'pollGeneration' | 'endsAt' | 'spanKind'
+  'actorIdentityId' | 'calendarOwnershipStatus' | 'pollGeneration' | 'endsAt' | 'lifecycleCompleteAt' | 'spanKind'
 > & {
   actorIdentityId: string;
   calendarOwnershipStatus: Exclude<EventCalendarOwnershipStatus, 'unresolved'>;
   pollGeneration?: number | undefined;
   endsAt?: string | undefined;
+  lifecycleCompleteAt?: string | undefined;
   spanKind?: EventSpanKind | undefined;
 };
 
@@ -313,6 +316,7 @@ export interface EventPollReplacementTarget {
   startsAt: string;
   startsAtUtc: string;
   endsAt?: string | undefined;
+  lifecycleCompleteAt?: string | undefined;
   spanKind?: EventSpanKind | undefined;
   timezone: string;
   localDate: string;
@@ -591,6 +595,7 @@ interface EventRow extends PluginDatabaseRow {
   starts_at: string;
   starts_at_utc: string | null;
   ends_at: string | null;
+  lifecycle_complete_at: string | null;
   span_kind: EventSpanKind | null;
   timezone: string;
   local_date: string | null;
@@ -1156,6 +1161,7 @@ export function insertEvent(
   const endsAt = event.endsAt ?? new Date(
     new Date(event.startsAt).getTime() + event.calendarDurationMinutes * 60_000
   ).toISOString();
+  const lifecycleCompleteAt = event.lifecycleCompleteAt ?? endsAt;
   const spanKind = event.spanKind ?? inferredEventSpanKind(event.calendarDurationMinutes);
   if (
     (calendarOwnershipStatus === 'assigned' && !calendarId) ||
@@ -1169,13 +1175,13 @@ export function insertEvent(
       event_status, group_lifecycle_status, calendar_status, calendar_id, calendar_ownership_status,
       actor_identity_id, actor_wid, actor_label,
       announcement_group_wid, poll_wa_msg_id, poll_generation, poll_question, poll_options_json, response_classes_json,
-      answers_json, event_location_json, starts_at, starts_at_utc, ends_at, span_kind, timezone, local_date, local_time, place, style,
+      answers_json, event_location_json, starts_at, starts_at_utc, ends_at, lifecycle_complete_at, span_kind, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
       provisioning_recovery_next_run_at, provisioning_recovery_halted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -1203,6 +1209,7 @@ export function insertEvent(
     event.startsAt,
     event.startsAtUtc || event.startsAt,
     endsAt,
+    lifecycleCompleteAt,
     spanKind,
     event.timezone,
     event.localDate ?? null,
@@ -1244,6 +1251,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   startsAt: string;
   startsAtUtc: string;
   endsAt?: string | undefined;
+  lifecycleCompleteAt?: string | undefined;
   spanKind?: EventSpanKind | undefined;
   timezone: string;
   localDate: string;
@@ -1264,6 +1272,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   const endsAt = input.endsAt ?? new Date(
     new Date(input.startsAt).getTime() + input.calendarDurationMinutes * 60_000
   ).toISOString();
+  const lifecycleCompleteAt = input.lifecycleCompleteAt ?? endsAt;
   const spanKind = input.spanKind ?? inferredEventSpanKind(input.calendarDurationMinutes);
   return db.transaction(() => {
     const result = db.run(
@@ -1278,6 +1287,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             starts_at = ?,
             starts_at_utc = ?,
             ends_at = ?,
+            lifecycle_complete_at = ?,
             span_kind = ?,
             timezone = ?,
             local_date = ?,
@@ -1326,6 +1336,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
       input.startsAt,
       input.startsAtUtc,
       endsAt,
+      lifecycleCompleteAt,
       spanKind,
       input.timezone,
       input.localDate,
@@ -1417,6 +1428,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
   startsAt: string;
   startsAtUtc: string;
   endsAt: string;
+  lifecycleCompleteAt?: string | undefined;
   spanKind: EventSpanKind;
   timezone: string;
   localDate: string;
@@ -1440,7 +1452,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
               event_status = 'failed', group_lifecycle_status = 'none', calendar_status = 'hidden',
               poll_wa_msg_id = NULL, poll_generation = poll_generation + 1, poll_question = NULL,
               poll_options_json = '[]', response_classes_json = ?, answers_json = ?,
-              event_location_json = ?, starts_at = ?, starts_at_utc = ?, ends_at = ?, span_kind = ?,
+              event_location_json = ?, starts_at = ?, starts_at_utc = ?, ends_at = ?, lifecycle_complete_at = ?, span_kind = ?,
               timezone = ?, local_date = ?, local_time = ?, place = ?, style = NULL,
               close_at = ?, cleanup_at = ?, group_title = ?, calendar_duration_minutes = ?,
               calendar_location = ?, calendar_description = ?, closed_at = NULL, error = NULL,
@@ -1473,6 +1485,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
       input.startsAt,
       input.startsAtUtc,
       input.endsAt,
+      input.lifecycleCompleteAt ?? input.endsAt,
       input.spanKind,
       input.timezone,
       input.localDate,
@@ -1969,6 +1982,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
     const targetEndsAt = target.endsAt ?? new Date(
       new Date(target.startsAt).getTime() + target.calendarDurationMinutes * 60_000
     ).toISOString();
+    const targetLifecycleCompleteAt = target.lifecycleCompleteAt ?? targetEndsAt;
     const targetSpanKind = target.spanKind ?? inferredEventSpanKind(target.calendarDurationMinutes);
     const swappedAt = nextEventRevisionTimestamp(
       replacement.expectedEventUpdatedAt,
@@ -1982,7 +1996,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
               poll_generation = ?, poll_question = ?, poll_options_json = ?,
               response_classes_json = ?, answers_json = ?, event_location_json = ?,
               starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
-              ends_at = ?, span_kind = ?,
+              ends_at = ?, lifecycle_complete_at = ?, span_kind = ?,
               local_time = ?, place = ?, style = NULL, close_at = ?, cleanup_at = ?,
               group_title = ?,
               subgroup_title = CASE WHEN subgroup_chat_id IS NOT NULL THEN ? ELSE subgroup_title END,
@@ -2012,6 +2026,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       target.timezone,
       target.localDate,
       targetEndsAt,
+      targetLifecycleCompleteAt,
       targetSpanKind,
       target.localTime ?? null,
       target.place ?? null,
@@ -2549,7 +2564,7 @@ export function listCancellableEvents(
       WHERE scope_id = ?
         AND event_status = 'active'
         AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
-        AND ends_at > ?
+        AND lifecycle_complete_at > ?
       ORDER BY starts_at ASC, id ASC`,
     scopeId,
     now
@@ -2579,8 +2594,8 @@ export function listPendingCompletionEvents(db: PluginDatabase): StoredEventReco
   return db.all<EventRow>(
     `SELECT * FROM event_records
       WHERE event_status = 'active'
-        AND ends_at IS NOT NULL
-      ORDER BY ends_at ASC, id ASC`
+        AND lifecycle_complete_at IS NOT NULL
+      ORDER BY lifecycle_complete_at ASC, id ASC`
   ).map(eventFromRow);
 }
 
@@ -5863,7 +5878,7 @@ export function listEventCancellationNoticeCandidates(
        FROM event_records
        JOIN event_announcement_messages artifact ON artifact.event_id = event_records.id
       WHERE event_records.event_status = 'cancelled'
-        AND event_records.ends_at > ?
+        AND event_records.lifecycle_complete_at > ?
         AND artifact.deletion_status IN ('rejected', 'failed', 'unconfirmed')
         AND artifact.deletion_next_attempt_at IS NULL
         AND NOT EXISTS (
@@ -8265,6 +8280,9 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     startsAt: row.starts_at,
     startsAtUtc: row.starts_at_utc || row.starts_at,
     endsAt: row.ends_at || new Date(
+      new Date(row.starts_at).getTime() + Number(row.calendar_duration_minutes) * 60_000
+    ).toISOString(),
+    lifecycleCompleteAt: row.lifecycle_complete_at || row.ends_at || new Date(
       new Date(row.starts_at).getTime() + Number(row.calendar_duration_minutes) * 60_000
     ).toISOString(),
     spanKind: row.span_kind ?? inferredEventSpanKind(Number(row.calendar_duration_minutes)),

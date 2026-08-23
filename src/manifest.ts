@@ -24,6 +24,7 @@ export const EVENTS_JOBS = {
   editRepair: 'event.editRepair',
   pollReplacement: 'event.pollReplacement',
   weatherForecast: 'event.weatherForecast',
+  startTimeAgreement: 'event.startTimeAgreement',
   questionKeyRenameRecovery: 'event.questionKeyRenameRecovery',
   suggestionReconcile: 'event.suggestionReconcile'
 } as const;
@@ -44,7 +45,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.10.2',
+  version: '0.11.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -163,6 +164,7 @@ export const eventsManifest: PluginManifest = {
     EVENTS_JOBS.editRepair,
     EVENTS_JOBS.pollReplacement,
     EVENTS_JOBS.weatherForecast,
+    EVENTS_JOBS.startTimeAgreement,
     EVENTS_JOBS.questionKeyRenameRecovery,
     EVENTS_JOBS.suggestionReconcile
   ],
@@ -232,11 +234,12 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.doas', versionRange: '>=0.3.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '>=0.1.0' },
+    { pluginId: 'official.poll-assistant', versionRange: '>=0.2.0', optional: true },
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '13',
+  dataVersion: '14',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

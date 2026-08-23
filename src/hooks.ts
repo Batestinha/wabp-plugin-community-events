@@ -170,6 +170,10 @@ import {
 import { registerEventFlowCompletionHandlers } from './commands';
 import { registerEventCreationFlowDefinitionResolver } from './eventCreationFlowStarter';
 import {
+  handleEventStartTimeAgreementJob,
+  recoverEventStartTimeAgreementJobs
+} from './startTimeAgreement';
+import {
   eventCreatorMembershipPauseKindForFailure,
   notifyEventCreatorMembershipPaused
 } from './creatorMembershipNotice';
@@ -297,7 +301,8 @@ export async function recoverEventQueueHandoffs(
 ): Promise<number> {
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
-  return pollReplacementJobs + closeJobs;
+  const startTimeAgreementJobs = await recoverEventStartTimeAgreementJobs(context, options.now);
+  return pollReplacementJobs + closeJobs + startTimeAgreementJobs;
 }
 
 export async function recoverEventJobs(
@@ -323,13 +328,14 @@ export async function recoverEventJobs(
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
   const completionJobs = await recoverEventCompletionJobs(context, options);
+  const startTimeAgreementJobs = await recoverEventStartTimeAgreementJobs(context, options.now);
   const cleanupJobs = await recoverEventCleanupJobs(context);
   const cancellationCleanupJobs = await recoverEventCancellationArtifactJobs(context, options);
   const weatherForecastJobs = await recoverEventWeatherForecastJobs(context);
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
   const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + completionJobs + cleanupJobs + cancellationCleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + completionJobs + startTimeAgreementJobs + cleanupJobs + cancellationCleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (
     enqueued > 0 ||
     interruptedPreCreateClaims > 0 ||
@@ -338,7 +344,7 @@ export async function recoverEventJobs(
     questionKeyRenames.unresolved > 0
   ) {
     context.logger.info(
-      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, completionJobs, cleanupJobs, cancellationCleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, completionJobs, startTimeAgreementJobs, cleanupJobs, cancellationCleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -857,7 +863,7 @@ export async function recoverEventCompletionJobs(
   const now = options.now ?? new Date();
   const records = listPendingCompletionEvents(eventsDatabase(context.databases));
   for (const record of records) {
-    const endsAt = new Date(record.endsAt);
+    const endsAt = new Date(record.lifecycleCompleteAt);
     await enqueuePluginJob(context.queue, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.complete,
@@ -866,7 +872,7 @@ export async function recoverEventCompletionJobs(
       ...(record.groupWid ? { groupWid: record.groupWid } : {}),
       ...(Number.isFinite(endsAt.getTime()) && endsAt.getTime() > now.getTime() ? { runAt: endsAt } : {}),
       payload: { eventId: record.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:startup:${record.endsAt}`
+      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:startup:${record.lifecycleCompleteAt}`
     });
   }
   return records.length;
@@ -1155,6 +1161,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.complete) {
     return completeEventAtEnd(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.startTimeAgreement) {
+    return handleEventStartTimeAgreementJob(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.provisioningRecovery) {
     return recoverFailedEventProvisioning(context, event);
   }
@@ -1192,7 +1201,7 @@ async function completeEventAtEnd(context: PluginRuntimeContext, job: PluginJobE
   if (!record || record.eventStatus !== 'active') {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event missing or no longer active' })];
   }
-  const endsAt = new Date(record.endsAt);
+  const endsAt = new Date(record.lifecycleCompleteAt);
   const now = new Date();
   if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() > now.getTime()) {
     return [{
@@ -1202,7 +1211,7 @@ async function completeEventAtEnd(context: PluginRuntimeContext, job: PluginJobE
       scopeId: record.scopeId,
       runAt: endsAt,
       payload: { eventId: record.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:deferred:${record.endsAt}`
+      dedupeKey: `${EVENTS_JOBS.complete}:${record.id}:deferred:${record.lifecycleCompleteAt}`
     }];
   }
   const completedAt = nextEventRevisionTimestamp(record.updatedAt, now);
@@ -1212,11 +1221,12 @@ async function completeEventAtEnd(context: PluginRuntimeContext, job: PluginJobE
   appendEventLog(db, {
     eventId: record.id,
     action: 'events.completed_at_end',
-    metadata: { endsAt: record.endsAt, spanKind: record.spanKind }
+    metadata: { endsAt: record.endsAt, lifecycleCompleteAt: record.lifecycleCompleteAt, spanKind: record.spanKind }
   });
   return [audit('events.completed_at_end', {
     eventId: record.id,
     endsAt: record.endsAt,
+    lifecycleCompleteAt: record.lifecycleCompleteAt,
     spanKind: record.spanKind
   })];
 }
@@ -1428,9 +1438,9 @@ function eventCompleteAction(event: StoredEventRecord): PluginEnqueueJobAction {
     scopeId: event.scopeId,
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
-    runAt: new Date(event.endsAt),
+    runAt: new Date(event.lifecycleCompleteAt),
     payload: { eventId: event.id },
-    dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.endsAt}`
+    dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.lifecycleCompleteAt}`
   };
 }
 
@@ -4886,7 +4896,7 @@ async function cleanupCancelledEventArtifacts(
   );
   const allArtifacts = listEventAnnouncementMessages(db, event.id, { includeDeleted: true });
   const existingNotice = allArtifacts.find((artifact) => artifact.kind === 'cancellation_notice');
-  const ended = new Date(event.endsAt).getTime() <= now.getTime();
+  const ended = new Date(event.lifecycleCompleteAt).getTime() <= now.getTime();
   if (event.eventStatus === 'cancelled' && unresolved.length > 0 && !existingNotice && !ended) {
     const announcementChatId = event.announcementGroupWid || event.groupWid;
     if (!announcementChatId || !context.sendText || !event.actorIdentityId) {

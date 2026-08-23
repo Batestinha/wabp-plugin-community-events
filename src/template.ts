@@ -3,7 +3,8 @@ export {
   parseConditionalTemplate as parseEventTemplate,
   renameConditionalTemplateToken as renameEventTemplateToken,
   renderConditionalTemplate as renderEventTemplateText,
-  validateConditionalTemplate as validateEventTemplateText
+  validateConditionalTemplate as validateEventTemplateText,
+  validateConditionalTemplateSyntax as validateEventTemplateSyntax
 } from '../../../platform/templates/conditionalTemplate';
 
 export type {

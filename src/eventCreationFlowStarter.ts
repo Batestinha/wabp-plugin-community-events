@@ -29,6 +29,7 @@ import {
   type EventFlowPrefill
 } from './flow';
 import { EVENTS_PLUGIN_ID } from './manifest';
+import { renderEventConditionalText } from './template';
 
 export interface EventDraft {
   schemaVersion: 1;
@@ -156,7 +157,7 @@ export type EventCreationPreflightResult =
       profiles: EventProfile[];
       calendars: EventCalendarResource[];
       timezone: string;
-      suggestionRefusalNoticeText?: string | undefined;
+      suggestionRefusalNoticeTemplate?: string | undefined;
       defaultAnnouncementGroupWid?: string | undefined;
     }
   | {
@@ -350,7 +351,7 @@ export class EventCreationFlowStarter {
       calendars: config.calendars,
       timezone: config.timezone,
       ...(suggestionPreFlowNotice.enabled
-        ? { suggestionRefusalNoticeText: suggestionPreFlowNotice.template.trim() }
+        ? { suggestionRefusalNoticeTemplate: suggestionPreFlowNotice.template.trim() }
         : {}),
       ...(defaultAnnouncementGroupWid ? { defaultAnnouncementGroupWid } : {})
     };
@@ -376,6 +377,16 @@ export class EventCreationFlowStarter {
       initialData,
       completeMessageKey: false
     });
+    const suggestionRefusalNoticeText = input.includeSuggestionRefusalNotice
+      && input.prepared.suggestionRefusalNoticeTemplate
+      ? renderEventConditionalText({
+          source: input.prepared.suggestionRefusalNoticeTemplate,
+          allowedTokens: ['creatorDisplayName'],
+          values: { creatorDisplayName: input.actorLabel },
+          emptyResult: 'suppress',
+          field: 'subgroupSuggestionConversion.preFlowNotice.template'
+        })
+      : undefined;
     this.registerCompletionHandlers(definition.flowType, input.prepared.profiles, input.prepared.t);
     let draftCreated = false;
     const flowStart = await this.context.flowEngine.startFlowForIdentity({
@@ -385,8 +396,8 @@ export class EventCreationFlowStarter {
       origin: input.origin,
       scopeId: input.scopeId,
       initialData,
-      ...(input.includeSuggestionRefusalNotice && input.prepared.suggestionRefusalNoticeText
-        ? { initialPromptPreface: input.prepared.suggestionRefusalNoticeText }
+      ...(suggestionRefusalNoticeText
+        ? { initialPromptPreface: suggestionRefusalNoticeText }
         : {}),
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {

@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { FlowDefinition, FlowState, FlowStep } from '../../../adminBot/flows/flowTypes';
 import type { FlowSessionSnapshot } from '../../../adminBot/flows/flowEngine';
 import type { TranslateFn } from '../../../platform/i18n';
-import { EVENT_CHOICE_QUESTION_TYPE, EVENT_DATE_QUESTION_TYPE, EVENT_TIME_QUESTION_TYPE, type EventProfile, type EventQuestion } from './config';
+import {
+  EVENT_CHOICE_QUESTION_TYPE,
+  EVENT_DATE_QUESTION_TYPE,
+  EVENT_TIME_QUESTION_TYPE,
+  type EventProfile,
+  type EventQuestion,
+  type EventQuestionChoice
+} from './config';
 import {
   combineEventDateAndTime,
   eventDateAnswer,
@@ -20,7 +27,11 @@ import {
 } from './datetime';
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
-import { renderEventTemplateText } from './template';
+import {
+  EventConditionalTextConfigurationError,
+  renderEventConditionalText,
+  renderEventTemplateText
+} from './template';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
 export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
@@ -161,11 +172,20 @@ function buildEventFlowDefinition(input: {
           ? spanStepId(profile)
           : firstMissingSpanStepId(profile, initialData) ?? confirmStepId(profile);
       if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
+        const initialOptions = initialEventQuestionChoiceOptions(profile, question, initialData);
         steps[stepId] = {
           id: stepId,
           kind: 'choice',
-          prompt: questionPrompt(input.t, profile, question, input.prefill?.answers[question.key]),
-          options: question.choices.map((choice) => ({ label: choice.label, value: choice.id })),
+          prompt: initialQuestionPrompt(input.t, profile, question, initialData, input.prefill?.answers[question.key]),
+          promptForState: (state) => safeQuestionPromptForState(
+            input.t,
+            profile,
+            question,
+            state.data,
+            input.prefill?.answers[question.key]
+          ),
+          options: initialOptions,
+          optionsForState: (state) => safeEventQuestionChoiceOptions(profile, question, state.data),
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
           skipOnSymbolInput: !question.required,
@@ -176,7 +196,14 @@ function buildEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
-        prompt: questionPrompt(input.t, profile, question, input.prefill?.answers[question.key]),
+        prompt: initialQuestionPrompt(input.t, profile, question, initialData, input.prefill?.answers[question.key]),
+        promptForState: (state) => safeQuestionPromptForState(
+          input.t,
+          profile,
+          question,
+          state.data,
+          input.prefill?.answers[question.key]
+        ),
         nextStepId,
         skipOnSymbolInput: !question.required,
         ...(question.type === EVENT_DATE_QUESTION_TYPE
@@ -237,7 +264,13 @@ function buildEventFlowDefinition(input: {
     steps[endTimeStepId(profile)] = {
       id: endTimeStepId(profile),
       kind: 'text',
-      prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime')),
+      prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime'), initialData),
+      promptForState: (state) => optionalFlowPrompt(
+        input.t,
+        profile,
+        input.t('official.community-events.flow.endTime'),
+        state.data
+      ),
       nextStepId: confirmStepId(profile),
       skipOnSymbolInput: true,
       resolveSkippedInput: (resolutionInput) => resolveSkippedEventEndTime({
@@ -330,7 +363,7 @@ export function eventInitialFlowData(
   for (const question of profile.questions) {
     const value = prefill?.answers[question.key]?.trim();
     if (value) {
-      data[questionStepId(profile, question)] = initialQuestionValue(question, value, options);
+      data[questionStepId(profile, question)] = initialQuestionValue(profile, question, value, data, options);
     }
   }
   if (prefill?.spanKind) {
@@ -430,7 +463,12 @@ export function eventFlowAnswersFromRaw(input: {
       continue;
     }
     if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
-      const selected = initialChoiceValue(question, value);
+      const selected = initialChoiceValue(
+        input.profile,
+        question,
+        value,
+        eventQuestionAnswersBefore(input.profile, data, input.profile.questions.indexOf(question))
+      );
       if (!selected) {
         return undefined;
       }
@@ -472,8 +510,22 @@ export function renderEventTemplate(input: {
   creatorDisplayName: string;
   extraTokens?: Record<string, string | undefined> | undefined;
 }): string {
+  return renderEventTemplateText(input.template, eventTemplateValues(input));
+}
+
+export function eventTemplateValues(input: {
+  profile: EventProfile;
+  answers: Record<string, string>;
+  startsAt: Date;
+  endsAt?: Date | undefined;
+  spanKind?: EventSpanKind | undefined;
+  timezone: string;
+  locale?: string | undefined;
+  creatorDisplayName: string;
+  extraTokens?: Record<string, string | undefined> | undefined;
+}): Record<string, string> {
   const dateTokens = eventDateTemplateTokens(input.startsAt, input.timezone, input.locale);
-  const tokens: Record<string, string> = {
+  return {
     ...input.answers,
     ...dateTokens,
     profileId: input.profile.id,
@@ -487,11 +539,6 @@ export function renderEventTemplate(input: {
     } : {}),
     ...Object.fromEntries(Object.entries(input.extraTokens ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])))
   };
-  return renderEventTemplateText(input.template, tokens);
-}
-
-export function selectedOptionLabels(profile: EventProfile): string[] {
-  return profile.poll.options.map((option) => option.label);
 }
 
 export function calendarLocation(profile: EventProfile, answers: Record<string, string>): string | undefined {
@@ -537,7 +584,7 @@ function eventFlowAnswersFromData(
   let startTime: ReturnType<typeof eventTimePartsFromRaw>;
   for (const question of profile.questions) {
     const raw = data[questionStepId(profile, question)];
-    const value = eventAnswerValue(raw, question);
+    const value = eventAnswerValue(raw, question, profile, answers);
     if (question.required && !value) {
       return undefined;
     }
@@ -648,41 +695,208 @@ function endTimeStepId(profile: EventProfile): string {
   return `${EVENT_END_TIME_STEP_ID_PREFIX}${profile.id}`;
 }
 
-function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, currentValue?: string | undefined): string {
-  const optionalSuffix = optionalQuestionPromptSuffix(t, profile, question);
-  const basePrompt = questionPromptByType(t, question);
+function questionPrompt(
+  t: TranslateFn,
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>,
+  currentValue?: string | undefined
+): string {
+  const questionIndex = profile.questions.indexOf(question);
+  const priorAnswers = eventQuestionAnswersBefore(profile, data, questionIndex);
+  const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
+  const authoredPrompt = renderEventConditionalText({
+    source: question.prompt,
+    allowedTokens,
+    values: priorAnswers,
+    emptyResult: 'reject',
+    field: `questions.${question.key}.prompt`
+  })!;
+  const optionalSuffix = optionalQuestionPromptSuffix(t, profile, question, priorAnswers);
+  const basePrompt = questionPromptByType(t, question, authoredPrompt);
   const prompt = currentValue?.trim()
     ? t('official.community-events.flow.currentValuePrompt', { prompt: basePrompt, current: currentValue.trim() })
     : basePrompt;
   return optionalSuffix ? `${prompt}\n${optionalSuffix}` : prompt;
 }
 
-function questionPromptByType(t: TranslateFn, question: EventQuestion): string {
-  if (question.type === EVENT_DATE_QUESTION_TYPE) {
-    return t('official.community-events.flow.datePrompt', { prompt: question.prompt });
+function initialQuestionPrompt(
+  t: TranslateFn,
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>,
+  currentValue?: string | undefined
+): string {
+  try {
+    return questionPrompt(t, profile, question, data, currentValue);
+  } catch (error) {
+    if (!(error instanceof EventConditionalTextConfigurationError) || error.code !== 'rendered-empty') {
+      throw error;
+    }
+    const basePrompt = questionPromptByType(t, question, question.key);
+    return currentValue?.trim()
+      ? t('official.community-events.flow.currentValuePrompt', {
+          prompt: basePrompt,
+          current: currentValue.trim()
+        })
+      : basePrompt;
   }
-  if (question.type === EVENT_TIME_QUESTION_TYPE) {
-    return t('official.community-events.flow.timePrompt', { prompt: question.prompt });
-  }
-  return question.prompt;
 }
 
-function optionalQuestionPromptSuffix(t: TranslateFn, profile: EventProfile, question: EventQuestion): string {
+function safeQuestionPromptForState(
+  t: TranslateFn,
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>,
+  currentValue?: string | undefined
+): string {
+  try {
+    return questionPrompt(t, profile, question, data, currentValue);
+  } catch (error) {
+    if (!(error instanceof EventConditionalTextConfigurationError)) {
+      throw error;
+    }
+    return t('official.community-events.templateConfigurationInvalid');
+  }
+}
+
+function initialEventQuestionChoiceOptions(
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>
+): Array<{ label: string; value: string }> {
+  try {
+    return eventQuestionChoiceOptions(profile, question, data);
+  } catch (error) {
+    if (
+      !(error instanceof EventConditionalTextConfigurationError)
+      || (error.code !== 'rendered-empty' && error.code !== 'duplicate-rendered-values')
+    ) {
+      throw error;
+    }
+    return question.choices.map((choice) => ({ label: choice.id, value: choice.id }));
+  }
+}
+
+function safeEventQuestionChoiceOptions(
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>
+): Array<{ label: string; value: string }> {
+  try {
+    return eventQuestionChoiceOptions(profile, question, data);
+  } catch (error) {
+    if (!(error instanceof EventConditionalTextConfigurationError)) {
+      throw error;
+    }
+    return question.choices.map((choice) => ({ label: choice.id, value: choice.id }));
+  }
+}
+
+function eventQuestionChoiceOptions(
+  profile: EventProfile,
+  question: EventQuestion,
+  data: Record<string, unknown>
+): Array<{ label: string; value: string }> {
+  const questionIndex = profile.questions.indexOf(question);
+  const priorAnswers = eventQuestionAnswersBefore(profile, data, questionIndex);
+  const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
+  const options = question.choices.map((choice) => ({
+    label: renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens),
+    value: choice.id
+  }));
+  if (new Set(options.map((option) => option.label.toLowerCase())).size !== options.length) {
+    throw new EventConditionalTextConfigurationError(
+      `questions.${question.key}.choices`,
+      'duplicate-rendered-values'
+    );
+  }
+  return options;
+}
+
+function renderEventQuestionChoiceLabel(
+  question: EventQuestion,
+  choice: EventQuestionChoice,
+  priorAnswers: Record<string, string>,
+  allowedTokens: string[]
+): string {
+  return renderEventConditionalText({
+    source: choice.label,
+    allowedTokens,
+    values: priorAnswers,
+    emptyResult: 'reject',
+    field: `questions.${question.key}.choices.${choice.id}.label`
+  })!.trim();
+}
+
+function eventQuestionAnswersBefore(
+  profile: EventProfile,
+  data: Record<string, unknown>,
+  endExclusive: number
+): Record<string, string> {
+  const answers: Record<string, string> = {};
+  for (const question of profile.questions.slice(0, Math.max(0, endExclusive))) {
+    const value = eventAnswerValue(data[questionStepId(profile, question)], question, profile, answers);
+    if (value) answers[question.key] = value;
+  }
+  return answers;
+}
+
+function questionPromptByType(t: TranslateFn, question: EventQuestion, prompt: string): string {
+  if (question.type === EVENT_DATE_QUESTION_TYPE) {
+    return t('official.community-events.flow.datePrompt', { prompt });
+  }
+  if (question.type === EVENT_TIME_QUESTION_TYPE) {
+    return t('official.community-events.flow.timePrompt', { prompt });
+  }
+  return prompt;
+}
+
+function optionalQuestionPromptSuffix(
+  t: TranslateFn,
+  profile: EventProfile,
+  question: EventQuestion,
+  answers: Record<string, string>
+): string {
   if (question.required) {
     return '';
   }
-  return profileOptionalPromptSuffix(t, profile);
+  return profileOptionalPromptSuffix(t, profile, answers);
 }
 
-function optionalFlowPrompt(t: TranslateFn, profile: EventProfile, prompt: string): string {
-  const suffix = profileOptionalPromptSuffix(t, profile);
+function optionalFlowPrompt(
+  t: TranslateFn,
+  profile: EventProfile,
+  prompt: string,
+  data: Record<string, unknown>
+): string {
+  const suffix = profileOptionalPromptSuffix(
+    t,
+    profile,
+    eventQuestionAnswersBefore(profile, data, profile.questions.length)
+  );
   return suffix ? `${prompt}\n${suffix}` : prompt;
 }
 
-function profileOptionalPromptSuffix(t: TranslateFn, profile: EventProfile): string {
-  return profile.optionalPromptSuffix.trim()
+function profileOptionalPromptSuffix(
+  t: TranslateFn,
+  profile: EventProfile,
+  answers: Record<string, string>
+): string {
+  const source = profile.optionalPromptSuffix.trim()
     ? profile.optionalPromptSuffix
     : t('official.community-events.flow.optionalPromptSuffix');
+  const firstOptionalQuestionIndex = profile.questions.findIndex((question) => !question.required);
+  const allowedTokens = profile.questions
+    .slice(0, firstOptionalQuestionIndex < 0 ? profile.questions.length : firstOptionalQuestionIndex)
+    .map((question) => question.key);
+  return renderEventConditionalText({
+    source,
+    allowedTokens,
+    values: answers,
+    emptyResult: 'suppress',
+    field: 'optionalPromptSuffix'
+  }) ?? '';
 }
 
 function resolveDateQuestionInput(input: {
@@ -809,8 +1023,10 @@ function resolveSkippedEventEndTime(input: {
 }
 
 function initialQuestionValue(
+  profile: EventProfile,
   question: EventQuestion,
   value: string,
+  data: Record<string, unknown>,
   options: { timezone: string; locale: string; now?: Date | undefined; allowPast?: boolean | undefined } | undefined
 ): unknown {
   if (question.type === EVENT_DATE_QUESTION_TYPE && options) {
@@ -822,7 +1038,12 @@ function initialQuestionValue(
     return result.status === 'ok' ? eventTimeAnswer(result) : undefined;
   }
   if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
-    return initialChoiceValue(question, value);
+    return initialChoiceValue(
+      profile,
+      question,
+      value,
+      eventQuestionAnswersBefore(profile, data, profile.questions.indexOf(question))
+    );
   }
   return value;
 }
@@ -847,7 +1068,12 @@ function questionComplete(profile: EventProfile, question: EventQuestion, data: 
   return typeof raw === 'string' && raw.trim().length > 0;
 }
 
-function eventAnswerValue(raw: unknown, question: EventQuestion): string {
+function eventAnswerValue(
+  raw: unknown,
+  question: EventQuestion,
+  profile: EventProfile,
+  priorAnswers: Record<string, string>
+): string {
   if (question.type === EVENT_DATE_QUESTION_TYPE) {
     return isEventDateAnswer(raw) ? raw.normalized : '';
   }
@@ -859,8 +1085,15 @@ function eventAnswerValue(raw: unknown, question: EventQuestion): string {
     if (typeof selected !== 'string') {
       return '';
     }
-    const choice = question.choices.find((candidate) => candidate.id === selected || candidate.label === selected);
-    return choice?.label ?? selected.trim();
+    const questionIndex = profile.questions.indexOf(question);
+    const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
+    const choice = question.choices.find((candidate) => {
+      const renderedLabel = renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens);
+      return candidate.id === selected || candidate.label === selected || renderedLabel === selected;
+    });
+    return choice
+      ? renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens)
+      : selected.trim();
   }
   return typeof raw === 'string' ? raw.trim() : '';
 }
@@ -912,11 +1145,21 @@ function eventFlowStartsInPast(
   return Boolean(completion && completion.getTime() <= now.getTime());
 }
 
-function initialChoiceValue(question: EventQuestion, value: string): unknown {
-  const choice = question.choices.find((candidate) =>
-    candidate.id.toLowerCase() === value.toLowerCase() ||
-    candidate.label.toLowerCase() === value.toLowerCase()
-  );
+function initialChoiceValue(
+  profile: EventProfile,
+  question: EventQuestion,
+  value: string,
+  priorAnswers: Record<string, string>
+): unknown {
+  const questionIndex = profile.questions.indexOf(question);
+  const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
+  const normalizedValue = value.toLowerCase();
+  const choice = question.choices.find((candidate) => {
+    const renderedLabel = renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens);
+    return candidate.id.toLowerCase() === normalizedValue
+      || candidate.label.toLowerCase() === normalizedValue
+      || renderedLabel.toLowerCase() === normalizedValue;
+  });
   return choice ? [choice.id] : undefined;
 }
 

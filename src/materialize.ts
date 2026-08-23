@@ -2,13 +2,23 @@ import type { EventFlowAnswers } from './flow';
 import {
   calendarDescription,
   calendarLocation,
+  eventTemplateValues,
   renderEventTemplate
 } from './flow';
-import type { EventProfile } from './config';
+import {
+  EVENT_DATE_TEMPLATE_TOKENS,
+  EVENT_PROFILE_TEMPLATE_TOKENS,
+  type EventProfile
+} from './config';
 import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseClass } from './store';
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
 import { eventLifecycleCompleteAt } from './datetime';
+import { validatePollContent } from '../../../platform/transport/pollContract';
+import {
+  EventConditionalTextConfigurationError,
+  renderEventConditionalText
+} from './template';
 
 export interface MaterializedEventLifecycle {
   pollQuestion: string;
@@ -49,28 +59,57 @@ export function materializeEventLifecycle(input: {
   const endsAt = answers.endsAt ?? new Date(
     answers.startsAt.getTime() + profile.calendar.durationMinutes * 60_000
   );
+  const templateInput = {
+    profile,
+    answers: answers.answers,
+    startsAt: answers.startsAt,
+    endsAt,
+    spanKind,
+    timezone,
+    locale,
+    creatorDisplayName
+  };
   const pollQuestion = renderEventTemplate({
     template: profile.poll.titleTemplate,
-    profile,
-    answers: answers.answers,
-    startsAt: answers.startsAt,
-    endsAt,
-    spanKind,
-    timezone,
-    locale,
-    creatorDisplayName
-  });
+    ...templateInput
+  }).trim();
   const groupTitle = renderEventTemplate({
     template: profile.group.titleTemplate,
-    profile,
-    answers: answers.answers,
-    startsAt: answers.startsAt,
-    endsAt,
-    spanKind,
-    timezone,
-    locale,
-    creatorDisplayName
-  });
+    ...templateInput
+  }).trim();
+  if (!pollQuestion) {
+    throw new EventConditionalTextConfigurationError('poll.titleTemplate', 'rendered-empty');
+  }
+  if (!groupTitle) {
+    throw new EventConditionalTextConfigurationError('group.titleTemplate', 'rendered-empty');
+  }
+  const participantTextTokens = [
+    ...profile.questions.map((question) => question.key),
+    ...EVENT_DATE_TEMPLATE_TOKENS,
+    ...EVENT_PROFILE_TEMPLATE_TOKENS
+  ];
+  const participantTextValues = eventTemplateValues(templateInput);
+  const pollOptions = profile.poll.options.map((option) => ({
+    id: option.id,
+    label: renderEventConditionalText({
+      source: option.label,
+      allowedTokens: participantTextTokens,
+      values: participantTextValues,
+      emptyResult: 'reject',
+      field: `poll.options.${option.id}.label`
+    })!.trim(),
+    responseClassId: option.responseClassId
+  }));
+  if (new Set(pollOptions.map((option) => option.label)).size !== pollOptions.length) {
+    throw new EventConditionalTextConfigurationError('poll.options', 'duplicate-rendered-values');
+  }
+  const pollValidation = validatePollContent(pollQuestion, pollOptions.map((option) => option.label));
+  if (!pollValidation.titleFits) {
+    throw new EventConditionalTextConfigurationError('poll.titleTemplate', 'rendered-too-long');
+  }
+  if (!pollValidation.optionsFit) {
+    throw new EventConditionalTextConfigurationError('poll.options', 'rendered-too-long');
+  }
   const closeAt = new Date(answers.startsAt.getTime() - profile.poll.closeOffsetHoursBeforeStart * 3_600_000);
   const durationMinutes = eventDurationMinutes(answers.startsAt, endsAt);
   if (!validEventSpanDuration(spanKind, durationMinutes)) {
@@ -102,11 +141,7 @@ export function materializeEventLifecycle(input: {
   return {
     pollQuestion,
     groupTitle,
-    pollOptions: profile.poll.options.map((option) => ({
-      id: option.id,
-      label: option.label,
-      responseClassId: option.responseClassId
-    })),
+    pollOptions,
     responseClasses: profile.poll.responseClasses.map((responseClass) => ({
       id: responseClass.id,
       label: responseClass.label,

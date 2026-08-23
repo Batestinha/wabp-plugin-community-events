@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
 import { eventsMessages } from './messages';
 import { MAX_DAY_TRIP_DURATION_MINUTES, MIN_DAY_TRIP_DURATION_MINUTES } from './span';
-import { validateEventTemplateText } from './template';
+import { validateEventConditionalText, validateEventTemplateText } from './template';
 
 export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
@@ -402,6 +402,41 @@ const eventProfileObjectSchema = z.object({
     ...templateTokens,
     ...EVENT_WEATHER_TEMPLATE_TOKENS
   ]);
+  profile.questions.forEach((question, questionIndex) => {
+    const priorQuestionKeys = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
+    validateEventConditionalTemplate(
+      question.prompt,
+      priorQuestionKeys,
+      ['questions', questionIndex, 'prompt'],
+      ctx
+    );
+    question.choices.forEach((choice, choiceIndex) => {
+      validateEventConditionalTemplate(
+        choice.label,
+        priorQuestionKeys,
+        ['questions', questionIndex, 'choices', choiceIndex, 'label'],
+        ctx
+      );
+    });
+  });
+  const firstOptionalQuestionIndex = profile.questions.findIndex((question) => !question.required);
+  const optionalSuffixTokens = profile.questions
+    .slice(0, firstOptionalQuestionIndex < 0 ? profile.questions.length : firstOptionalQuestionIndex)
+    .map((question) => question.key);
+  validateEventConditionalTemplate(
+    profile.optionalPromptSuffix,
+    optionalSuffixTokens,
+    ['optionalPromptSuffix'],
+    ctx
+  );
+  profile.poll.options.forEach((option, optionIndex) => {
+    validateEventConditionalTemplate(
+      option.label,
+      templateTokens,
+      ['poll', 'options', optionIndex, 'label'],
+      ctx
+    );
+  });
   validateEventTemplate(profile.poll.titleTemplate, templateTokens, ['poll', 'titleTemplate'], ctx);
   validateEventTemplate(profile.group.titleTemplate, templateTokens, ['group', 'titleTemplate'], ctx);
   validateEventTemplate(profile.eventGroupHint.template, groupHintTemplateTokens, ['eventGroupHint', 'template'], ctx);
@@ -525,7 +560,12 @@ const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
   .refine(
     (value) => !/\{(?:suggested[-_]?title|title)\}/i.test(value),
     'Suggested subgroup titles are not available to the notice template'
-  );
+  )
+  .superRefine((template, ctx) => {
+    for (const issue of validateEventConditionalText(template, ['creatorDisplayName'])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message });
+    }
+  });
 
 export const eventSubgroupSuggestionPreFlowNoticeConfigSchema = z.object({
   enabled: z.boolean().default(true),
@@ -1063,6 +1103,21 @@ function validateEventTemplate(
   ctx: z.RefinementCtx
 ): void {
   for (const issue of validateEventTemplateText(template, allowedTokens)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: issue.message,
+      path
+    });
+  }
+}
+
+function validateEventConditionalTemplate(
+  template: string,
+  allowedTokens: Iterable<string>,
+  path: Array<string | number>,
+  ctx: z.RefinementCtx
+): void {
+  for (const issue of validateEventConditionalText(template, allowedTokens)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: issue.message,

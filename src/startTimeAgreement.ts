@@ -14,9 +14,10 @@ import {
   type PollAssistantResolvePollOutput
 } from '../poll-assistant/serviceApi';
 import { POLL_ASSISTANT_SCHEMA_VERSION } from '../poll-assistant/domain';
-import { parseEventsConfig, type EventProfile } from './config';
+import { localizeDefaultEventProfiles, parseEventsConfig, type EventProfile } from './config';
 import { eventDateAndTimeToUtc, type EventDateParts } from './datetime';
 import { materializeEventLifecycle } from './materialize';
+import { EventConditionalTextConfigurationError } from './template';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import {
@@ -115,15 +116,38 @@ export async function handleEventStartTimeAgreementJob(
       return blockAgreement(context, db, event, agreement, now, 'creator_identity_unavailable');
     }
     const config = parseEventsConfig(await context.configFor(event.scopeId, event.actorIdentityId));
-    const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+    const locale = await context.i18n.resolveIdentityLocale(event.actorIdentityId, event.scopeId);
+    const t = await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId);
+    const profile = localizeDefaultEventProfiles(config.eventProfiles, t)
+      .find((candidate) => candidate.id === event.profileId);
     if (!profile) {
       return blockAgreement(context, db, event, agreement, now, 'profile_removed');
     }
-    const locale = await context.i18n.resolveIdentityLocale(event.actorIdentityId, event.scopeId);
-    const t = await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId);
     return advanceAgreement(context, db, event, profile, agreement, now, locale.locale, t);
   } catch (error) {
     const event = getEvent(db, eventId);
+    if (error instanceof EventConditionalTextConfigurationError && event) {
+      const t = event.actorIdentityId
+        ? await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId).catch(() => undefined)
+        : undefined;
+      const blocked = await blockAgreement(
+        context,
+        db,
+        event,
+        agreement,
+        now,
+        'template_configuration_invalid',
+        t
+      );
+      return [
+        ...blocked,
+        audit('events.start_time_agreement.template_configuration_invalid', {
+          eventId,
+          field: error.field,
+          code: error.code
+        })
+      ];
+    }
     const reason = error instanceof Error ? error.message : String(error);
     const retryAt = new Date(now.getTime() + AGREEMENT_RETRY_MS);
     agreement.lastError = reason;
@@ -366,6 +390,10 @@ async function applyAgreement(
   }
   const durationProfile: EventProfile = {
     ...profile,
+    poll: {
+      ...profile.poll,
+      options: event.pollOptions.map((option) => ({ ...option }))
+    },
     calendar: { ...profile.calendar, durationMinutes: agreement.config.configuredDurationMinutes }
   };
   const answers = {

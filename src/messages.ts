@@ -36,6 +36,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.creatorMembershipPaused.outcomeAmbiguous.joinLink': 'WhatsApp did not provide a definitive result for the one automatic group-membership operation. It will not be submitted again. Event creation is paused until you join the already-created group “{title}”: {groupJoinUrl}\n\nOnce I observe your membership, I will continue setting up this same event automatically. Do not create a new event. Event ID: {eventId}.',
   'official.community-events.creatorMembershipPaused.directAddNotObserved.joinLink': 'WhatsApp acknowledged the automatic group addition, but a later membership check still did not show you in the group. Event creation is paused until you join the already-created group “{title}”: {groupJoinUrl}\n\nOnce I observe your membership, I will continue setting up this same event automatically. Do not create a new event. Event ID: {eventId}.',
   'official.community-events.publishFailed': 'Could not publish the event poll: {reason}',
+  'official.community-events.templateConfigurationInvalid': 'This event message configuration is invalid. Ask an administrator to review the event profile.',
   'official.community-events.unplannedPublishFailed': 'Could not create the unplanned event group: {reason}',
   'official.community-events.status': 'events enabled={enabled} profiles={profiles} timezone={timezone}',
   'official.community-events.none': 'none',

@@ -124,7 +124,16 @@ export const eventsControls: ControlDescriptor[] = [
     {
       widget: 'text',
       multiline: true,
-      placeholder: DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE
+      placeholder: DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE,
+      templateDialect: 'conditional-presence-v1',
+      templateActivation: 'when-used',
+      templateVariables: [
+        { token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Diogo Batista' }
+      ],
+      templateConditionVariables: [
+        { token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Diogo Batista' }
+      ],
+      templateEmptyResult: 'suppress'
     }
   ),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {

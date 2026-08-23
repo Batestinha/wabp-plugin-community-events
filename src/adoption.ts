@@ -13,7 +13,8 @@ import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement 
 import { sendEventCalendarHint } from './calendarHint';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
-import { parseEventsConfig, type EventProfile } from './config';
+import { localizeDefaultEventProfiles, parseEventsConfig, type EventProfile } from './config';
+import { EventConditionalTextConfigurationError } from './template';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -168,7 +169,12 @@ export async function adoptEventLifecycle(input: {
     return { status: 'failed', reason: 'The requested event id does not match the active event attached to this group.' };
   }
 
-  const config = parseEventsConfig(await runtime.configFor(adoption.scopeId, adoption.actorIdentityId));
+  const parsedConfig = parseEventsConfig(await runtime.configFor(adoption.scopeId, adoption.actorIdentityId));
+  const t = await input.context.i18n.translatorForIdentity(adoption.actorIdentityId, adoption.scopeId);
+  const config = {
+    ...parsedConfig,
+    eventProfiles: localizeDefaultEventProfiles(parsedConfig.eventProfiles, t)
+  };
   const profile = config.eventProfiles.find((candidate) => candidate.id === adoption.profileId);
   if (!profile) {
     return { status: 'failed', reason: `Unknown event profile: ${adoption.profileId}` };
@@ -229,23 +235,34 @@ export async function adoptEventLifecycle(input: {
       groupValidation
     });
   }
-  const answers = eventFlowAnswersFromRaw({
-    profile,
-    answers: adoption.answers,
-    timezone: config.timezone,
-    locale: adoption.locale ?? 'en'
-  });
-  if (!answers) {
-    return { status: 'failed', reason: 'Event profile answers are incomplete or invalid.' };
+  let materialized: ReturnType<typeof materializeEventLifecycle>;
+  try {
+    const answers = eventFlowAnswersFromRaw({
+      profile,
+      answers: adoption.answers,
+      timezone: config.timezone,
+      locale: adoption.locale ?? 'en'
+    });
+    if (!answers) {
+      return { status: 'failed', reason: 'Event profile answers are incomplete or invalid.' };
+    }
+    materialized = materializeEventLifecycle({
+      profile,
+      answers,
+      timezone: config.timezone,
+      locale: adoption.locale ?? 'en',
+      creatorDisplayName: adoption.actorLabel || adoption.actorWid,
+      ...(adoption.eventLocation ? { eventLocation: adoption.eventLocation } : {})
+    });
+  } catch (error) {
+    if (error instanceof EventConditionalTextConfigurationError) {
+      return {
+        status: 'failed',
+        reason: `Event message configuration is invalid (${error.field}: ${error.code}).`
+      };
+    }
+    throw error;
   }
-  const materialized = materializeEventLifecycle({
-    profile,
-    answers,
-    timezone: config.timezone,
-    locale: adoption.locale ?? 'en',
-    creatorDisplayName: adoption.actorLabel || adoption.actorWid,
-    ...(adoption.eventLocation ? { eventLocation: adoption.eventLocation } : {})
-  });
   const eventId = newEventId();
   const now = new Date();
   const event: NewStoredEventRecord & StoredEventRecord = {

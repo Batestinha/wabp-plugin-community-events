@@ -41,7 +41,6 @@ import {
   eventInitialFlowData,
   eventFlowSelectedProfileId,
   renderEventTemplate,
-  selectedOptionLabels,
   type EventFlowAnswers,
   type EventFlowPrefill
 } from './flow';
@@ -58,6 +57,7 @@ import {
   renderEventGroupAnnouncement
 } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
+import { EventConditionalTextConfigurationError } from './template';
 import {
   createEventStartTimeAgreement,
   markEventStartTimeAgreementExternallyResolved
@@ -975,9 +975,9 @@ function registerEventUpdateFlowCompletionHandler(
       return false;
     }
     const responseChatId = snapshot.chatId || draft.chatId;
-    await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
 
     if (!eventFlowConfirmed(snapshot, draft.profile)) {
+      await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
       await activeTransport.sendText(responseChatId, t('official.community-events.update.cancelled'));
       return true;
     }
@@ -985,6 +985,7 @@ function registerEventUpdateFlowCompletionHandler(
     const db = eventsDatabase(runtime.databases);
     const event = getEvent(db, draft.eventId);
     if (!event || !eventIsEditable(event) || event.updatedAt !== draft.eventUpdatedAt) {
+      await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
@@ -993,11 +994,30 @@ function registerEventUpdateFlowCompletionHandler(
       actor: { identityId: draft.actorIdentityId, canonicalWid: draft.actorWid },
       creatorIdentityId: draft.creatorIdentityId
     })) {
+      await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
       await activeTransport.sendText(responseChatId, t('official.community-events.update.permissionDenied'));
       return true;
     }
 
-    const answers = eventFlowAnswers(snapshot, draft.profile, draft.timezone, draft.locale);
+    let answers: EventFlowAnswers | undefined;
+    try {
+      answers = eventFlowAnswers(snapshot, draft.profile, draft.timezone, draft.locale);
+    } catch (error) {
+      if (!(error instanceof EventConditionalTextConfigurationError)) throw error;
+      await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
+      await appendEventJsonLog(context, {
+        action: 'event.update_template_invalid',
+        scopeId: draft.scopeId,
+        eventId: draft.eventId,
+        actorIdentityId: draft.actorIdentityId,
+        actorWid: draft.actorWid,
+        profileId: draft.profile.id,
+        metadata: { field: error.field, code: error.code }
+      });
+      await activeTransport.sendText(responseChatId, t('official.community-events.templateConfigurationInvalid'));
+      return true;
+    }
+    await runtime.dataStore.delete(eventUpdateDraftKey(snapshot.scopeId, lock.flowSessionId));
     if (!answers) {
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
@@ -1308,6 +1328,7 @@ async function completeEventUpdate(input: {
       })
     );
   } catch (error) {
+    const templateFailure = error instanceof EventConditionalTextConfigurationError ? error : undefined;
     const reason = error instanceof Error ? error.message : String(error);
     await appendEventJsonLog(input.context, {
       action: 'event.update_failed',
@@ -1315,11 +1336,18 @@ async function completeEventUpdate(input: {
       eventId: input.draft.eventId,
       actorWid: input.draft.actorWid,
       profileId: input.draft.profile.id,
-      metadata: { reason, sourcePluginId: input.draft.sourcePluginId }
+      metadata: templateFailure
+        ? { field: templateFailure.field, code: templateFailure.code, sourcePluginId: input.draft.sourcePluginId }
+        : { reason, sourcePluginId: input.draft.sourcePluginId }
     });
-    await input.activeTransport.sendText(input.responseChatId, reason === EVENT_UPDATE_CONFLICT_ERROR
-      ? input.t('official.community-events.update.invalid')
-      : input.t('official.community-events.update.failed'));
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      templateFailure
+        ? input.t('official.community-events.templateConfigurationInvalid')
+        : reason === EVENT_UPDATE_CONFLICT_ERROR
+          ? input.t('official.community-events.update.invalid')
+          : input.t('official.community-events.update.failed')
+    );
   }
 }
 
@@ -2879,13 +2907,30 @@ export function registerEventFlowCompletionHandlers(
       if (selectedProfileId !== profile.id) {
         return false;
       }
-      await runtime.dataStore.delete(eventDraftKey(snapshot.scopeId, lock.flowSessionId));
       if (!eventFlowConfirmed(snapshot, profile)) {
+        await runtime.dataStore.delete(eventDraftKey(snapshot.scopeId, lock.flowSessionId));
         await activeTransport.sendText(responseChatId, t('official.community-events.cancelled'));
         return true;
       }
 
-      const answers = eventFlowAnswers(snapshot, profile, draft.timezone, draft.locale);
+      let answers: EventFlowAnswers | undefined;
+      try {
+        answers = eventFlowAnswers(snapshot, profile, draft.timezone, draft.locale);
+      } catch (error) {
+        if (!(error instanceof EventConditionalTextConfigurationError)) throw error;
+        await runtime.dataStore.delete(eventDraftKey(snapshot.scopeId, lock.flowSessionId));
+        await appendEventJsonLog(context, {
+          action: 'event.flow_template_invalid',
+          scopeId: draft.scopeId,
+          actorIdentityId: draft.actorIdentityId,
+          actorWid: draft.actorWid,
+          profileId: profile.id,
+          metadata: { field: error.field, code: error.code }
+        });
+        await activeTransport.sendText(responseChatId, t('official.community-events.templateConfigurationInvalid'));
+        return true;
+      }
+      await runtime.dataStore.delete(eventDraftKey(snapshot.scopeId, lock.flowSessionId));
       if (!answers) {
         await activeTransport.sendText(responseChatId, t('official.community-events.invalid'));
         return true;
@@ -3589,7 +3634,7 @@ async function publishConfirmedEvent(input: {
       input: {
         groupWid: input.announcementGroupWid,
         question: materialized.pollQuestion,
-        options: selectedOptionLabels(input.profile),
+        options: materialized.pollOptions.map((option) => option.label),
         allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
         reason: `event ${input.profile.id}`,
         sourcePluginId: EVENTS_PLUGIN_ID
@@ -3758,24 +3803,28 @@ async function publishConfirmedEvent(input: {
       input.t('official.community-events.pollPublished')
     );
   } catch (error) {
+    const templateFailure = error instanceof EventConditionalTextConfigurationError ? error : undefined;
     await appendEventJsonLog(input.context, {
       action: creationMode === 'unplanned' ? 'event.unplanned_failed' : 'event.publish_failed',
       scopeId: input.draft.scopeId,
       eventId,
       actorWid: input.draft.actorWid,
       profileId: input.profile.id,
-      metadata: {
-        reason: error instanceof Error ? error.message : String(error)
-      }
+      metadata: templateFailure
+        ? { field: templateFailure.field, code: templateFailure.code }
+        : { reason: error instanceof Error ? error.message : String(error) }
     });
-    await input.activeTransport.sendText(input.responseChatId, input.t(
-      creationMode === 'unplanned'
-        ? 'official.community-events.unplannedPublishFailed'
-        : 'official.community-events.publishFailed',
-      {
-        reason: error instanceof Error ? error.message : String(error)
-      }
-    ));
+    await input.activeTransport.sendText(
+      input.responseChatId,
+      templateFailure
+        ? input.t('official.community-events.templateConfigurationInvalid')
+        : input.t(
+            creationMode === 'unplanned'
+              ? 'official.community-events.unplannedPublishFailed'
+              : 'official.community-events.publishFailed',
+            { reason: error instanceof Error ? error.message : String(error) }
+          )
+    );
   }
 }
 

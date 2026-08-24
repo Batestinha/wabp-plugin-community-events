@@ -1148,45 +1148,54 @@ export async function finalizeUnplannedEventLifecycle(input: {
   }
   assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
   if (
-    failures.length === 0 &&
     input.trigger === 'unplanned_recovery' &&
     input.notifyRecoveryCreator
   ) {
-    try {
-      if (!input.context.resolveStableIdentityById || !input.context.i18n) {
-        throw new Error('Plugin runtime does not expose authoritative creator notification services.');
+    const alreadyNotified = db.get<{ notified: number }>(
+      `SELECT 1 AS notified
+         FROM event_logs
+        WHERE event_id = ?
+          AND action = 'events.unplanned.recovery_creator_notified'
+        LIMIT 1`,
+      event.id
+    );
+    if (!alreadyNotified) {
+      try {
+        if (!input.context.resolveStableIdentityById || !input.context.i18n) {
+          throw new Error('Plugin runtime does not expose authoritative creator notification services.');
+        }
+        const actorIdentityId = requireRecoveryActorIdentityId(event);
+        const [creatorAddress, t] = await Promise.all([
+          input.context.resolveStableIdentityById(actorIdentityId),
+          input.context.i18n.translatorForIdentity(actorIdentityId, event.scopeId)
+        ]);
+        await input.activeTransport.sendText(
+          creatorAddress.deliveryChatId,
+          t('official.community-events.unplannedProvisioningRecovered', {
+            title: event.subgroupTitle || event.groupTitle,
+            eventId: event.id
+          }),
+          {
+            idempotencyKey: `community-events:unplanned-provisioning-recovered:${event.id}`
+          }
+        );
+        appendEventLog(db, {
+          eventId: event.id,
+          action: 'events.unplanned.recovery_creator_notified',
+          metadata: {
+            creatorIdentityId: actorIdentityId,
+            creatorChatId: creatorAddress.deliveryChatId
+          }
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        failures.push(`creator recovery notice: ${reason}`);
+        appendEventLog(db, {
+          eventId: event.id,
+          action: 'events.unplanned.recovery_creator_notification_failed',
+          metadata: { reason }
+        });
       }
-      const actorIdentityId = requireRecoveryActorIdentityId(event);
-      const [creatorAddress, t] = await Promise.all([
-        input.context.resolveStableIdentityById(actorIdentityId),
-        input.context.i18n.translatorForIdentity(actorIdentityId, event.scopeId)
-      ]);
-      await input.activeTransport.sendText(
-        creatorAddress.deliveryChatId,
-        t('official.community-events.unplannedProvisioningRecovered', {
-          title: event.subgroupTitle || event.groupTitle,
-          eventId: event.id
-        }),
-        {
-          idempotencyKey: `community-events:unplanned-provisioning-recovered:${event.id}`
-        }
-      );
-      appendEventLog(db, {
-        eventId: event.id,
-        action: 'events.unplanned.recovery_creator_notified',
-        metadata: {
-          creatorIdentityId: actorIdentityId,
-          creatorChatId: creatorAddress.deliveryChatId
-        }
-      });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      failures.push(`creator recovery notice: ${reason}`);
-      appendEventLog(db, {
-        eventId: event.id,
-        action: 'events.unplanned.recovery_creator_notification_failed',
-        metadata: { reason }
-      });
     }
   }
   assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);

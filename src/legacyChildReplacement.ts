@@ -395,7 +395,10 @@ async function enqueueReplacementRecovery(
         generation: cursor.generation,
         attempt: cursor.attempt
       },
-      dedupeKey: eventProvisioningRecoveryDedupeKey(event, cursor)
+      dedupeKey: eventProvisioningRecoveryDedupeKey(event, {
+        ...cursor,
+        nextRunAt: cursor.nextRunAt
+      })
     });
     return true;
   } catch (error) {

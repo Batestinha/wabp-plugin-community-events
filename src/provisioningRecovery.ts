@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import {
+  isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
@@ -11,7 +12,11 @@ import type {
   OutboundSendResult,
   RequiredCreatorBinding
 } from '../../../platform/transport/transportTypes';
-import type { TransportCommunityLinkRecoveryDisposition } from '../../../platform/transport/transportErrors';
+import {
+  isTransportCommunitySubgroupPreCreateError,
+  isTransportProviderUnavailableError,
+  type TransportCommunityLinkRecoveryDisposition
+} from '../../../platform/transport/transportErrors';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import { voterWidsForResponseBehavior } from './attendance';
 import { parseEventsConfig, type EventProfile } from './config';
@@ -59,6 +64,7 @@ import {
   renewClaimedKnownChildEventProvisioningLease,
   completeClaimedEventCommunityLink,
   resolvedEventCalendarId,
+  resetHaltedEventPreCreateProvisioningRecovery,
   resumeHaltedKnownChildEventProvisioning,
   type StoredEventRecord,
   type StoredUnplannedEventFinalization
@@ -69,6 +75,7 @@ export const EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS = EVENT_PROVISIONING_RECO
 export const EVENT_PROVISIONING_LINK_VERIFY_ONLY_DELAY_MS = 15_000;
 export const EVENT_PROVISIONING_CREATOR_MEMBERSHIP_DELAYS_MS = [60_000, 120_000, 300_000] as const;
 export const EVENT_PROVISIONING_LINK_MUTATION_ALLOWED_DELAY_MS = 30_000;
+export const EVENT_PROVISIONING_PROVIDER_HEALTH_DELAY_MS = 60_000;
 export const UNPLANNED_EVENT_FINALIZATION_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
 
 export interface EventProvisioningRecoveryPayload {
@@ -96,10 +103,33 @@ export type EnqueueEventPreCreateProvisioningRecoveryResult =
       event?: StoredEventRecord | undefined;
     };
 
+export function isBaileysEventPreCreateProviderUnavailableFailure(
+  error: unknown
+): boolean {
+  if (
+    !isManagedCommunitySubgroupPreCreateError(error) ||
+    error.provisioning.providerId !== 'baileys' ||
+    error.provisioning.certainty !== 'not_created' ||
+    error.provisioning.details.phase !== 'require_provider'
+  ) {
+    return false;
+  }
+  const transportError = error.cause;
+  return isTransportCommunitySubgroupPreCreateError(transportError) &&
+    isTransportProviderUnavailableError(transportError.cause) &&
+    transportError.providerId === 'baileys' &&
+    transportError.certainty === 'not_created' &&
+    transportError.details.phase === 'require_provider';
+}
+
+export function eventProvisioningProviderHealthRunAt(now: Date): Date {
+  return new Date(now.getTime() + EVENT_PROVISIONING_PROVIDER_HEALTH_DELAY_MS);
+}
+
 /**
- * Explicit repair entry point for a failed event that predates typed
- * pre-create failures. The caller must supply the exact observed event
- * revision; this function never infers retry safety from an error string.
+ * Explicit repair entry point for a failed no-child event. This initializes a
+ * legacy record or gives an exact halted record a fresh recovery generation,
+ * but only from the caller's observed revision while Baileys is ready.
  */
 export async function enqueueEventPreCreateProvisioningRecovery(input: {
   context: PluginRuntimeContext;
@@ -165,16 +195,62 @@ export async function enqueueEventPreCreateProvisioningRecovery(input: {
       event
     });
   }
+  if (event.updatedAt !== input.expectedUpdatedAt) {
+    return finish({
+      status: 'rejected',
+      reason: `Event ${event.id} changed after revision ${input.expectedUpdatedAt}.`,
+      event
+    });
+  }
+  const baileysReady = await input.context.transportProviderReady?.('baileys')
+    .catch(() => false) ?? false;
+  if (!baileysReady) {
+    return finish({
+      status: 'rejected',
+      reason: `Event ${event.id} cannot be rearmed while the Baileys feature provider is not ready.`,
+      event
+    });
+  }
 
   let cursor = eventProvisioningRecoveryCursor(event);
-  if (!cursor) {
-    if (event.updatedAt !== input.expectedUpdatedAt) {
+  if (event.provisioningRecoveryHaltedAt && cursor) {
+    const runAt = requestedAt;
+    const generation = randomUUID();
+    const reset = resetHaltedEventPreCreateProvisioningRecovery(db, {
+      eventId: event.id,
+      scopeId: event.scopeId,
+      expectedUpdatedAt: input.expectedUpdatedAt,
+      generation,
+      attempt: 1,
+      nextRunAt: runAt.toISOString(),
+      updatedAt: runAt.toISOString()
+    });
+    event = getEvent(db, event.id) ?? event;
+    cursor = eventProvisioningRecoveryCursor(event);
+    if (
+      !reset ||
+      !cursor?.nextRunAt ||
+      cursor.generation !== generation ||
+      cursor.attempt !== 1 ||
+      event.subgroupChatId
+    ) {
       return finish({
         status: 'rejected',
-        reason: `Event ${event.id} changed after revision ${input.expectedUpdatedAt}.`,
+        reason: `Event ${event.id} changed while its halted no-child recovery was rearmed.`,
         event
       });
     }
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.provisioning.precreate_recovery_rearmed',
+      metadata: {
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        generation: cursor.generation,
+        attempt: cursor.attempt,
+        runAt: cursor.nextRunAt
+      }
+    });
+  } else if (!cursor) {
     const runAt = requestedAt;
     const initialized = initializeEventPreCreateProvisioningRecovery(db, {
       eventId: event.id,
@@ -233,7 +309,10 @@ export async function enqueueEventPreCreateProvisioningRecovery(input: {
         generation: cursor.generation,
         attempt: cursor.attempt
       } satisfies EventProvisioningRecoveryPayload,
-      dedupeKey: eventProvisioningRecoveryDedupeKey(event, cursor)
+      dedupeKey: eventProvisioningRecoveryDedupeKey(event, {
+        ...cursor,
+        nextRunAt: cursor.nextRunAt
+      })
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -615,7 +694,10 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
         generation: advancedCursor.generation,
         attempt: advancedCursor.attempt
       } satisfies EventProvisioningRecoveryPayload,
-      dedupeKey: eventProvisioningRecoveryDedupeKey(event, advancedCursor)
+      dedupeKey: eventProvisioningRecoveryDedupeKey(event, {
+        ...advancedCursor,
+        nextRunAt: advancedCursor.nextRunAt
+      })
     });
   } catch (error) {
     enqueued = false;
@@ -2046,10 +2128,11 @@ export function eventProvisioningRecoveryCursor(
 
 export function eventProvisioningRecoveryDedupeKey(
   record: StoredEventRecord,
-  cursor: Pick<EventProvisioningRecoveryCursor, 'generation' | 'attempt'>
+  cursor: Pick<EventProvisioningRecoveryCursor, 'generation' | 'attempt'> & { nextRunAt: string }
 ): string {
   const target = record.subgroupChatId ?? 'create_standalone';
-  return `${EVENTS_JOBS.provisioningRecovery}:${record.scopeId}:${record.id}:${target}:${cursor.generation}:${cursor.attempt}`;
+  return `${EVENTS_JOBS.provisioningRecovery}:${record.scopeId}:${record.id}:${target}:` +
+    `${cursor.generation}:${cursor.attempt}:${cursor.nextRunAt}`;
 }
 
 export function unplannedEventFinalizationRunAt(attempt: number, now: Date): Date {

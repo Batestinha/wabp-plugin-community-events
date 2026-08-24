@@ -7083,6 +7083,52 @@ export function initializeEventPreCreateProvisioningRecovery(db: PluginDatabase,
   return result.changes === 1;
 }
 
+export function resetHaltedEventPreCreateProvisioningRecovery(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  generation: string;
+  attempt: number;
+  nextRunAt: string;
+  updatedAt: string;
+}): boolean {
+  const result = db.run(
+    `UPDATE event_records
+        SET provisioning_recovery_generation = ?,
+            provisioning_recovery_attempt = ?,
+            provisioning_recovery_next_run_at = ?,
+            provisioning_recovery_halted_at = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND calendar_status IN ('hidden', 'included')
+        AND subgroup_chat_id IS NULL
+        AND actor_identity_id IS NOT NULL
+        AND trim(actor_identity_id) <> ''
+        AND (
+          (origin IN ('created', 'adopted_poll') AND poll_wa_msg_id IS NOT NULL)
+          OR (origin = 'unplanned' AND poll_wa_msg_id IS NULL)
+        )
+        AND cleanup_at > ?
+        AND updated_at = ?
+        AND provisioning_recovery_generation IS NOT NULL
+        AND provisioning_recovery_attempt IS NOT NULL
+        AND provisioning_recovery_next_run_at IS NULL
+        AND provisioning_recovery_halted_at IS NOT NULL`,
+    input.generation,
+    input.attempt,
+    input.nextRunAt,
+    input.updatedAt,
+    input.eventId,
+    input.scopeId,
+    input.nextRunAt,
+    input.expectedUpdatedAt
+  );
+  return result.changes === 1;
+}
+
 export function advanceEventProvisioningRecovery(db: PluginDatabase, input: {
   eventId: string;
   scopeId: string;

@@ -82,10 +82,12 @@ import {
 import {
   attemptUnplannedEventFinalization,
   eventCommunityLinkRecoveryRunAt,
+  eventProvisioningProviderHealthRunAt,
   EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
   eventProvisioningRecoveryCursor,
   eventProvisioningRecoveryDedupeKey,
-  eventProvisioningRecoveryRunAt
+  eventProvisioningRecoveryRunAt,
+  isBaileysEventPreCreateProviderUnavailableFailure
 } from './provisioningRecovery';
 import { eventWeatherForecastJobRequest } from './weather';
 import {
@@ -4232,12 +4234,15 @@ async function provisionUnplannedEventSubgroup(input: {
       recoveryDisposition === 'creator_membership_verify_only' ||
       recoveryDisposition === 'mutation_allowed';
     const operatorRequired = Boolean(knownChild) && !retryableLinkDisposition;
-    const recoveryAttempt = operatorRequired ? attempt : nextAttempt;
-    const runAt = eventCommunityLinkRecoveryRunAt(
-      recoveryDisposition,
-      failedAt,
-      nextAttempt
-    );
+    const providerHealthDeferral = isBaileysEventPreCreateProviderUnavailableFailure(error);
+    const recoveryAttempt = operatorRequired || providerHealthDeferral ? attempt : nextAttempt;
+    const runAt = providerHealthDeferral
+      ? eventProvisioningProviderHealthRunAt(failedAt)
+      : eventCommunityLinkRecoveryRunAt(
+          recoveryDisposition,
+          failedAt,
+          nextAttempt
+        );
     let checkpointed = false;
     if (knownChild) {
       const latest = getEvent(input.db, input.event.id);
@@ -4294,7 +4299,8 @@ async function provisionUnplannedEventSubgroup(input: {
       }
     } else if (isManagedCommunitySubgroupPreCreateError(error)) {
       const retryBeforeCleanup = error.retryableWithoutCheckpoint && runAt.getTime() < cleanupAt.getTime();
-      const retryAttemptsRemain = nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+      const retryAttemptsRemain = providerHealthDeferral ||
+        nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
       const retryScheduled = retryBeforeCleanup && retryAttemptsRemain;
       checkpointed = retryScheduled
         ? rearmClaimedEventPreCreateProvisioningAttempt(input.db, {
@@ -4302,7 +4308,7 @@ async function provisionUnplannedEventSubgroup(input: {
             scopeId: input.event.scopeId,
             generation,
             expectedAttempt: attempt,
-            nextAttempt,
+            nextAttempt: recoveryAttempt,
             nextRunAt: runAt.toISOString(),
             reason: error.message,
             rearmedAt: failedAt.toISOString()
@@ -4372,6 +4378,7 @@ async function provisionUnplannedEventSubgroup(input: {
         generation,
         failedAttempt: attempt,
         recoveryAttempt,
+        providerHealthDeferral,
         ...(recoveryDisposition
           ? { recoveryDisposition }
           : {}),
@@ -4412,11 +4419,12 @@ async function provisionUnplannedEventSubgroup(input: {
           eventId: failedEvent.id,
           ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
           generation,
-          attempt: nextAttempt
+          attempt: recoveryAttempt
         },
         dedupeKey: eventProvisioningRecoveryDedupeKey(failedEvent, {
           generation,
-          attempt: nextAttempt
+          attempt: recoveryAttempt,
+          nextRunAt: runAt.toISOString()
         })
       });
       appendEventLog(input.db, {
@@ -4425,8 +4433,9 @@ async function provisionUnplannedEventSubgroup(input: {
         metadata: {
           ...(knownChild ? { subgroupChatId: knownChild.chatId } : {}),
           generation,
-          attempt: nextAttempt,
+          attempt: recoveryAttempt,
           runAt: runAt.toISOString(),
+          providerHealthDeferral,
           ...(isManagedCommunitySubgroupProvisioningError(error) || isManagedCommunitySubgroupPreCreateError(error)
             ? { stage: error.stage }
             : {}),

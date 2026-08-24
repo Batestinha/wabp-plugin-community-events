@@ -149,10 +149,12 @@ import {
 import {
   attemptUnplannedEventFinalization,
   eventCommunityLinkRecoveryRunAt,
+  eventProvisioningProviderHealthRunAt,
   eventProvisioningRecoveryCursor,
   eventProvisioningRecoveryDedupeKey,
   eventProvisioningRecoveryRunAt,
   EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
+  isBaileysEventPreCreateProviderUnavailableFailure,
   eventProvisioningResumeDedupeKey,
   retryEventProvisioningCreation,
   resumeEventProvisioning,
@@ -162,6 +164,7 @@ import {
   type EventProvisioningRecoveryPayload,
   type UnplannedEventFinalizationPayload
 } from './provisioningRecovery';
+import { notifyEventCreatorPreCreateTerminal } from './provisioningTerminalNotice';
 import { recoverEventQuestionKeyRenames } from './questionKeyRenameRecovery';
 import {
   handleEventSuggestionReconcileJob,
@@ -573,6 +576,9 @@ export async function recoverEventProvisioningJobs(
       });
       if (missed) {
         const failedEvent = getEvent(db, record.id);
+        if (failedEvent) {
+          await notifyEventCreatorPreCreateTerminal(context, failedEvent, 'cleanup_expired');
+        }
         const receiptReleaseRetries = failedEvent
           ? await releaseEligibleEventPollReplacementReceipts({
               context,
@@ -628,6 +634,10 @@ export async function recoverEventProvisioningJobs(
             source: 'recovery_scan'
           }
         });
+        const failedEvent = getEvent(db, record.id);
+        if (failedEvent) {
+          await notifyEventCreatorPreCreateTerminal(context, failedEvent, 'attempts_exhausted');
+        }
       }
       continue;
     }
@@ -648,7 +658,10 @@ export async function recoverEventProvisioningJobs(
         generation: cursor.generation,
         attempt: cursor.attempt
       } satisfies EventProvisioningRecoveryPayload,
-      dedupeKey: eventProvisioningRecoveryDedupeKey(record, cursor)
+      dedupeKey: eventProvisioningRecoveryDedupeKey(record, {
+        ...cursor,
+        nextRunAt: cursor.nextRunAt
+      })
     });
     enqueued += 1;
   }
@@ -2278,6 +2291,9 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
             missedAt: claimedAt.toISOString()
           });
           const failedEvent = missed ? getEvent(db, record.id) : undefined;
+          if (failedEvent) {
+            await notifyEventCreatorPreCreateTerminal(context, failedEvent, 'cleanup_expired');
+          }
           const receiptReleaseRetries = failedEvent
             ? await releaseEligibleEventPollReplacementReceipts({
                 context,
@@ -2667,10 +2683,17 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     if (isManagedCommunitySubgroupPreCreateError(error)) {
       const { provisioning, stage } = error;
       const nextAttempt = (preCreateClaim?.attempt ?? 0) + 1;
-      const recoveryRunAt = eventProvisioningRecoveryRunAt(nextAttempt, new Date(failedAt));
+      const providerHealthDeferral = isBaileysEventPreCreateProviderUnavailableFailure(error);
+      const recoveryAttempt = providerHealthDeferral
+        ? preCreateClaim?.attempt ?? 1
+        : nextAttempt;
+      const recoveryRunAt = providerHealthDeferral
+        ? eventProvisioningProviderHealthRunAt(new Date(failedAt))
+        : eventProvisioningRecoveryRunAt(nextAttempt, new Date(failedAt));
       const claimedCleanupRecord = { ...record, cleanupAt: preCreateClaim?.cleanupAt ?? record.cleanupAt };
       const retryWithinCleanup = eventPreCreateEligibleBeforeCleanup(claimedCleanupRecord, recoveryRunAt);
-      const retryAttemptsRemain = nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+      const retryAttemptsRemain = providerHealthDeferral ||
+        nextAttempt <= EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
       const checkpointPersisted = Boolean(preCreateClaim) && (
         error.retryableWithoutCheckpoint && retryWithinCleanup && retryAttemptsRemain
           ? rearmClaimedEventPreCreateProvisioningAttempt(db, {
@@ -2678,7 +2701,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
               scopeId: record.scopeId,
               generation: preCreateClaim!.generation,
               expectedAttempt: preCreateClaim!.attempt,
-              nextAttempt,
+              nextAttempt: recoveryAttempt,
               nextRunAt: recoveryRunAt.toISOString(),
               reason,
               rearmedAt: failedAt
@@ -2715,6 +2738,8 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         creatorIdentityId: provisioning.creatorIdentityId,
         claimGeneration: preCreateClaim?.generation,
         claimAttempt: preCreateClaim?.attempt,
+        recoveryAttempt,
+        providerHealthDeferral,
         retryWithinCleanup,
         retryAttemptsRemain,
         maxAttempts: EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS,
@@ -2740,12 +2765,26 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
             action: 'events.provisioning.recovery_scheduled',
             metadata: {
               generation: preCreateClaim?.generation,
-              attempt: nextAttempt,
+              attempt: recoveryAttempt,
               runAt: recoveryRunAt.toISOString(),
               stage,
-              checkpointKind: 'no_child'
+              checkpointKind: 'no_child',
+              providerHealthDeferral
             }
           });
+        }
+      } else if (
+        checkpointPersisted &&
+        error.retryableWithoutCheckpoint &&
+        (!retryWithinCleanup || !retryAttemptsRemain)
+      ) {
+        const failedRecord = getEvent(db, record.id);
+        if (failedRecord) {
+          await notifyEventCreatorPreCreateTerminal(
+            context,
+            failedRecord,
+            retryWithinCleanup ? 'attempts_exhausted' : 'cleanup_expired'
+          );
         }
       }
     } else if (isManagedCommunitySubgroupProvisioningError(error)) {
@@ -3351,6 +3390,9 @@ async function recoverFailedEventProvisioning(
         missedAt: claimedAt.toISOString()
       });
       const failedEvent = missed ? getEvent(db, record.id) : undefined;
+      if (failedEvent) {
+        await notifyEventCreatorPreCreateTerminal(context, failedEvent, 'cleanup_expired');
+      }
       const receiptReleaseRetries = failedEvent
         ? await releaseEligibleEventPollReplacementReceipts({
             context,
@@ -3407,6 +3449,10 @@ async function recoverFailedEventProvisioning(
             source: 'recovery_job'
           }
         });
+        const failedEvent = getEvent(db, record.id);
+        if (failedEvent) {
+          await notifyEventCreatorPreCreateTerminal(context, failedEvent, 'attempts_exhausted');
+        }
       }
       return [audit(halted
         ? 'events.provisioning.precreate_retry_limit_reached'
@@ -3719,16 +3765,21 @@ async function recoverFailedEventProvisioning(
         }
       } else if (preCreateError?.retryableWithoutCheckpoint) {
         const nextAttempt = payload.attempt + 1;
-        const runAt = eventProvisioningRecoveryRunAt(nextAttempt, failedAt);
+        const providerHealthDeferral = isBaileysEventPreCreateProviderUnavailableFailure(preCreateError);
+        const recoveryAttempt = providerHealthDeferral ? payload.attempt : nextAttempt;
+        const runAt = providerHealthDeferral
+          ? eventProvisioningProviderHealthRunAt(failedAt)
+          : eventProvisioningRecoveryRunAt(nextAttempt, failedAt);
         const retryWithinCleanup = eventPreCreateEligibleBeforeCleanup(record, runAt);
-        preCreateRetryLimitReached = nextAttempt > EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
+        preCreateRetryLimitReached = !providerHealthDeferral &&
+          nextAttempt > EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS;
         if (retryWithinCleanup && !preCreateRetryLimitReached) {
           const rearmed = rearmClaimedEventPreCreateProvisioningAttempt(db, {
             eventId: record.id,
             scopeId: record.scopeId,
             generation: payload.generation,
             expectedAttempt: payload.attempt,
-            nextAttempt,
+            nextAttempt: recoveryAttempt,
             nextRunAt: runAt.toISOString(),
             reason,
             rearmedAt: failedAt.toISOString()
@@ -3750,7 +3801,7 @@ async function recoverFailedEventProvisioning(
             };
           }
         } else if (!retryWithinCleanup) {
-          markClaimedEventPreCreateProvisioningMissed(db, {
+          const missed = markClaimedEventPreCreateProvisioningMissed(db, {
             eventId: record.id,
             scopeId: record.scopeId,
             generation: payload.generation,
@@ -3759,8 +3810,12 @@ async function recoverFailedEventProvisioning(
             reason: 'Event subgroup creation retries reached the cleanup deadline.',
             missedAt: failedAt.toISOString()
           });
+          const failedRecord = missed ? getEvent(db, record.id) : undefined;
+          if (failedRecord) {
+            await notifyEventCreatorPreCreateTerminal(context, failedRecord, 'cleanup_expired');
+          }
         } else {
-          haltClaimedEventPreCreateProvisioning(db, {
+          const halted = haltClaimedEventPreCreateProvisioning(db, {
             eventId: record.id,
             scopeId: record.scopeId,
             generation: payload.generation,
@@ -3768,6 +3823,10 @@ async function recoverFailedEventProvisioning(
             reason: `Event subgroup creation reached the maximum of ${EVENT_PROVISIONING_PRECREATE_MAX_ATTEMPTS} deterministic attempts: ${reason}`,
             haltedAt: failedAt.toISOString()
           });
+          const failedRecord = halted ? getEvent(db, record.id) : undefined;
+          if (failedRecord) {
+            await notifyEventCreatorPreCreateTerminal(context, failedRecord, 'attempts_exhausted');
+          }
         }
       } else {
         haltClaimedEventPreCreateProvisioning(db, {

@@ -124,8 +124,8 @@ function renderEvent(
     `DTSTAMP:${formatUtc(now)}`,
     ...(dateOnly
       ? [
-          `DTSTART;VALUE=DATE:${formatLocalIcsDate(event.localDate ?? localDate(startsAt, event.timezone))}`,
-          `DTEND;VALUE=DATE:${formatLocalIcsDate(localDate(new Date(event.lifecycleCompleteAt), event.timezone))}`
+          `DTSTART;VALUE=DATE:${formatLocalIcsDate(event.localDate ?? calendarEventLocalDate(startsAt, event.timezone))}`,
+          `DTEND;VALUE=DATE:${formatLocalIcsDate(calendarEventLocalDate(new Date(event.lifecycleCompleteAt), event.timezone))}`
         ]
       : [`DTSTART:${formatUtc(startsAt)}`, `DTEND:${formatUtc(endsAt)}`]),
     `LAST-MODIFIED:${formatUtc(new Date(event.updatedAt))}`,
@@ -141,7 +141,7 @@ function renderEvent(
   ];
 }
 
-function localDate(date: Date, timezone: string): string {
+export function calendarEventLocalDate(date: Date, timezone: string): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
@@ -160,7 +160,7 @@ function formatLocalIcsDate(value: string): string {
   return value.replace(/-/g, '');
 }
 
-function calendarEventSummary(
+export function calendarEventSummary(
   event: StoredEventRecord,
   config: Pick<EventsConfig, 'eventProfiles'> | Record<string, never>
 ): string {

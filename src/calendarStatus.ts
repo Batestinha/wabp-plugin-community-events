@@ -8,9 +8,10 @@ import {
   type EventsConfig
 } from './config';
 import { publishCalendarBody, type CalendarPublicationOutcome } from './calendarPublication';
-import { publishWorkspaceCalendarProjection } from './workspaceCalendarPublication';
-import { eventAlbumSource } from './service';
-import { eventAlbumSourceSchema, type EventAlbumSource } from './serviceApi';
+import {
+  publishWorkspaceCalendarProjection,
+  workspaceCalendarProjectionEvent
+} from './workspaceCalendarPublication';
 import {
   commitPreparedScopeCalendar,
   discardPreparedScopeCalendar,
@@ -18,6 +19,10 @@ import {
   renderScopeCalendar,
   type PreparedScopeCalendar
 } from './ics';
+import {
+  WorkspaceCalendarProjectionEventSchema,
+  type WorkspaceCalendarProjectionEvent
+} from './workspaceCalendarContract';
 import {
   assertScopeEventCalendarOwnershipResolved,
   claimEventCalendarPublication,
@@ -52,7 +57,7 @@ export interface RenderedScopeCalendarDocument {
   body: string;
   generatedAt: string;
   eventCount: number;
-  events: EventAlbumSource[];
+  events: WorkspaceCalendarProjectionEvent[];
 }
 
 export function renderCurrentScopeCalendarDocument(input: {
@@ -73,7 +78,7 @@ export function renderCurrentScopeCalendarDocument(input: {
     body: renderScopeCalendar(input.config, input.scopeId, input.calendarId, events, now),
     generatedAt: now.toISOString(),
     eventCount: events.length,
-    events: events.map(eventAlbumSource).filter((event): event is EventAlbumSource => Boolean(event))
+    events: events.map((event) => workspaceCalendarProjectionEvent(event, input.config))
   };
 }
 
@@ -334,10 +339,12 @@ function frozenClaimedCalendarDocument(
       );
     }
     let frozenCalendar: EventCalendarResource;
-    let frozenEvents: EventAlbumSource[];
+    let frozenEvents: WorkspaceCalendarProjectionEvent[];
     try {
       frozenCalendar = eventCalendarResourceSchema.parse(JSON.parse(state.documentCalendarJson));
-      frozenEvents = eventAlbumSourceSchema.array().parse(JSON.parse(state.documentEventsJson));
+      frozenEvents = WorkspaceCalendarProjectionEventSchema.array().parse(
+        JSON.parse(state.documentEventsJson)
+      );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(

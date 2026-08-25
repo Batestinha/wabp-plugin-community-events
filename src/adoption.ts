@@ -369,7 +369,8 @@ export async function adoptEventLifecycle(input: {
         db,
         config,
         scopeId: adoption.scopeId,
-        calendarId
+        calendarId,
+        ...(runtime.services ? { services: runtime.services } : {})
       })
       : undefined;
   } catch (error) {
@@ -514,7 +515,8 @@ async function reconcileAdoptedGroupLifecycle(input: {
         db: input.db,
         config: input.config,
         scopeId: event.scopeId,
-        calendarId
+        calendarId,
+        ...(input.runtime.services ? { services: input.runtime.services } : {})
       });
       calendarPublication = getCalendarPublicationStatus(input.db, event.scopeId, calendarId)?.ok
         ? 'published'

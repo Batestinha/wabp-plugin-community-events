@@ -434,7 +434,8 @@ async function refreshCalendar(
     db,
     config,
     scopeId: event.scopeId,
-    calendarId
+    calendarId,
+    ...(runtime.services ? { services: runtime.services } : {})
   });
 }
 

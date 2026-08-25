@@ -1,12 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
 import {
   eventCalendarResourceSchema,
   type EventCalendarResource,
   type EventsConfig
 } from './config';
 import { publishCalendarBody, type CalendarPublicationOutcome } from './calendarPublication';
+import { publishWorkspaceCalendarProjection } from './workspaceCalendarPublication';
+import { eventAlbumSource } from './service';
+import { eventAlbumSourceSchema, type EventAlbumSource } from './serviceApi';
 import {
   commitPreparedScopeCalendar,
   discardPreparedScopeCalendar,
@@ -48,6 +52,7 @@ export interface RenderedScopeCalendarDocument {
   body: string;
   generatedAt: string;
   eventCount: number;
+  events: EventAlbumSource[];
 }
 
 export function renderCurrentScopeCalendarDocument(input: {
@@ -67,7 +72,8 @@ export function renderCurrentScopeCalendarDocument(input: {
   return {
     body: renderScopeCalendar(input.config, input.scopeId, input.calendarId, events, now),
     generatedAt: now.toISOString(),
-    eventCount: events.length
+    eventCount: events.length,
+    events: events.map(eventAlbumSource).filter((event): event is EventAlbumSource => Boolean(event))
   };
 }
 
@@ -79,6 +85,7 @@ export async function writePublishAndRecordScopeCalendar(input: {
   calendarId: string;
   /** Startup recovery consumes an already-dirty generation without creating another one. */
   requestGeneration?: boolean | undefined;
+  services?: PluginServiceCaller | undefined;
 }): Promise<CalendarPublicationOutcome | undefined> {
   assertScopeEventCalendarOwnershipResolved(input.db, input.scopeId);
   const calendar = input.config.calendars.find((candidate) => candidate.id === input.calendarId);
@@ -181,6 +188,7 @@ async function publishClaimedCalendarGeneration(
     config: EventsConfig;
     scopeId: string;
     calendarId: string;
+    services?: PluginServiceCaller | undefined;
   },
   calendar: EventsConfig['calendars'][number],
   claim: EventCalendarPublicationClaim,
@@ -246,13 +254,28 @@ async function publishClaimedCalendarGeneration(
       throwCalendarPublicationHeartbeatError(heartbeatError);
       return { status: 'superseded' };
     }
-    const publication = await publishCalendarBody({
+    const workspacePublication = await publishWorkspaceCalendarProjection({
+      appConfig: input.appConfig,
+      ...(input.services ? { services: input.services } : {}),
+      scopeId: input.scopeId,
+      timezone: input.config.timezone,
+      calendar: frozenCalendar,
+      icsBody: document.body,
+      events: document.events,
+      generation: claim.generation
+    });
+    const legacyPublication = await publishCalendarBody({
       appConfig: input.appConfig,
       scopeId: input.scopeId,
       calendar: frozenCalendar,
       icsBody: document.body,
       generation: claim.generation
     });
+    const publication = workspacePublication && !workspacePublication.ok
+      ? workspacePublication
+      : legacyPublication && !legacyPublication.ok
+        ? legacyPublication
+        : legacyPublication ?? workspacePublication;
     throwCalendarPublicationHeartbeatError(heartbeatError);
     const completed = !publication || publication.ok;
     const recorded = finishEventCalendarPublicationAttempt(input.db, {
@@ -296,6 +319,7 @@ function frozenClaimedCalendarDocument(
       state.documentSha256 === undefined ||
       state.documentConfigFingerprint !== configFingerprint ||
       state.documentCalendarJson === undefined ||
+      state.documentEventsJson === undefined ||
       state.documentGeneratedAt === undefined ||
       state.documentEventCount === undefined
     ) {
@@ -310,8 +334,10 @@ function frozenClaimedCalendarDocument(
       );
     }
     let frozenCalendar: EventCalendarResource;
+    let frozenEvents: EventAlbumSource[];
     try {
       frozenCalendar = eventCalendarResourceSchema.parse(JSON.parse(state.documentCalendarJson));
+      frozenEvents = eventAlbumSourceSchema.array().parse(JSON.parse(state.documentEventsJson));
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -327,7 +353,8 @@ function frozenClaimedCalendarDocument(
       document: {
         body: state.documentBody,
         generatedAt: state.documentGeneratedAt,
-        eventCount: state.documentEventCount
+        eventCount: state.documentEventCount,
+        events: frozenEvents
       },
       calendar: frozenCalendar
     };
@@ -337,6 +364,7 @@ function frozenClaimedCalendarDocument(
     claim,
     configFingerprint,
     calendarJson: JSON.stringify(calendar),
+    eventsJson: JSON.stringify(document.events),
     body: document.body,
     generatedAt: document.generatedAt,
     eventCount: document.eventCount

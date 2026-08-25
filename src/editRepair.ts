@@ -1,5 +1,6 @@
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
 import type { OutboundSendResult, SendTextOptions } from '../../../platform/transport/transportTypes';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { sendEventCalendarHint } from './calendarHint';
@@ -37,6 +38,7 @@ export async function repairEventEdit(input: {
   };
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
   now?: Date | undefined;
+  services?: PluginServiceCaller | undefined;
   publishCalendar?: typeof writePublishAndRecordScopeCalendar | undefined;
 }): Promise<EventEditRepairResult> {
   const repair = getEventEditRepair(input.db, input.operationId);
@@ -196,7 +198,8 @@ export async function repairEventEdit(input: {
           db: input.db,
           config,
           scopeId: repair.scopeId,
-          calendarId
+          calendarId,
+          ...(input.services ? { services: input.services } : {})
         });
         assertExecution();
         if (publication && !publication.ok) {

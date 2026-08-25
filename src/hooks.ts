@@ -419,6 +419,7 @@ export async function recoverDirtyEventCalendarPublications(
         config,
         scopeId: dirty.scopeId,
         calendarId: dirty.calendarId,
+        ...(context.services ? { services: context.services } : {}),
         requestGeneration: false
       });
       if (publication && !publication.ok) {
@@ -1324,6 +1325,7 @@ async function replaceEventPollJob(
         appConfig: context.config,
         db,
         operationId,
+        ...(context.services ? { services: context.services } : {}),
         configFor: (scopeId) => context.configFor(scopeId),
         sender: {
           sendText: context.sendText,
@@ -1516,6 +1518,7 @@ async function repairEventEditJob(
     appConfig: context.config,
     db: eventsDatabase(context.databases),
     operationId,
+    ...(context.services ? { services: context.services } : {}),
     configFor: (scopeId) => context.configFor(scopeId),
     sender: {
       sendText: context.sendText,
@@ -4348,6 +4351,7 @@ async function publishClosedEventCalendar(
       config: input.config,
       scopeId: input.record.scopeId,
       calendarId: input.calendarId,
+      ...(context.services ? { services: context.services } : {}),
       requestGeneration: false
     });
     if (publication && !publication.ok) {
@@ -5305,7 +5309,8 @@ async function refreshCalendarAfterStartupMiss(
       db,
       config,
       scopeId: record.scopeId,
-      calendarId
+      calendarId,
+      ...(context.services ? { services: context.services } : {})
     });
   } catch (error) {
     context.logger.warn({ error, eventId: record.id, scopeId: record.scopeId }, 'Unable to refresh event calendar after marking startup event missed');

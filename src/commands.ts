@@ -1657,6 +1657,7 @@ async function replaceOpenEventPollLifecycle(input: {
       appConfig: input.runtime.config,
       db: input.db,
       operationId: input.operationId,
+      ...(input.runtime.services ? { services: input.runtime.services } : {}),
       configFor: async () => input.config,
       sender: input.activeTransport,
       ...(input.context.getGroupInviteCode
@@ -2205,6 +2206,7 @@ async function updateEventLifecycle(input: {
     appConfig: input.runtime.config,
     db: input.db,
     operationId: input.operationId,
+    ...(input.runtime.services ? { services: input.runtime.services } : {}),
     configFor: async () => input.config,
     sender: input.activeTransport,
     now: input.now
@@ -3721,7 +3723,8 @@ async function publishConfirmedEvent(input: {
           db,
           config: calendarConfig,
           scopeId: input.draft.scopeId,
-          calendarId
+          calendarId,
+          ...(input.runtime.services ? { services: input.runtime.services } : {})
         })
         : undefined;
       await appendEventJsonLog(input.context, {

@@ -455,6 +455,7 @@ export interface StoredEventCalendarPublicationGeneration {
   documentSha256?: string | undefined;
   documentConfigFingerprint?: string | undefined;
   documentCalendarJson?: string | undefined;
+  documentEventsJson?: string | undefined;
   documentGeneratedAt?: string | undefined;
   documentEventCount?: number | undefined;
   completedConfigFingerprint?: string | undefined;
@@ -711,6 +712,7 @@ interface EventCalendarPublicationGenerationRow extends PluginDatabaseRow {
   document_sha256: string | null;
   document_config_fingerprint: string | null;
   document_calendar_json: string | null;
+  document_events_json: string | null;
   document_generated_at: string | null;
   document_event_count: number | null;
   completed_config_fingerprint: string | null;
@@ -5641,6 +5643,7 @@ export function storeEventCalendarPublicationDocument(db: PluginDatabase, input:
   claim: EventCalendarPublicationClaim;
   configFingerprint: string;
   calendarJson: string;
+  eventsJson: string;
   body: string;
   generatedAt: string;
   eventCount: number;
@@ -5656,6 +5659,7 @@ export function storeEventCalendarPublicationDocument(db: PluginDatabase, input:
             document_sha256 = ?,
             document_config_fingerprint = ?,
             document_calendar_json = ?,
+            document_events_json = ?,
             document_generated_at = ?,
             document_event_count = ?,
             updated_at = ?
@@ -5670,6 +5674,7 @@ export function storeEventCalendarPublicationDocument(db: PluginDatabase, input:
     sha256,
     input.configFingerprint,
     input.calendarJson,
+    input.eventsJson,
     input.generatedAt,
     input.eventCount,
     new Date().toISOString(),
@@ -8725,6 +8730,9 @@ function eventCalendarPublicationGenerationFromRow(
       : {}),
     ...(row.document_calendar_json
       ? { documentCalendarJson: row.document_calendar_json }
+      : {}),
+    ...(row.document_events_json
+      ? { documentEventsJson: row.document_events_json }
       : {}),
     ...(row.document_generated_at ? { documentGeneratedAt: row.document_generated_at } : {}),
     ...(row.document_event_count !== null

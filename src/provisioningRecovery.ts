@@ -389,7 +389,7 @@ interface UnplannedEventFinalizationTransport {
 
 type UnplannedEventFinalizationRuntime = Pick<
   OfficialPluginCommandRuntime,
-  'config' | 'databases' | 'enqueuePluginJob'
+  'config' | 'databases' | 'enqueuePluginJob' | 'services'
 >;
 
 export interface ResumeEventProvisioningInput {
@@ -926,6 +926,7 @@ export async function finalizeUnplannedEventLifecycle(input: {
         config: input.config,
         scopeId: event.scopeId,
         calendarId,
+        ...(input.runtime.services ? { services: input.runtime.services } : {}),
         requestGeneration: false
       });
       await appendFinalizationJsonLog(input.context, {
@@ -1342,7 +1343,8 @@ async function repairSupersededUnplannedCalendar(input: {
     db,
     config: input.config,
     scopeId: input.event.scopeId,
-    calendarId
+    calendarId,
+    ...(input.runtime.services ? { services: input.runtime.services } : {})
   });
   if (publication && !publication.ok) {
     throw new Error(publication.error || 'calendar publication failed');
@@ -1996,6 +1998,7 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
         config: input.config,
         scopeId: event.scopeId,
         calendarId,
+        ...(input.context.services ? { services: input.context.services } : {}),
         requestGeneration: false
       });
       if (publication && !publication.ok) {

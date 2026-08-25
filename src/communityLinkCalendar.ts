@@ -1,6 +1,7 @@
 import type { Logger } from 'pino';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
 import type { PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
 import type { EventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import {
@@ -25,6 +26,7 @@ export async function publishEventCalendarBeforeCommunityLink(input: {
     config: AppConfig;
     databases?: PluginDatabaseRegistry | undefined;
     logger?: Pick<Logger, 'warn'> | undefined;
+    services?: PluginServiceCaller | undefined;
   };
   config: EventsConfig;
   event: StoredEventRecord;
@@ -57,6 +59,7 @@ export async function publishEventCalendarBeforeCommunityLink(input: {
       config: input.config,
       scopeId: event.scopeId,
       calendarId,
+      ...(input.context.services ? { services: input.context.services } : {}),
       requestGeneration: false
     });
     if (publication && !publication.ok) {

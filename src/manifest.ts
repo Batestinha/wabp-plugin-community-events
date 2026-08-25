@@ -45,7 +45,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.11.0',
+  version: '0.12.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -235,11 +235,12 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '>=0.1.0' },
     { pluginId: 'official.poll-assistant', versionRange: '>=0.2.0', optional: true },
-    { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true }
+    { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true },
+    { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '14',
+  dataVersion: '15',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

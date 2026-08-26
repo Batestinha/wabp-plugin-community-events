@@ -1,8 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { AppConfig } from '../../../platform/config/runtimeConfig';
+import { OidcClientCredentialsTokenProvider } from '../../../platform/identity/clientCredentialsTokenProvider';
 import type { EventsConfig } from './config';
 
 const DEFAULT_PUBLICATION_TIMEOUT_MS = 15_000;
+
+type CalendarPublicationAppConfig = Pick<
+  AppConfig,
+  | 'piwigoCalendarPublicationSecret'
+  | 'TOPOMARE_OIDC_ISSUER'
+  | 'TOPOMARE_WABP_GALLERY_SERVICE_OIDC_CLIENT_ID'
+  | 'topomareWabpGalleryServiceOidcClientSecret'
+>;
 
 export interface CalendarPublicationOutcome {
   generation: number;
@@ -19,7 +28,7 @@ export interface CalendarPublicationOutcome {
 }
 
 export async function publishCalendarBody(input: {
-  appConfig: Pick<AppConfig, 'piwigoCalendarPublicationSecret'>;
+  appConfig: CalendarPublicationAppConfig;
   scopeId: string;
   calendar: EventsConfig['calendars'][number];
   icsBody: string;
@@ -57,7 +66,14 @@ export async function publishCalendarBody(input: {
   }
 
   try {
-    const result = await postCalendarPublication(target, secret, input.icsBody, input.generation);
+    const bearer = await calendarPublicationBearer(input.appConfig);
+    const result = await postCalendarPublication(
+      target,
+      secret,
+      input.icsBody,
+      input.generation,
+      bearer
+    );
     return {
       enabled: true,
       generation: input.generation,
@@ -118,6 +134,27 @@ function calendarPublicationSecret(
   return secret || undefined;
 }
 
+async function calendarPublicationBearer(
+  appConfig: CalendarPublicationAppConfig
+): Promise<string | undefined> {
+  const configuration = [
+    appConfig.TOPOMARE_OIDC_ISSUER,
+    appConfig.TOPOMARE_WABP_GALLERY_SERVICE_OIDC_CLIENT_ID,
+    appConfig.topomareWabpGalleryServiceOidcClientSecret
+  ];
+  if (configuration.every((value) => value === '')) {
+    return undefined;
+  }
+  if (configuration.some((value) => value === '')) {
+    throw new Error('Topomare calendar publication service identity is incomplete.');
+  }
+  return await new OidcClientCredentialsTokenProvider({
+    issuer: appConfig.TOPOMARE_OIDC_ISSUER,
+    clientId: appConfig.TOPOMARE_WABP_GALLERY_SERVICE_OIDC_CLIENT_ID,
+    clientSecret: appConfig.topomareWabpGalleryServiceOidcClientSecret
+  }).accessToken();
+}
+
 function redactCalendarPublicationSecret(message: string, secret: string): string {
   return secret && message.includes(secret)
     ? message.split(secret).join('[redacted]')
@@ -128,7 +165,8 @@ async function postCalendarPublication(
   target: ReturnType<typeof calendarPublicationTarget>,
   secret: string,
   icsBody: string,
-  generation: number
+  generation: number,
+  bearer: string | undefined
 ): Promise<{ subscriptionUrl: string; calendarUrl: string; updatedAt: string }> {
   const bodySha256 = createHash('sha256').update(icsBody).digest('hex');
   const body = new URLSearchParams();
@@ -149,6 +187,7 @@ async function postCalendarPublication(
   const timeout = setTimeout(() => controller.abort(), DEFAULT_PUBLICATION_TIMEOUT_MS);
   const response = await fetch(target.endpointUrl, {
     method: 'POST',
+    ...(bearer ? { headers: { authorization: `Bearer ${bearer}` } } : {}),
     body,
     signal: controller.signal
   }).finally(() => {

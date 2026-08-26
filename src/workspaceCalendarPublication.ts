@@ -73,7 +73,18 @@ export async function publishWorkspaceCalendarProjection(input: {
       updatedAt: new Date().toISOString()
     };
   } catch (error) {
-    if (isPluginServiceNotInvokedError(error)) return undefined;
+    if (isPluginServiceNotInvokedError(error)) {
+      return {
+        generation: input.generation,
+        enabled: true,
+        attempted: false,
+        ok: false,
+        endpointUrl: 'workspace-connector',
+        feedId: input.calendar.id,
+        label: input.calendar.label,
+        error: `Workspace connector service was not invoked: ${error.message}`
+      };
+    }
     return {
       generation: input.generation,
       enabled: true,

@@ -3198,9 +3198,13 @@ async function finalizeUnplannedEventJob(
       reason: 'event missing, completed, or stale finalization cursor'
     })];
   }
-  const runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases' | 'enqueuePluginJob'> = {
+  const runtime: Pick<
+    OfficialPluginCommandRuntime,
+    'config' | 'databases' | 'enqueuePluginJob' | 'services'
+  > = {
     config: context.config,
     ...(context.databases ? { databases: context.databases } : {}),
+    ...(context.services ? { services: context.services } : {}),
     enqueuePluginJob: (request) => enqueuePluginJob(
       context.queue,
       { pluginId: EVENTS_PLUGIN_ID, ...request }

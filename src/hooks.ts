@@ -3,6 +3,7 @@ import type { PluginAction } from '../../../platform/pluginRuntime/runtime/plugi
 import type {
   PluginGroupDismantledEvent,
   PluginJobEvent,
+  PluginParticipantChangeEvent,
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
 } from '../../../platform/pluginRuntime/types';
@@ -176,6 +177,7 @@ import {
   handleEventStartTimeAgreementJob,
   recoverEventStartTimeAgreementJobs
 } from './startTimeAgreement';
+import { wakeEventStartTimeAgreementForParticipant } from './startTimeAgreementStore';
 import {
   eventCreatorMembershipPauseKindForFailure,
   notifyEventCreatorMembershipPaused
@@ -245,6 +247,9 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
     async onPollVote(event) {
       await handlePollVote(context, event);
     },
+    async onParticipantChange(event) {
+      return wakeStartTimeAgreementForParticipant(context, event);
+    },
     async onPluginJob(event) {
       return handleEventJob(context, event);
     },
@@ -252,6 +257,56 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
       await handleGroupDismantled(context, event);
     }
   };
+}
+
+export function wakeStartTimeAgreementForParticipant(
+  context: PluginRuntimeContext,
+  event: PluginParticipantChangeEvent
+): PluginAction[] {
+  if (!['join', 'add', 'membership_approved'].includes(event.action)) {
+    return [];
+  }
+  const db = eventsDatabase(context.databases);
+  const record = getLiveEventBySubgroup(db, event.chatId);
+  if (!record || record.scopeId !== event.scopeId || !record.actorIdentityId) {
+    return [];
+  }
+  const excludedIdentityIds = new Set([...event.botIdentityIds, record.actorIdentityId]);
+  if (!event.affectedIdentities.some((identity) => !excludedIdentityIds.has(identity.identityId))) {
+    return [];
+  }
+  const agreement = wakeEventStartTimeAgreementForParticipant(db, {
+    eventId: record.id,
+    wokenAt: event.receivedAt.toISOString()
+  });
+  if (!agreement) {
+    return [];
+  }
+  const leaseExpiresAt = agreement.leaseExpiresAt
+    ? new Date(agreement.leaseExpiresAt)
+    : undefined;
+  const runAt = leaseExpiresAt && Number.isFinite(leaseExpiresAt.getTime())
+    && leaseExpiresAt.getTime() > event.receivedAt.getTime()
+    ? new Date(leaseExpiresAt.getTime() + 1_000)
+    : event.receivedAt;
+  return [
+    {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.startTimeAgreement,
+      scopeId: record.scopeId,
+      ...(record.groupId ? { groupId: record.groupId } : {}),
+      ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+      runAt,
+      payload: { eventId: record.id },
+      dedupeKey: `${EVENTS_JOBS.startTimeAgreement}:${record.id}:${agreement.generation}:participant:${event.eventId}`
+    },
+    audit('events.start_time_agreement.participant_wakeup', {
+      eventId: record.id,
+      participantEventId: event.eventId,
+      runAt: runAt.toISOString()
+    })
+  ];
 }
 
 function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): void {
@@ -2611,8 +2666,8 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       );
     }
     return [
-      ...plannedAnnouncementActions,
       ...(weatherForecastAction ? [weatherForecastAction] : []),
+      ...plannedAnnouncementActions,
       closeCleanupAction(closedEvent),
       ...(calendarFailureAudit ? [calendarFailureAudit] : []),
       ...pollReceiptReleaseActions,

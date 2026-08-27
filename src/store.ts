@@ -1245,7 +1245,7 @@ export function insertEvent(
 export function updateEventStructuredData(db: PluginDatabase, input: {
   eventId: string;
   profileRevision: string;
-  pollQuestion: string;
+  pollQuestion: string | null;
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;

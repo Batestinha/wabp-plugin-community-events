@@ -160,7 +160,7 @@ export function claimEventStartTimeAgreement(
   return db.transaction(() => {
     const changed = db.run(
       `UPDATE event_start_time_agreements
-          SET lease_token = ?, lease_expires_at = ?, updated_at = ?
+          SET lease_token = ?, lease_expires_at = ?, next_run_at = NULL, updated_at = ?
         WHERE event_id = ?
           AND status NOT IN ('applied', 'blocked', 'cancelled', 'expired')
           AND (next_run_at IS NULL OR next_run_at <= ?)
@@ -188,6 +188,7 @@ export function saveClaimedEventStartTimeAgreement(
     throw new Error('Saving a start-time agreement requires an active lease.');
   }
   const updatedAt = input.now.toISOString();
+  const requestedNextRunAt = input.nextRunAt?.toISOString() ?? null;
   return db.run(
     `UPDATE event_start_time_agreements
         SET generation = ?, status = ?, config_json = ?, band_poll_id = ?, exact_poll_id = ?,
@@ -195,7 +196,12 @@ export function saveClaimedEventStartTimeAgreement(
             exact_closes_at = ?, organizer_band_closes_at = ?, organizer_time_closes_at = ?,
             winning_band = ?,
             resolved_local_time = ?, lease_token = NULL, lease_expires_at = NULL,
-            next_run_at = ?, last_error = ?, updated_at = ?, resolved_at = ?, cancelled_at = ?
+            next_run_at = CASE
+              WHEN ? IN ('applied', 'blocked', 'cancelled', 'expired') THEN NULL
+              WHEN next_run_at IS NOT NULL AND (? IS NULL OR next_run_at < ?) THEN next_run_at
+              ELSE ?
+            END,
+            last_error = ?, updated_at = ?, resolved_at = ?, cancelled_at = ?
       WHERE event_id = ? AND lease_token = ?`,
     agreement.generation,
     agreement.status,
@@ -210,7 +216,10 @@ export function saveClaimedEventStartTimeAgreement(
     agreement.organizerTimeClosesAt ?? null,
     agreement.winningBand ?? null,
     agreement.resolvedLocalTime ?? null,
-    input.nextRunAt?.toISOString() ?? null,
+    agreement.status,
+    requestedNextRunAt,
+    requestedNextRunAt,
+    requestedNextRunAt,
     input.lastError ?? agreement.lastError ?? null,
     updatedAt,
     agreement.resolvedAt ?? null,
@@ -218,6 +227,36 @@ export function saveClaimedEventStartTimeAgreement(
     agreement.eventId,
     agreement.leaseToken
   ).changes === 1;
+}
+
+/**
+ * Moves a pre-ballot agreement forward when WhatsApp reports a relevant
+ * participant admission. An active worker lease is deliberately preserved;
+ * saveClaimedEventStartTimeAgreement keeps this earlier wake-up time if the
+ * admission races with an authoritative membership read.
+ */
+export function wakeEventStartTimeAgreementForParticipant(
+  db: PluginDatabase,
+  input: { eventId: string; wokenAt: string }
+): StoredEventStartTimeAgreement | undefined {
+  const changed = db.run(
+    `UPDATE event_start_time_agreements
+        SET next_run_at = CASE
+              WHEN next_run_at IS NULL OR next_run_at > ? THEN ?
+              ELSE next_run_at
+            END,
+            updated_at = CASE WHEN updated_at > ? THEN updated_at ELSE ? END
+      WHERE event_id = ?
+        AND status = 'pending_subgroup'`,
+    input.wokenAt,
+    input.wokenAt,
+    input.wokenAt,
+    input.wokenAt,
+    input.eventId
+  );
+  return changed.changes === 1
+    ? getEventStartTimeAgreement(db, input.eventId)
+    : undefined;
 }
 
 export function cancelEventStartTimeAgreement(

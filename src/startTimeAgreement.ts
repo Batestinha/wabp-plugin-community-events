@@ -33,12 +33,17 @@ import {
   appendEventLog,
   eventsDatabase,
   getEvent,
+  getEventWeatherDelivery,
   nextEventRevisionTimestamp,
   resolvedEventCalendarId,
   updateEventStructuredData,
   type StoredEventRecord
 } from './store';
-import { eventWeatherForecastJobActions } from './weather';
+import {
+  eventWeatherForecastJobActions,
+  eventWeatherForecastJobRequests,
+  eventWeatherForecastRecoveryJobRequest
+} from './weather';
 
 type EnqueueAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 type AgreementRound = 'band' | 'exact' | 'organizer-band' | 'organizer-time';
@@ -123,10 +128,28 @@ export async function handleEventStartTimeAgreementJob(
     if (!profile) {
       return blockAgreement(context, db, event, agreement, now, 'profile_removed');
     }
+    if (!agreement.resolvedLocalTime) {
+      const eventDayStartsAt = eventLocalDayStartsAt(event);
+      if (eventDayStartsAt && now.getTime() >= eventDayStartsAt.getTime()) {
+        return requireEventDayOrganizerTime(context, db, event, agreement, now, t);
+      }
+    }
+    const weatherGate = waitForInitialWeatherForecast(db, event, profile, agreement, now);
+    if (weatherGate) {
+      return weatherGate;
+    }
+    if (agreement.status === 'pending_subgroup') {
+      if (!await hasEligibleStartTimeParticipant(context, event)) {
+        const retryAt = eventLocalDayStartsAt(event)
+          ?? new Date(now.getTime() + SUBGROUP_RETRY_MS);
+        return saveAndRetry(db, event, agreement, now, retryAt, 'waiting_for_participant');
+      }
+      agreement.status = 'band_pending';
+    }
     return advanceAgreement(context, db, event, profile, agreement, now, locale.locale, t);
   } catch (error) {
     const event = getEvent(db, eventId);
-    if (error instanceof EventConditionalTextConfigurationError && event) {
+    if (isEventConditionalTextConfigurationError(error) && event) {
       const t = event.actorIdentityId
         ? await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId).catch(() => undefined)
         : undefined;
@@ -392,7 +415,8 @@ async function applyAgreement(
     ...profile,
     poll: {
       ...profile.poll,
-      options: event.pollOptions.map((option) => ({ ...option }))
+      options: (event.pollOptions.length > 0 ? event.pollOptions : profile.poll.options)
+        .map((option) => ({ ...option }))
     },
     calendar: { ...profile.calendar, durationMinutes: agreement.config.configuredDurationMinutes }
   };
@@ -422,7 +446,7 @@ async function applyAgreement(
   const updated = updateEventStructuredData(db, {
     eventId: event.id,
     profileRevision: eventProfileQuestionSchemaRevision(profile),
-    pollQuestion: materialized.pollQuestion,
+    pollQuestion: event.pollQuestion ? materialized.pollQuestion : null,
     pollOptions: event.pollOptions,
     responseClasses: event.responseClasses,
     answers: materialized.answers,
@@ -630,8 +654,141 @@ function availableTimes(
 
 function roundDeadline(event: StoredEventRecord, now: Date, windowMinutes: number): Date | undefined {
   const lifecycleEnd = Date.parse(event.lifecycleCompleteAt);
-  const deadline = new Date(Math.min(now.getTime() + windowMinutes * 60_000, lifecycleEnd));
+  const eventDayStartsAt = eventLocalDayStartsAt(event)?.getTime() ?? lifecycleEnd;
+  const deadline = new Date(Math.min(
+    now.getTime() + windowMinutes * 60_000,
+    lifecycleEnd,
+    eventDayStartsAt
+  ));
   return deadline.getTime() > now.getTime() + 5_000 ? deadline : undefined;
+}
+
+function waitForInitialWeatherForecast(
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  profile: EventProfile,
+  agreement: StoredEventStartTimeAgreement,
+  now: Date
+): PluginAction[] | undefined {
+  const request = eventWeatherForecastJobRequests({ event, profile, now })
+    .find((candidate) => Date.parse(candidate.payload.scheduledAt) <= now.getTime());
+  if (!request) {
+    return undefined;
+  }
+  const delivery = getEventWeatherDelivery(
+    db,
+    event.id,
+    request.payload.deliveryKind,
+    request.payload.eventUpdatedAt
+  );
+  if (delivery?.status === 'sent' || delivery?.status === 'skipped') {
+    return undefined;
+  }
+  const weatherRequest = delivery
+    ? eventWeatherForecastRecoveryJobRequest({ event, delivery, now })
+    : request;
+  const weatherRunAt = weatherRequest.runAt ?? now;
+  const agreementRetryAt = new Date(Math.max(
+    now.getTime() + AGREEMENT_RETRY_MS,
+    weatherRunAt.getTime() + 1_000
+  ));
+  const agreementActions = saveAndRetry(
+    db,
+    event,
+    agreement,
+    now,
+    agreementRetryAt,
+    'waiting_for_weather'
+  );
+  return [
+    {
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      ...weatherRequest,
+      runAt: weatherRunAt,
+      abortBatchOnFailure: true
+    },
+    ...agreementActions,
+    audit('events.start_time_agreement.weather_pending', {
+      eventId: event.id,
+      deliveryKind: weatherRequest.payload.deliveryKind,
+      weatherRunAt: weatherRunAt.toISOString()
+    })
+  ];
+}
+
+async function hasEligibleStartTimeParticipant(
+  context: PluginRuntimeContext,
+  event: StoredEventRecord
+): Promise<boolean> {
+  if (
+    !event.subgroupChatId
+    || !event.actorIdentityId
+    || !context.getAuthoritativeGroupParticipantSnapshot
+    || !context.resolveIdentityAddress
+  ) {
+    throw new Error('Authoritative event-group membership and identity reads are unavailable.');
+  }
+  const snapshot = await context.getAuthoritativeGroupParticipantSnapshot(event.subgroupChatId);
+  if (
+    snapshot.providerId !== 'whatsmeow'
+    || Number.isNaN(snapshot.observedAt.getTime())
+    || !snapshot.botWid.trim()
+  ) {
+    throw new Error('Authoritative event-group membership evidence is invalid.');
+  }
+  const botIdentity = await context.resolveIdentityAddress(snapshot.botWid);
+  if (!botIdentity.identityId.trim()) {
+    throw new Error('The event-group bot identity could not be resolved.');
+  }
+  const excludedIdentityIds = new Set([botIdentity.identityId, event.actorIdentityId]);
+  for (const participant of snapshot.participants) {
+    const wid = participant.wid.trim();
+    if (!wid) {
+      throw new Error('The event-group membership snapshot contained an empty participant address.');
+    }
+    const identity = await context.resolveIdentityAddress(wid);
+    if (!identity.identityId.trim()) {
+      throw new Error('An event-group participant identity could not be resolved.');
+    }
+    if (!excludedIdentityIds.has(identity.identityId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function eventLocalDayStartsAt(event: StoredEventRecord): Date | undefined {
+  if (!event.localDate) {
+    return undefined;
+  }
+  return eventDateAndTimeToUtc(parseLocalDate(event.localDate), { hour: 0, minute: 0 }, event.timezone);
+}
+
+async function requireEventDayOrganizerTime(
+  context: PluginRuntimeContext,
+  db: ReturnType<typeof eventsDatabase>,
+  event: StoredEventRecord,
+  agreement: StoredEventStartTimeAgreement,
+  now: Date,
+  t: TranslateFn
+): Promise<PluginAction[]> {
+  await cancelEventStartTimeAgreementPolls(context, event, agreement, 'event day arrived before a time was agreed');
+  agreement.status = 'blocked';
+  agreement.lastError = 'event_day_arrived_without_time';
+  saveClaimedEventStartTimeAgreement(db, agreement, { now, lastError: agreement.lastError });
+  const actor = event.actorIdentityId
+    ? await context.resolveStableIdentityById?.(event.actorIdentityId).catch(() => undefined)
+    : undefined;
+  return [
+    ...(actor ? [{
+      type: 'message.sendText' as const,
+      chatId: actor.deliveryChatId,
+      text: t('official.community-events.startTimeAgreement.eventDayManualRequired', { eventId: event.id }),
+      idempotencyKey: `start-time-agreement:${event.id}:${agreement.generation}:event-day-manual-required`
+    }] : []),
+    audit('events.start_time_agreement.event_day_manual_required', { eventId: event.id })
+  ];
 }
 
 async function requireManualOrganizerTime(
@@ -774,6 +931,18 @@ function payloadEventId(payload: unknown): string | undefined {
   }
   const value = (payload as Record<string, unknown>).eventId;
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function isEventConditionalTextConfigurationError(
+  error: unknown
+): error is EventConditionalTextConfigurationError {
+  return error instanceof EventConditionalTextConfigurationError || Boolean(
+    error
+    && typeof error === 'object'
+    && (error as { name?: unknown }).name === 'EventConditionalTextConfigurationError'
+    && typeof (error as { field?: unknown }).field === 'string'
+    && typeof (error as { code?: unknown }).code === 'string'
+  );
 }
 
 function audit(action: string, metadataJson: Record<string, unknown>): PluginAction {

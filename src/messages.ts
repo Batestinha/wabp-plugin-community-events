@@ -125,6 +125,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.startTimeAgreement.band.evening': 'Evening',
   'official.community-events.startTimeAgreement.applied': 'Start time agreed: {time}. I updated the event group and calendar.',
   'official.community-events.startTimeAgreement.manualRequired': 'None of the configured candidate times is still in the future on the event date. Choose any future time on that date with /event edit {eventId}.',
+  'official.community-events.startTimeAgreement.eventDayManualRequired': 'The event day arrived before a start time was agreed, so I will not open or continue time ballots. Choose the time yourself with /event edit {eventId}.',
   'official.community-events.startTimeAgreement.blocked': 'The start-time agreement could not finish automatically. Choose the time with /event edit {eventId}.',
   'official.community-events.update.startedPrivate': 'I sent you a private message to update this event.',
   'official.community-events.update.startedInGroupFallback': 'I could not message you privately, so I started the event update here.',

@@ -10,6 +10,7 @@ import type { StoredEventRecord } from './store';
 const CALENDAR_EXPORT_ROOT = 'calendar-exports';
 const DEFAULT_CONTAINER_APP_UID = 1000;
 const DEFAULT_CONTAINER_APP_GID = 1000;
+const CALENDAR_SEQUENCE_EPOCH_MS = Date.UTC(2020, 0, 1);
 
 export interface PreparedScopeCalendar {
   filePath: string;
@@ -129,7 +130,7 @@ function renderEvent(
         ]
       : [`DTSTART:${formatUtc(startsAt)}`, `DTEND:${formatUtc(endsAt)}`]),
     `LAST-MODIFIED:${formatUtc(new Date(event.updatedAt))}`,
-    `SEQUENCE:${event.calendarStatus === 'cancelled' ? 1 : 0}`,
+    `SEQUENCE:${calendarEventSequence(event)}`,
     ...(event.calendarStatus === 'cancelled'
       ? ['STATUS:CANCELLED']
       : [dateOnly ? 'STATUS:TENTATIVE' : 'STATUS:CONFIRMED']),
@@ -139,6 +140,17 @@ function renderEvent(
     ...(event.calendarDescription ? [`DESCRIPTION:${escapeText(event.calendarDescription)}`] : []),
     'END:VEVENT'
   ];
+}
+
+function calendarEventSequence(event: StoredEventRecord): number {
+  const revisionTimes = [event.updatedAt, event.cancelledAt]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value).getTime());
+  const revisionAt = Math.max(...revisionTimes);
+  if (!Number.isFinite(revisionAt)) {
+    throw new Error(`Calendar event ${event.id} has an invalid revision timestamp.`);
+  }
+  return Math.max(0, Math.floor((revisionAt - CALENDAR_SEQUENCE_EPOCH_MS) / 1_000));
 }
 
 export function calendarEventLocalDate(date: Date, timezone: string): string {

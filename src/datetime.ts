@@ -1,26 +1,14 @@
-import type { ParsedResult } from 'chrono-node';
 import { chronoParserForLocale } from '../../../platform/naturalDate/chronoLocale';
+import {
+  parseLocalizedDateTimeInput,
+  type LocalizedDateParts
+} from '../../../platform/naturalDate/localizedDateTime';
 import type { EventSpanKind } from './span';
 
 const MAX_FUTURE_YEARS = 2;
-const STRICT_LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/;
 const STRICT_LOCAL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
-const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:[zZ]|[+-]\d{2}:?\d{2})$/;
-const PORTUGUESE_WEEKDAY_INDEX: Record<string, number> = {
-  domingo: 0,
-  segunda: 1,
-  terca: 2,
-  quarta: 3,
-  quinta: 4,
-  sexta: 5,
-  sabado: 6
-};
 
-export interface EventDateParts {
-  year: number;
-  month: number;
-  day: number;
-}
+export type EventDateParts = LocalizedDateParts;
 
 export interface EventTimeParts {
   hour: number;
@@ -199,46 +187,18 @@ export function eventLifecycleCompleteAt(input: {
 }
 
 export function parseEventDateTimeInput(input: string, options: EventDateTimeParseOptions): EventDateTimeParseResult {
-  const raw = input.trim();
   const now = options.now ?? new Date();
-  if (!raw) {
-    return { status: 'invalid', reason: 'empty' };
-  }
-
-  const strictDate = parseStrictDateTime(raw, options);
-  if (strictDate.status !== 'invalid' || strictDate.reason !== 'unrecognized') {
-    return validateDateTimeResult(strictDate, options, now);
-  }
-
-  const portugueseRelative = parsePortugueseRelativeDateTime(raw, options, now);
-  if (portugueseRelative.status !== 'invalid' || portugueseRelative.reason !== 'unrecognized') {
-    return validateDateTimeResult(portugueseRelative, options, now);
-  }
-
-  const portugueseWeekday = parsePortugueseUpcomingWeekdayDateTime(raw, options, now);
-  if (portugueseWeekday.status !== 'invalid' || portugueseWeekday.reason !== 'unrecognized') {
-    return validateDateTimeResult(portugueseWeekday, options, now);
-  }
-
-  const parser = chronoParserForLocale(options.locale);
-  if (!parser) {
-    return { status: 'invalid', reason: 'unsupported_locale' };
-  }
-  const referenceTimezone = timezoneOffsetMinutes(now, options.timezone);
-  if (referenceTimezone === undefined) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const naturalInput = normalizeNaturalInputForLocale(raw, options.locale);
-  const result = parser.parse(naturalInput, {
-    instant: now,
-    timezone: referenceTimezone
-  }, {
-    forwardDate: true
-  })[0];
-  if (!result) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  return validateDateTimeResult(chronoResultToEventResult(result, raw, options), options, now);
+  const parsed = parseLocalizedDateTimeInput(input, {
+    timezone: options.timezone,
+    locale: options.locale,
+    now
+  });
+  const result: EventDateTimeParseResult = parsed.status === 'ok'
+    ? okResult(parsed.raw, parsed.date, true, options.timezone, options.locale)
+    : parsed.status === 'missing_time'
+      ? missingTimeResult(parsed.raw, parsed.date, options.timezone, options.locale)
+      : parsed;
+  return validateDateTimeResult(result, options, now);
 }
 
 export function combineEventDateDraftWithTime(
@@ -351,180 +311,6 @@ export function eventDateTemplateTokens(date: Date, timezone: string, locale = '
 export function formatEventDateTime(date: Date, timezone: string, locale = 'en'): string {
   const tokens = eventDateTemplateTokens(date, timezone, locale);
   return `${tokens.weekday}, ${tokens.dd}-${tokens.mm}-${tokens.yy} ${tokens.hour}:${tokens.minute} ${timezone}`;
-}
-
-function parseStrictDateTime(raw: string, options: EventDateTimeParseOptions): EventDateTimeParseResult {
-  if (ISO_WITH_ZONE.test(raw)) {
-    const date = new Date(raw);
-    return validDate(date)
-      ? okResult(raw, date, true, options.timezone, options.locale)
-      : { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const localDateTime = raw.match(STRICT_LOCAL_DATE_TIME);
-  if (localDateTime) {
-    const [, year, month, day, hour, minute] = localDateTime;
-    const date = zonedDateTimeToUtc({
-      year: Number(year),
-      month: Number(month),
-      day: Number(day),
-      hour: Number(hour),
-      minute: Number(minute),
-      timezone: options.timezone
-    });
-    return date
-      ? okResult(raw, date, true, options.timezone, options.locale)
-      : { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const localDate = raw.match(STRICT_LOCAL_DATE);
-  if (localDate) {
-    const [, year, month, day] = localDate;
-    return missingTimeResult(raw, {
-      year: Number(year),
-      month: Number(month),
-      day: Number(day)
-    }, options.timezone, options.locale);
-  }
-
-  return { status: 'invalid', reason: 'unrecognized' };
-}
-
-function parsePortugueseRelativeDateTime(
-  raw: string,
-  options: EventDateTimeParseOptions,
-  now: Date
-): EventDateTimeParseResult {
-  if (!localeLanguage(options.locale).startsWith('pt')) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const match = raw.match(/\b(?:daqui\s+a|dentro\s+de|em)\s+(\d{1,3})\s+(minutos?|horas?|dias?|semanas?)(?:\s*(?:as|a|ao|às)?\s*(\d{1,2})(?::|h)?(\d{2})?)?\b/i);
-  if (!match) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const amount = Number(match[1]);
-  const unit = match[2]?.toLowerCase() ?? '';
-  const hourText = match[3];
-  const minuteText = match[4];
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  if (unit.startsWith('minuto')) {
-    return okResult(raw, new Date(now.getTime() + amount * 60_000), true, options.timezone, options.locale);
-  }
-  if (unit.startsWith('hora')) {
-    return okResult(raw, new Date(now.getTime() + amount * 3_600_000), true, options.timezone, options.locale);
-  }
-
-  const nowLocal = localDateTimeParts(now, options.timezone);
-  if (!nowLocal) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const days = unit.startsWith('semana') ? amount * 7 : amount;
-  const targetDate = datePartsPlusDays(nowLocal, days);
-  const hasTime = hourText !== undefined;
-  if (!hasTime) {
-    return missingTimeResult(raw, targetDate, options.timezone, options.locale);
-  }
-  const time = parseNumericTime(hourText, minuteText ?? '00');
-  if (!time) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const date = zonedDateTimeToUtc({
-    ...targetDate,
-    hour: time.hour,
-    minute: time.minute,
-    timezone: options.timezone
-  });
-  return date
-    ? okResult(raw, date, true, options.timezone, options.locale)
-    : { status: 'invalid', reason: 'unrecognized' };
-}
-
-function parsePortugueseUpcomingWeekdayDateTime(
-  raw: string,
-  options: EventDateTimeParseOptions,
-  now: Date
-): EventDateTimeParseResult {
-  if (!localeLanguage(options.locale).startsWith('pt')) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const normalized = normalizePortugueseMatchText(raw);
-  const weekday = '(domingo|segunda(?:[-\\s]+feira)?|terca(?:[-\\s]+feira)?|quarta(?:[-\\s]+feira)?|quinta(?:[-\\s]+feira)?|sexta(?:[-\\s]+feira)?|sabado)';
-  const match = normalized.match(new RegExp(
-    `^(?:(?:no|na)\\s+)?proxim[oa]\\s+${weekday}(?:\\s+(?:(?:as|a|ao)\\s*(\\d{1,2})(?:(?::|h)(\\d{2}))?|(\\d{1,2})(?::|h)(\\d{2})?))?$`,
-    'i'
-  ));
-  if (!match) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const weekdayRoot = match[1]?.split(/[-\s]+/)[0] ?? '';
-  const targetWeekday = PORTUGUESE_WEEKDAY_INDEX[weekdayRoot];
-  if (targetWeekday === undefined) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const nowLocal = localDateTimeParts(now, options.timezone);
-  if (!nowLocal) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-
-  const currentWeekday = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day, 12, 0, 0, 0)).getUTCDay();
-  const daysUntil = (targetWeekday - currentWeekday + 7) % 7 || 7;
-  const targetDate = datePartsPlusDays(nowLocal, daysUntil);
-  const hourText = match[2] ?? match[4];
-  const minuteText = match[3] ?? match[5] ?? '00';
-  if (hourText === undefined) {
-    return missingTimeResult(raw, targetDate, options.timezone, options.locale);
-  }
-
-  const time = parseNumericTime(hourText, minuteText);
-  if (!time) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const date = zonedDateTimeToUtc({
-    ...targetDate,
-    hour: time.hour,
-    minute: time.minute,
-    timezone: options.timezone
-  });
-  return date
-    ? okResult(raw, date, true, options.timezone, options.locale)
-    : { status: 'invalid', reason: 'unrecognized' };
-}
-
-function chronoResultToEventResult(
-  result: ParsedResult,
-  raw: string,
-  options: EventDateTimeParseOptions
-): EventDateTimeParseResult {
-  const start = result.start;
-  const dateParts = {
-    year: start.get('year') ?? 0,
-    month: start.get('month') ?? 0,
-    day: start.get('day') ?? 0
-  };
-  const hasExplicitTime = start.isCertain('hour') && start.isCertain('minute');
-  if (!hasExplicitTime) {
-    return missingTimeResult(raw, dateParts, options.timezone, options.locale);
-  }
-  const hour = start.get('hour');
-  const minute = start.get('minute');
-  if (hour === null || minute === null) {
-    return { status: 'invalid', reason: 'unrecognized' };
-  }
-  const date = zonedDateTimeToUtc({
-    ...dateParts,
-    hour,
-    minute,
-    timezone: options.timezone
-  });
-  return date
-    ? okResult(raw, date, true, options.timezone, options.locale)
-    : { status: 'invalid', reason: 'unrecognized' };
 }
 
 function parseTimeOnly(input: string, options: EventDateTimeParseOptions, draft: EventDateDraft): EventTimeParts | undefined {
@@ -671,32 +457,6 @@ export function formatEventDateParts(date: EventDateParts): string {
 
 export function formatEventTimeParts(time: EventTimeParts): string {
   return `${String(time.hour).padStart(2, '0')}:${String(time.minute).padStart(2, '0')}`;
-}
-
-function normalizeNaturalInputForLocale(input: string, locale: string): string {
-  if (localeLanguage(locale) !== 'pt') {
-    return input;
-  }
-  return input
-    .replace(/\bamanha\b/gi, 'amanhã')
-    .replace(/\bproxima\b/gi, 'próxima')
-    .replace(/\bproximo\b/gi, 'próximo')
-    .replace(/\bterca\b/gi, 'terça')
-    .replace(/\bsabado\b/gi, 'sábado')
-    .replace(/\bas\b(?=\s*\d{1,2}(?::|h)?\d{0,2})/gi, 'às');
-}
-
-function normalizePortugueseMatchText(input: string): string {
-  return normalizeNaturalInputForLocale(input, 'pt')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function localeLanguage(locale: string): string {
-  return locale.trim().split('-')[0]?.toLowerCase() || 'en';
 }
 
 function maxFutureDate(now: Date): Date {

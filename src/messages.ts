@@ -17,7 +17,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.subgroupSuggestionConversion.preFlowNotice.template': 'Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.',
   'official.community-events.location.select': 'Which result matches the event place “{displayPlace}”?\nSearch: “{searchQuery}”. The search only resolves coordinates; it does not rename the event place.',
   'official.community-events.location.freeText': 'Refine search',
-  'official.community-events.location.noResults': 'I could not find a result for “{searchQuery}”. Reply with a more specific search, /cancel, or /stop.',
+  'official.community-events.location.noResults': 'I could not find a result for “{searchQuery}”. The weather plugin needs a clear location to provide the event forecast. This search is used only to locate the event; it does not change the event name or displayed place. Reply with a more specific search, /cancel, or /stop.',
   'official.community-events.location.missing': 'The event place is missing. Start again and provide a place.',
   'official.community-events.location.failed': 'I could not resolve the event place. Try again in a moment.',
   'official.community-events.location.promptFailed': 'I found possible places but could not send the selection list. Start the request again in a moment.',

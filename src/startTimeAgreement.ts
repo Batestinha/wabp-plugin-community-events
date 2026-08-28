@@ -244,7 +244,7 @@ async function ensureBandRound(
   const closesField = organizerOnly ? 'organizerBandClosesAt' : 'bandClosesAt';
   const pollField = organizerOnly ? 'organizerBandPollId' : 'bandPollId';
   let closesAt = agreement[closesField];
-  if (!closesAt) {
+  if (organizerOnly && !closesAt) {
     const deadline = roundDeadline(event, now, agreement.config.bandVotingWindowMinutes);
     if (!deadline) {
       return requireManualOrganizerTime(context, db, event, agreement, now, t);
@@ -253,22 +253,43 @@ async function ensureBandRound(
     agreement[closesField] = closesAt;
     return saveAndRetry(db, event, agreement, now, now);
   }
+  const activationCutoffAt = organizerOnly
+    ? undefined
+    : roundActivationCutoff(event, now, agreement.config.bandVotingWindowMinutes);
+  if (!organizerOnly && !activationCutoffAt) {
+    agreement.status = 'organizer_band_pending';
+    return saveAndRetry(db, event, agreement, now, now, 'participant_window_cannot_fit');
+  }
   const round: AgreementRound = organizerOnly ? 'organizer-band' : 'band';
-  const result = await ensurePoll(context, event, agreement, round, {
-    question: t(organizerOnly
-      ? 'official.community-events.startTimeAgreement.organizerBand.question'
-      : 'official.community-events.startTimeAgreement.band.question'),
-    options: bands.map((band, index) => ({
-      id: band,
-      label: t(`official.community-events.startTimeAgreement.band.${band}`),
-      ordinal: index + 1
-    })),
-    closesAt,
-    organizerOnly
-  });
+  let result: PollAssistantEnsurePollOutput;
+  try {
+    result = await ensurePoll(context, event, agreement, round, {
+      question: t(organizerOnly
+        ? 'official.community-events.startTimeAgreement.organizerBand.question'
+        : 'official.community-events.startTimeAgreement.band.question'),
+      options: bands.map((band, index) => ({
+        id: band,
+        label: t(`official.community-events.startTimeAgreement.band.${band}`),
+        ordinal: index + 1
+      })),
+      ...(closesAt ? { closesAt } : {}),
+      durationMinutes: agreement.config.bandVotingWindowMinutes,
+      ...(activationCutoffAt ? { activationCutoffAt } : {}),
+      organizerOnly
+    });
+  } catch (error) {
+    if (!organizerOnly && isWorkingHoursCutoffError(error)) {
+      agreement.status = 'organizer_band_pending';
+      return saveAndRetry(db, event, agreement, now, now, 'participant_window_cannot_fit');
+    }
+    throw error;
+  }
   agreement[pollField] = result.pollId;
+  agreement[closesField] = result.closesAt ?? undefined;
   agreement.status = organizerOnly ? 'organizer_band_open' : 'band_open';
-  const retryAt = new Date(Date.parse(closesAt) + FINALIZATION_GRACE_MS);
+  const retryAt = result.closesAt
+    ? new Date(Date.parse(result.closesAt) + FINALIZATION_GRACE_MS)
+    : new Date(now.getTime() + AGREEMENT_RETRY_MS);
   return saveAndRetry(db, event, agreement, now, retryAt);
 }
 
@@ -284,7 +305,10 @@ async function resolveBandRound(
   const round: AgreementRound = organizerOnly ? 'organizer-band' : 'band';
   const result = await resolvePoll(context, event, agreement, round);
   if (result.kind === 'unavailable' || result.outcome.kind === 'open' || result.outcome.kind === 'not_finalized') {
-    return saveAndRetry(db, event, agreement, now, new Date(now.getTime() + AGREEMENT_RETRY_MS));
+    if (result.kind === 'found') {
+      agreement[organizerOnly ? 'organizerBandClosesAt' : 'bandClosesAt'] = result.closesAt ?? undefined;
+    }
+    return saveAndRetry(db, event, agreement, now, agreementPollRetryAt(result, now));
   }
   if (result.outcome.kind === 'no_response') {
     if (organizerOnly) {
@@ -331,7 +355,7 @@ async function ensureExactRound(
   const closesField = organizerOnly ? 'organizerTimeClosesAt' : 'exactClosesAt';
   const pollField = organizerOnly ? 'organizerTimePollId' : 'exactPollId';
   let closesAt = agreement[closesField];
-  if (!closesAt) {
+  if (organizerOnly && !closesAt) {
     const deadline = roundDeadline(event, now, agreement.config.exactTimeVotingWindowMinutes);
     if (!deadline) {
       return requireManualOrganizerTime(context, db, event, agreement, now, t);
@@ -340,20 +364,41 @@ async function ensureExactRound(
     agreement[closesField] = closesAt;
     return saveAndRetry(db, event, agreement, now, now);
   }
+  const activationCutoffAt = organizerOnly
+    ? undefined
+    : roundActivationCutoff(event, now, agreement.config.exactTimeVotingWindowMinutes);
+  if (!organizerOnly && !activationCutoffAt) {
+    agreement.status = 'organizer_time_pending';
+    return saveAndRetry(db, event, agreement, now, now, 'participant_window_cannot_fit');
+  }
   const round: AgreementRound = organizerOnly ? 'organizer-time' : 'exact';
-  const result = await ensurePoll(context, event, agreement, round, {
-    question: t(organizerOnly
-      ? 'official.community-events.startTimeAgreement.organizerTime.question'
-      : 'official.community-events.startTimeAgreement.exact.question', {
-        band: t(`official.community-events.startTimeAgreement.band.${agreement.winningBand}`)
-      }),
-    options: times.map((time, index) => ({ id: timeOptionId(time), label: time, ordinal: index + 1 })),
-    closesAt,
-    organizerOnly
-  });
+  let result: PollAssistantEnsurePollOutput;
+  try {
+    result = await ensurePoll(context, event, agreement, round, {
+      question: t(organizerOnly
+        ? 'official.community-events.startTimeAgreement.organizerTime.question'
+        : 'official.community-events.startTimeAgreement.exact.question', {
+          band: t(`official.community-events.startTimeAgreement.band.${agreement.winningBand}`)
+        }),
+      options: times.map((time, index) => ({ id: timeOptionId(time), label: time, ordinal: index + 1 })),
+      ...(closesAt ? { closesAt } : {}),
+      durationMinutes: agreement.config.exactTimeVotingWindowMinutes,
+      ...(activationCutoffAt ? { activationCutoffAt } : {}),
+      organizerOnly
+    });
+  } catch (error) {
+    if (!organizerOnly && isWorkingHoursCutoffError(error)) {
+      agreement.status = 'organizer_time_pending';
+      return saveAndRetry(db, event, agreement, now, now, 'participant_window_cannot_fit');
+    }
+    throw error;
+  }
   agreement[pollField] = result.pollId;
+  agreement[closesField] = result.closesAt ?? undefined;
   agreement.status = organizerOnly ? 'organizer_time_open' : 'exact_open';
-  return saveAndRetry(db, event, agreement, now, new Date(Date.parse(closesAt) + FINALIZATION_GRACE_MS));
+  return saveAndRetry(db, event, agreement, now, result.closesAt
+    ? new Date(Date.parse(result.closesAt) + FINALIZATION_GRACE_MS)
+    : new Date(now.getTime() + AGREEMENT_RETRY_MS));
 }
 
 async function resolveExactRound(
@@ -368,7 +413,10 @@ async function resolveExactRound(
   const round: AgreementRound = organizerOnly ? 'organizer-time' : 'exact';
   const result = await resolvePoll(context, event, agreement, round);
   if (result.kind === 'unavailable' || result.outcome.kind === 'open' || result.outcome.kind === 'not_finalized') {
-    return saveAndRetry(db, event, agreement, now, new Date(now.getTime() + AGREEMENT_RETRY_MS));
+    if (result.kind === 'found') {
+      agreement[organizerOnly ? 'organizerTimeClosesAt' : 'exactClosesAt'] = result.closesAt ?? undefined;
+    }
+    return saveAndRetry(db, event, agreement, now, agreementPollRetryAt(result, now));
   }
   if (result.outcome.kind === 'no_response') {
     if (organizerOnly) {
@@ -539,7 +587,9 @@ async function ensurePoll(
   input: {
     question: string;
     options: Array<{ id: string; label: string; ordinal: number }>;
-    closesAt: string;
+    closesAt?: string | undefined;
+    durationMinutes: number;
+    activationCutoffAt?: string | undefined;
     organizerOnly: boolean;
   }
 ): Promise<PollAssistantEnsurePollOutput> {
@@ -552,7 +602,17 @@ async function ensurePoll(
     purpose: 'decide',
     question: input.question,
     options: input.options,
-    closing: { kind: 'deadline', deadline: { mode: 'at', closesAt: input.closesAt } },
+    closing: input.organizerOnly
+      ? { kind: 'deadline', deadline: { mode: 'at', closesAt: input.closesAt! } }
+      : {
+          kind: 'deadline',
+          deadline: {
+            mode: 'after_first_non_creator_response',
+            durationMinutes: input.durationMinutes,
+            activationTimeoutMinutes: 120,
+            ...(input.activationCutoffAt ? { activationCutoffAt: input.activationCutoffAt } : {})
+          }
+        },
     quorum: { kind: 'none' },
     electorate: { kind: input.organizerOnly ? 'actor' : 'group_members_until_cutoff' },
     ballotDelivery: 'private',
@@ -661,6 +721,37 @@ function roundDeadline(event: StoredEventRecord, now: Date, windowMinutes: numbe
     eventDayStartsAt
   ));
   return deadline.getTime() > now.getTime() + 5_000 ? deadline : undefined;
+}
+
+function roundActivationCutoff(
+  event: StoredEventRecord,
+  now: Date,
+  responseWindowMinutes: number
+): string | undefined {
+  const lifecycleEnd = Date.parse(event.lifecycleCompleteAt);
+  const eventDayStartsAt = eventLocalDayStartsAt(event)?.getTime() ?? lifecycleEnd;
+  const cutoff = Math.min(lifecycleEnd, eventDayStartsAt)
+    - responseWindowMinutes * 60_000
+    - 5 * 60_000;
+  return cutoff > now.getTime() ? new Date(cutoff).toISOString() : undefined;
+}
+
+function isWorkingHoursCutoffError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /working window starts after the lifecycle activation cutoff/i.test(message);
+}
+
+function agreementPollRetryAt(
+  result: PollAssistantResolvePollOutput,
+  now: Date
+): Date {
+  if (result.kind !== 'found' || !result.closesAt) {
+    return new Date(now.getTime() + AGREEMENT_RETRY_MS);
+  }
+  return new Date(Math.max(
+    Date.parse(result.closesAt) + FINALIZATION_GRACE_MS,
+    now.getTime() + AGREEMENT_RETRY_MS
+  ));
 }
 
 function waitForInitialWeatherForecast(

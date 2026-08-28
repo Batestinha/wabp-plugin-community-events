@@ -130,6 +130,12 @@ function workspaceCalendarLifecycleStatus(
   if (event.eventStatus === 'active' || event.eventStatus === 'completed') {
     return event.eventStatus;
   }
+  if (event.eventStatus === 'failed' && event.calendarStatus === 'included') {
+    // A recoverable subgroup/link failure is intentionally made visible in
+    // the calendar before the community link is retried. The failure is an
+    // internal provisioning state; externally the event is still planned.
+    return 'planned';
+  }
   throw new Error(
     `Calendar event ${event.id} has incompatible lifecycle ${event.eventStatus}/${event.calendarStatus}.`
   );

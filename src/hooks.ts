@@ -14,7 +14,7 @@ import {
 } from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
 import {
   IncompletePollVoteReadbackError,
-  requireCompletePollVotes
+  requirePollVotesThroughCutoff
 } from '../../../platform/transport/pollVoteReadback';
 import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
 import type { OfficialPluginCommandRuntime } from '../shared';
@@ -75,6 +75,7 @@ import {
   ensureEventCalendarPublicationConfiguration,
   eventsDatabase,
   expireKnownChildEventProvisioningForCleanup,
+  freezeEventPollCloseCutoff,
   getEvent,
   getEventAnnouncementDeliveryClaim,
   getCalendarPublicationStatus,
@@ -2215,6 +2216,40 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       ];
     }
+    const cutoffWasAlreadyFrozen = Boolean(record.pollCloseCutoffAt);
+    const frozenRecord = freezeEventPollCloseCutoff(db, {
+      eventId: record.id,
+      scopeId: record.scopeId,
+      expectedPollWaMsgId: closingPollWaMsgId,
+      expectedPollGeneration: closingPollGeneration,
+      cutoffAt: closeAt.toISOString(),
+      frozenAt: now.toISOString()
+    });
+    if (!frozenRecord?.pollCloseCutoffAt) {
+      return [audit('events.close.poll_generation_changed', {
+        eventId: record.id,
+        pollGeneration: closingPollGeneration,
+        pollWaMsgId: closingPollWaMsgId,
+        reason: 'attendance cutoff could not be frozen'
+      })];
+    }
+    const pollCloseCutoffValue = frozenRecord.pollCloseCutoffAt;
+    record = frozenRecord;
+    const pollCloseCutoff = new Date(pollCloseCutoffValue);
+    if (!Number.isFinite(pollCloseCutoff.getTime())) {
+      throw new Error(`Event ${record.id} has an invalid immutable poll close cutoff.`);
+    }
+    if (!cutoffWasAlreadyFrozen) {
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.close.cutoff_frozen',
+        metadata: {
+          pollWaMsgId: closingPollWaMsgId,
+          pollGeneration: closingPollGeneration,
+          pollCloseCutoffAt: pollCloseCutoff.toISOString()
+        }
+      });
+    }
     const pollWaMsgId = closingPollWaMsgId;
     if (!context.pollVoteReadbackFor) {
       throw new IncompletePollVoteReadbackError({
@@ -2226,7 +2261,11 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       });
     }
     const liveVotes = await resolvePluginPollVotes(
-      requireCompletePollVotes(await context.pollVoteReadbackFor(pollWaMsgId)),
+      requirePollVotesThroughCutoff({
+        readback: await context.pollVoteReadbackFor(pollWaMsgId, { asOf: pollCloseCutoff }),
+        expectedPollWaMsgId: pollWaMsgId,
+        cutoff: pollCloseCutoff
+      }),
       requirePollVoteIdentityResolver(context)
     );
     const postReadbackRecord = getEvent(db, record.id);
@@ -2236,11 +2275,13 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       postReadbackRecord.groupLifecycleStatus !== 'poll_open' ||
       postReadbackRecord.pollGeneration !== closingPollGeneration ||
       postReadbackRecord.pollWaMsgId !== closingPollWaMsgId ||
+      postReadbackRecord.pollCloseCutoffAt !== pollCloseCutoff.toISOString() ||
       hasActiveEventPollReplacement(db, record.id) ||
       !replaceVotesForOpenPollGeneration(db, {
         eventId: record.id,
         pollWaMsgId: closingPollWaMsgId,
         pollGeneration: closingPollGeneration,
+        pollCloseCutoffAt: pollCloseCutoff.toISOString(),
         votes: liveVotes
       })
     ) {
@@ -5241,6 +5282,9 @@ async function setCleanupFailureStatus(
 }
 
 function effectiveCloseAt(record: StoredEventRecord, config: ReturnType<typeof parseEventsConfig>): Date {
+  if (record.pollCloseCutoffAt) {
+    return validDateOrNow(record.pollCloseCutoffAt);
+  }
   const startsAt = new Date(record.startsAtUtc || record.startsAt);
   const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
   if (!profile || !Number.isFinite(startsAt.getTime())) {

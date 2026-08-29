@@ -6,6 +6,7 @@ import type {
   PersistedRequiredCreatorReference
 } from '../../../platform/transport/transportTypes';
 import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
+import { comparePollVoteRevisions } from '../../../platform/transport/pollVoteOrdering';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import { EVENTS_DATABASE } from './manifest';
@@ -241,6 +242,8 @@ export interface StoredEventRecord {
   pollWaMsgId?: string | undefined;
   /** Monotonically advances whenever an open poll is replaced in-place. */
   pollGeneration: number;
+  /** Immutable attendance readback boundary once finalization has begun. */
+  pollCloseCutoffAt?: string | undefined;
   pollQuestion?: string | undefined;
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
@@ -390,7 +393,9 @@ export interface StoredEventVote {
   selectedOptionIds: string[];
   selectedOptionNames: string[];
   selectedOptionNumbers: number[];
+  sourceWaMsgId?: string | undefined;
   interactedAt?: string | undefined;
+  receivedAt?: string | undefined;
   updatedAt: string;
 }
 
@@ -588,6 +593,7 @@ interface EventRow extends PluginDatabaseRow {
   announcement_group_wid: string | null;
   poll_wa_msg_id: string | null;
   poll_generation: number;
+  poll_close_cutoff_at: string | null;
   poll_question: string | null;
   poll_options_json: string;
   response_classes_json: string;
@@ -670,7 +676,9 @@ interface VoteRow extends PluginDatabaseRow {
   selected_option_ids_json: string;
   selected_option_names_json: string;
   selected_option_numbers_json: string;
+  source_wa_msg_id: string | null;
   interacted_at: string | null;
+  received_at: string | null;
   updated_at: string;
 }
 
@@ -1995,7 +2003,8 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       changed = db.run(
         `UPDATE event_records
           SET profile_label = ?, profile_revision = ?, poll_wa_msg_id = ?,
-              poll_generation = ?, poll_question = ?, poll_options_json = ?,
+              poll_generation = ?, poll_close_cutoff_at = NULL,
+              poll_question = ?, poll_options_json = ?,
               response_classes_json = ?, answers_json = ?, event_location_json = ?,
               starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
               ends_at = ?, lifecycle_complete_at = ?, span_kind = ?,
@@ -3003,6 +3012,58 @@ export function updateEventCloseAt(db: PluginDatabase, input: {
     input.expectedUpdatedAt
   );
   return result.changes === 1;
+}
+
+export function freezeEventPollCloseCutoff(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedPollWaMsgId: string;
+  expectedPollGeneration: number;
+  cutoffAt: string;
+  frozenAt: string;
+}): StoredEventRecord | undefined {
+  const cutoffAt = new Date(input.cutoffAt);
+  const frozenAt = new Date(input.frozenAt);
+  if (!Number.isFinite(cutoffAt.getTime()) || !Number.isFinite(frozenAt.getTime())) {
+    throw new Error('Event poll close cutoff timestamps must be valid.');
+  }
+  return db.transaction(() => {
+    const current = getEvent(db, input.eventId);
+    if (
+      !current
+      || current.scopeId !== input.scopeId
+      || current.eventStatus !== 'active'
+      || current.groupLifecycleStatus !== 'poll_open'
+      || current.pollWaMsgId !== input.expectedPollWaMsgId
+      || current.pollGeneration !== input.expectedPollGeneration
+      || hasActiveEventPollReplacement(db, current.id)
+    ) {
+      return undefined;
+    }
+    if (current.pollCloseCutoffAt) {
+      return current;
+    }
+    const result = db.run(
+      `UPDATE event_records
+          SET poll_close_cutoff_at = ?, updated_at = ?
+        WHERE id = ? AND scope_id = ?
+          AND event_status = 'active' AND group_lifecycle_status = 'poll_open'
+          AND poll_wa_msg_id = ? AND poll_generation = ?
+          AND poll_close_cutoff_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements
+             WHERE event_poll_replacements.event_id = event_records.id
+               AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+          )`,
+      cutoffAt.toISOString(),
+      frozenAt.toISOString(),
+      input.eventId,
+      input.scopeId,
+      input.expectedPollWaMsgId,
+      input.expectedPollGeneration
+    );
+    return result.changes === 1 ? getEvent(db, input.eventId) : undefined;
+  });
 }
 
 export function completeUnplannedEventProvisioning(db: PluginDatabase, input: {
@@ -7228,17 +7289,56 @@ export function upsertVote(db: PluginDatabase, eventId: string, vote: PluginPoll
     throw new Error('Event votes require an authoritative voter identity and delivery address.');
   }
   const now = new Date().toISOString();
+  const incomingSourceWaMsgId = vote.sourceWaMsgId?.trim() || null;
+  const incomingInteractedAt = vote.interactedAt?.toISOString() ?? null;
+  const incomingReceivedAt = vote.receivedAt?.toISOString() ?? null;
+  const existing = db.get<VoteRow>(
+    'SELECT * FROM event_votes WHERE event_id = ? AND voter_identity_id = ?',
+    eventId,
+    voterIdentityId
+  );
+  const sameSourceEnrichment = Boolean(
+    existing?.source_wa_msg_id
+    && incomingSourceWaMsgId
+    && existing.source_wa_msg_id === incomingSourceWaMsgId
+  );
+  if (
+    existing
+    && !sameSourceEnrichment
+    && comparePollVoteRevisions({
+      interactedAt: incomingInteractedAt ? new Date(incomingInteractedAt) : undefined,
+      receivedAt: incomingReceivedAt ? new Date(incomingReceivedAt) : undefined,
+      sourceWaMsgId: incomingSourceWaMsgId ?? undefined
+    }, {
+      interactedAt: existing.interacted_at ? new Date(existing.interacted_at) : undefined,
+      receivedAt: existing.received_at ? new Date(existing.received_at) : undefined,
+      sourceWaMsgId: existing.source_wa_msg_id ?? undefined
+    }) <= 0
+  ) {
+    return;
+  }
+  if (
+    existing
+    && sameSourceEnrichment
+    && pluginVotePayloadCompleteness(vote) <= storedVotePayloadCompleteness(existing)
+  ) {
+    return;
+  }
+  const storedInteractedAt = sameSourceEnrichment ? existing?.interacted_at ?? incomingInteractedAt : incomingInteractedAt;
+  const storedReceivedAt = sameSourceEnrichment ? existing?.received_at ?? incomingReceivedAt : incomingReceivedAt;
   db.run(
     `INSERT INTO event_votes (
        event_id, voter_identity_id, voter_wid, selected_option_ids_json, selected_option_names_json,
-       selected_option_numbers_json, interacted_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       selected_option_numbers_json, source_wa_msg_id, interacted_at, received_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(event_id, voter_identity_id) DO UPDATE SET
        voter_wid = excluded.voter_wid,
        selected_option_ids_json = excluded.selected_option_ids_json,
        selected_option_names_json = excluded.selected_option_names_json,
        selected_option_numbers_json = excluded.selected_option_numbers_json,
+       source_wa_msg_id = excluded.source_wa_msg_id,
        interacted_at = excluded.interacted_at,
+       received_at = excluded.received_at,
        updated_at = excluded.updated_at`,
     eventId,
     voterIdentityId,
@@ -7246,7 +7346,9 @@ export function upsertVote(db: PluginDatabase, eventId: string, vote: PluginPoll
     JSON.stringify(vote.selectedOptionIds),
     JSON.stringify(vote.selectedOptionNames),
     JSON.stringify(vote.selectedOptionNumbers),
-    vote.interactedAt?.toISOString() ?? null,
+    incomingSourceWaMsgId,
+    storedInteractedAt,
+    storedReceivedAt,
     now
   );
 }
@@ -7295,6 +7397,8 @@ export function replaceVotesForOpenPollGeneration(db: PluginDatabase, input: {
   eventId: string;
   pollWaMsgId: string;
   pollGeneration: number;
+  /** Required by finalization callers; omitted by non-finalizing legacy maintenance paths. */
+  pollCloseCutoffAt?: string | undefined;
   votes: PluginPollVote[];
 }): boolean {
   return db.transaction(() => {
@@ -7305,6 +7409,7 @@ export function replaceVotesForOpenPollGeneration(db: PluginDatabase, input: {
           AND group_lifecycle_status = 'poll_open'
           AND poll_wa_msg_id = ?
           AND poll_generation = ?
+          AND (? IS NULL OR poll_close_cutoff_at = ?)
           AND NOT EXISTS (
             SELECT 1 FROM event_poll_replacements
              WHERE event_poll_replacements.event_id = event_records.id
@@ -7312,7 +7417,9 @@ export function replaceVotesForOpenPollGeneration(db: PluginDatabase, input: {
           )`,
       input.eventId,
       input.pollWaMsgId,
-      input.pollGeneration
+      input.pollGeneration,
+      input.pollCloseCutoffAt ?? null,
+      input.pollCloseCutoffAt ?? null
     );
     if (!current) {
       return false;
@@ -7330,6 +7437,19 @@ export function listVotes(db: PluginDatabase, eventId: string): StoredEventVote[
     'SELECT * FROM event_votes WHERE event_id = ? ORDER BY voter_identity_id ASC',
     eventId
   ).map(voteFromRow);
+}
+
+function pluginVotePayloadCompleteness(vote: PluginPollVote): number {
+  return vote.selectedOptionIds.filter(Boolean).length * 2
+    + vote.selectedOptionNames.filter(Boolean).length * 2
+    + vote.selectedOptionNumbers.filter((value) => Number.isInteger(value) && value > 0).length;
+}
+
+function storedVotePayloadCompleteness(vote: VoteRow): number {
+  return parseJson<string[]>(vote.selected_option_ids_json, []).filter(Boolean).length * 2
+    + parseJson<string[]>(vote.selected_option_names_json, []).filter(Boolean).length * 2
+    + parseJson<number[]>(vote.selected_option_numbers_json, [])
+      .filter((value) => Number.isInteger(value) && value > 0).length;
 }
 
 export function listCreatedGroupParticipants(
@@ -8323,6 +8443,7 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(row.announcement_group_wid ? { announcementGroupWid: row.announcement_group_wid } : {}),
     ...(row.poll_wa_msg_id ? { pollWaMsgId: row.poll_wa_msg_id } : {}),
     pollGeneration: Number(row.poll_generation ?? (row.poll_wa_msg_id ? 1 : 0)),
+    ...(row.poll_close_cutoff_at ? { pollCloseCutoffAt: row.poll_close_cutoff_at } : {}),
     ...(row.poll_question ? { pollQuestion: row.poll_question } : {}),
     pollOptions: parseJson<StoredEventPollOption[]>(row.poll_options_json, []),
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
@@ -8675,7 +8796,9 @@ function voteFromRow(row: VoteRow): StoredEventVote {
     selectedOptionIds: parseJson<string[]>(row.selected_option_ids_json, []),
     selectedOptionNames: parseJson<string[]>(row.selected_option_names_json, []),
     selectedOptionNumbers: parseJson<number[]>(row.selected_option_numbers_json, []),
+    ...(row.source_wa_msg_id ? { sourceWaMsgId: row.source_wa_msg_id } : {}),
     ...(row.interacted_at ? { interactedAt: row.interacted_at } : {}),
+    ...(row.received_at ? { receivedAt: row.received_at } : {}),
     updatedAt: row.updated_at
   };
 }

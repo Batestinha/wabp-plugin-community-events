@@ -45,7 +45,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.12.1',
+  version: '0.12.2',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -240,7 +240,7 @@ export const eventsManifest: PluginManifest = {
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '15',
+  dataVersion: '16',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

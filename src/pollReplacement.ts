@@ -16,11 +16,15 @@ import {
   type DoasPollReconcileOutput
 } from '../doas/serviceApi';
 import { deleteEventArtifacts } from './eventArtifactDeletion';
+import {
+  cancelEventAttendanceLifecycle,
+  ensureEventAttendanceLifecycle
+} from './attendanceLifecycle';
 import { EVENTS_PLUGIN_ID } from './manifest';
 import {
   abortPublishedEventPollReplacement,
-  abortEventPollReplacement,
   abortUnstartedEventPollReplacement,
+  bindEventPollReplacementPollAssistantLifecycle,
   claimEventPollReplacementPublication,
   clearEventPollReplacementPublicationStarted,
   EventPollReplacementConflictError,
@@ -120,7 +124,8 @@ export async function runEventPollReplacement(input: {
   if (!replacement) {
     throw new Error(`Event poll replacement ${input.operationId} does not exist.`);
   }
-  if (replacement.status === 'aborted' && !replacement.newPollWaMsgId) {
+  const pollAssistantOwned = replacement.attendanceLifecycle?.owner === 'poll_assistant';
+  if (!pollAssistantOwned && replacement.status === 'aborted' && !replacement.newPollWaMsgId) {
     return {
       status: 'aborted',
       replacement,
@@ -129,12 +134,25 @@ export async function runEventPollReplacement(input: {
       receiptReleaseRetries: []
     };
   }
+  if (pollAssistantOwned) {
+    const advanced = await advancePollAssistantEventPollReplacement({
+      context: input.context,
+      db: input.db,
+      replacement,
+      clock
+    });
+    if ('pending' in advanced) {
+      return advanced.pending;
+    }
+    replacement = advanced.replacement;
+  }
+
   let claim: EventPollReplacementPublicationClaim | undefined;
   let ownedPublicationStartedAt: string | undefined;
   let providerInvocationStarted = false;
   let providerInvocationCompleted = false;
 
-  if (replacement.status === 'pending') {
+  if (!pollAssistantOwned && replacement.status === 'pending') {
     const claimedAt = clock();
     const claimToken = randomUUID();
     const leaseExpiresAt = new Date(
@@ -185,7 +203,7 @@ export async function runEventPollReplacement(input: {
     }
   };
 
-  try {
+  if (!pollAssistantOwned) try {
     if (replacement.status === 'pending') {
       if (!claim) {
         throw new EventPollReplacementPublicationClaimLostError(
@@ -558,6 +576,333 @@ export async function runEventPollReplacement(input: {
     ...(retirementError ? { retirementError } : {}),
     receiptReleaseRetries
   };
+}
+
+async function advancePollAssistantEventPollReplacement(input: {
+  context: EventPollReplacementContext;
+  db: PluginDatabase;
+  replacement: StoredEventPollReplacement;
+  clock: () => Date;
+}): Promise<
+  | { replacement: StoredEventPollReplacement }
+  | { pending: Extract<EventPollReplacementRunResult, { status: 'pending' }> }
+> {
+  let replacement = input.replacement;
+  if (replacement.status === 'completed' || replacement.status === 'aborted') {
+    return { replacement };
+  }
+  if (replacement.status === 'published') {
+    try {
+      return await settlePollAssistantPublishedReplacement(input, replacement);
+    } catch (error) {
+      const failedAt = input.clock();
+      const reason = error instanceof Error ? error.message : String(error);
+      const retryAt = replacementFailureRetryAt(replacement, failedAt);
+      const failed = failEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        reason,
+        nextAttemptAt: retryAt.toISOString(),
+        failedAt: failedAt.toISOString()
+      });
+      return failed.failed
+        ? { pending: { status: 'pending', replacement: failed.replacement, retryAt, error: reason } }
+        : { pending: pendingWithoutFailure(failed.replacement, failedAt, reason) };
+    }
+  }
+  const lifecycle = replacement.attendanceLifecycle;
+  if (lifecycle?.owner !== 'poll_assistant') {
+    throw new Error(`Event poll replacement ${replacement.operationId} has no Poll Assistant intent.`);
+  }
+  const claimedAt = input.clock();
+  const claimToken = randomUUID();
+  const leaseExpiresAt = new Date(
+    claimedAt.getTime() + EVENT_POLL_REPLACEMENT_PUBLICATION_LEASE_MS
+  ).toISOString();
+  const claimed = claimEventPollReplacementPublication(input.db, {
+    operationId: replacement.operationId,
+    claimToken,
+    now: claimedAt.toISOString(),
+    leaseExpiresAt
+  });
+  if (!claimed) {
+    replacement = getEventPollReplacement(input.db, replacement.operationId) ?? replacement;
+    if (replacement.status === 'published') {
+      return settlePollAssistantPublishedReplacement(input, replacement);
+    }
+    if (replacement.status !== 'pending') {
+      return { replacement };
+    }
+    return {
+      pending: pendingWithoutFailure(
+        replacement,
+        claimedAt,
+        'Poll Assistant replacement lifecycle is already leased or waiting for retry.'
+      )
+    };
+  }
+  replacement = claimed;
+  try {
+    if (!input.context.services) {
+      throw new Error('Poll Assistant lifecycle service is unavailable for replacement publication.');
+    }
+    const event = getEvent(input.db, replacement.eventId);
+    if (!event || event.scopeId !== replacement.scopeId) {
+      throw new Error(`Event ${replacement.eventId} is unavailable for Poll Assistant replacement.`);
+    }
+    const groupWid = event.announcementGroupWid?.trim() || event.groupWid?.trim();
+    if (!groupWid || groupWid !== lifecycle.request.groupWid) {
+      throw new Error(`Event ${event.id} has a conflicting Poll Assistant announcement group.`);
+    }
+    const caller = {
+      services: input.context.services,
+      scopeId: replacement.scopeId,
+      actorIdentityId: replacement.editorIdentityId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      groupWid
+    };
+    const ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request);
+    replacement = bindEventPollReplacementPollAssistantLifecycle(input.db, {
+      operationId: replacement.operationId,
+      generation: lifecycle.generation,
+      sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+      pollId: ensured.pollId,
+      roundId: ensured.roundId,
+      boundAt: input.clock().toISOString()
+    });
+    const boundLifecycle = replacement.attendanceLifecycle;
+    if (boundLifecycle?.owner !== 'poll_assistant') {
+      throw new Error(`Event poll replacement ${replacement.operationId} lost Poll Assistant ownership.`);
+    }
+    const deadlinePassed = replacementDeadlinePassed(replacement, input.clock());
+    if (
+      ensured.pollStatus !== 'active'
+      || (
+        ensured.roundStatus !== 'publish_pending'
+        && ensured.roundStatus !== 'publishing'
+        && ensured.roundStatus !== 'open'
+      )
+    ) {
+      const reason = `Poll Assistant replacement lifecycle reached terminal state ${
+        ensured.pollStatus
+      }/${ensured.roundStatus} before activation.`;
+      const aborted = checkpointAndAbortPollAssistantReplacement(input.db, {
+        replacement,
+        claimToken,
+        messageId: ensured.pollWaMessageId,
+        reason,
+        abortedAt: input.clock().toISOString()
+      });
+      replacement = aborted.replacement;
+      if (!aborted.aborted && replacement.status === 'pending') {
+        return {
+          pending: pendingWithoutFailure(
+            replacement,
+            input.clock(),
+            'Poll Assistant replacement lost its terminal-state abort claim.'
+          )
+        };
+      }
+      return { replacement };
+    }
+    if (deadlinePassed) {
+      await cancelEventAttendanceLifecycle(
+        caller,
+        boundLifecycle,
+        'event replacement activation deadline passed'
+      );
+      const aborted = checkpointAndAbortPollAssistantReplacement(input.db, {
+        replacement,
+        claimToken,
+        messageId: ensured.pollWaMessageId,
+        reason: ensured.pollWaMessageId
+          ? 'The Poll Assistant replacement passed its activation deadline.'
+          : 'The Poll Assistant replacement passed its activation deadline before publication.',
+        abortedAt: input.clock().toISOString()
+      });
+      replacement = aborted.replacement;
+      if (!aborted.aborted && replacement.status === 'pending') {
+        return {
+          pending: pendingWithoutFailure(
+            replacement,
+            input.clock(),
+            'Poll Assistant replacement lost its deadline cancellation claim.'
+          )
+        };
+      }
+      return { replacement };
+    }
+    if (!ensured.pollWaMessageId) {
+      const failedAt = input.clock();
+      const retryAt = replacementFailureRetryAt(replacement, failedAt);
+      const failed = failEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        claimToken,
+        reason: 'Poll Assistant replacement publication is still pending.',
+        nextAttemptAt: retryAt.toISOString(),
+        failedAt: failedAt.toISOString()
+      });
+      replacement = failed.replacement;
+      return {
+        pending: failed.failed
+          ? { status: 'pending', replacement, retryAt, error: 'Poll Assistant replacement publication is still pending.' }
+          : pendingWithoutFailure(
+              replacement,
+              failedAt,
+              'Poll Assistant replacement publication changed while it was deferred.'
+            )
+      };
+    }
+    replacement = markEventPollReplacementPublished(input.db, {
+      operationId: replacement.operationId,
+      messageId: ensured.pollWaMessageId,
+      publishedAt: input.clock().toISOString()
+    });
+    return await settlePollAssistantPublishedReplacement(input, replacement);
+  } catch (error) {
+    const failedAt = input.clock();
+    const reason = error instanceof Error ? error.message : String(error);
+    replacement = getEventPollReplacement(input.db, replacement.operationId) ?? replacement;
+    if (replacement.status === 'published') {
+      const retryAt = replacementFailureRetryAt(replacement, failedAt);
+      const failed = failEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        reason,
+        nextAttemptAt: retryAt.toISOString(),
+        failedAt: failedAt.toISOString()
+      });
+      return failed.failed
+        ? { pending: { status: 'pending', replacement: failed.replacement, retryAt, error: reason } }
+        : { pending: pendingWithoutFailure(failed.replacement, failedAt, reason) };
+    }
+    if (replacement.status === 'pending') {
+      const retryAt = replacementFailureRetryAt(replacement, failedAt);
+      const failed = failEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        claimToken,
+        reason,
+        nextAttemptAt: retryAt.toISOString(),
+        failedAt: failedAt.toISOString()
+      });
+      return failed.failed
+        ? { pending: { status: 'pending', replacement: failed.replacement, retryAt, error: reason } }
+        : { pending: pendingWithoutFailure(failed.replacement, failedAt, reason) };
+    }
+    return { replacement };
+  }
+}
+
+async function settlePollAssistantPublishedReplacement(input: {
+  context: EventPollReplacementContext;
+  db: PluginDatabase;
+  clock: () => Date;
+}, replacement: StoredEventPollReplacement): Promise<
+  | { replacement: StoredEventPollReplacement }
+  | { pending: Extract<EventPollReplacementRunResult, { status: 'pending' }> }
+> {
+  const lifecycle = replacement.attendanceLifecycle;
+  const event = getEvent(input.db, replacement.eventId);
+  if (lifecycle?.owner !== 'poll_assistant' || !event) {
+    throw new Error(`Event poll replacement ${replacement.operationId} lost its Poll Assistant binding.`);
+  }
+  const groupWid = event.announcementGroupWid?.trim() || event.groupWid?.trim();
+  const caller = groupWid === lifecycle.request.groupWid && input.context.services
+    ? {
+        services: input.context.services,
+        scopeId: replacement.scopeId,
+        actorIdentityId: replacement.editorIdentityId,
+        ...(event.groupId ? { groupId: event.groupId } : {}),
+        groupWid
+      }
+    : undefined;
+  const observedAt = input.clock();
+  if (replacementDeadlinePassed(replacement, observedAt)) {
+    if (!caller) {
+      const retryAt = replacementFailureRetryAt(replacement, observedAt);
+      const failed = failEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        reason: 'Poll Assistant lifecycle service is unavailable for replacement cancellation.',
+        nextAttemptAt: retryAt.toISOString(),
+        failedAt: observedAt.toISOString()
+      });
+      return {
+        pending: {
+          status: 'pending',
+          replacement: failed.replacement,
+          retryAt,
+          error: 'Poll Assistant lifecycle service is unavailable for replacement cancellation.'
+        }
+      };
+    }
+    await cancelEventAttendanceLifecycle(
+      caller,
+      lifecycle,
+      'event replacement activation deadline passed'
+    );
+    return {
+      replacement: abortPublishedEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        reason: 'The Poll Assistant replacement passed its activation deadline before the swap completed.',
+        abortedAt: observedAt.toISOString()
+      })
+    };
+  }
+  try {
+    return {
+      replacement: swapPublishedEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        swappedAt: observedAt.toISOString()
+      }).replacement
+    };
+  } catch (error) {
+    if (!(error instanceof EventPollReplacementConflictError) || !caller) {
+      throw error;
+    }
+    await cancelEventAttendanceLifecycle(
+      caller,
+      lifecycle,
+      'event changed before replacement activation'
+    );
+    return {
+      replacement: abortPublishedEventPollReplacement(input.db, {
+        operationId: replacement.operationId,
+        reason: error.message,
+        abortedAt: input.clock().toISOString()
+      })
+    };
+  }
+}
+
+function checkpointAndAbortPollAssistantReplacement(
+  db: PluginDatabase,
+  input: {
+    replacement: StoredEventPollReplacement;
+    claimToken: string;
+    messageId: string | null;
+    reason: string;
+    abortedAt: string;
+  }
+): { replacement: StoredEventPollReplacement; aborted: boolean } {
+  if (input.messageId) {
+    const published = markEventPollReplacementPublished(db, {
+      operationId: input.replacement.operationId,
+      messageId: input.messageId,
+      publishedAt: input.abortedAt
+    });
+    return {
+      replacement: abortPublishedEventPollReplacement(db, {
+        operationId: published.operationId,
+        reason: input.reason,
+        abortedAt: input.abortedAt
+      }),
+      aborted: true
+    };
+  }
+  return abortUnstartedEventPollReplacement(db, {
+    operationId: input.replacement.operationId,
+    claimToken: input.claimToken,
+    reason: input.reason,
+    abortedAt: input.abortedAt
+  });
 }
 
 function renewPublicationClaim(

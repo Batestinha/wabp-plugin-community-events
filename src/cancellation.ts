@@ -4,11 +4,14 @@ import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
 import {
   appendEventLog,
+  beginEventArtifactDeletionCleanup,
+  bindEventPollAssistantAttendanceLifecycle,
   claimEventCancellationCleanup,
   EVENT_CLEANUP_CLAIM_LEASE_MS,
   hasActiveEventPollReplacement,
   markClaimedEventCancelled,
   markEventCancelled,
+  markEventPollAssistantAttendanceCancelled,
   releaseEventCleanupClaim,
   renewEventCleanupClaim,
   resolvedEventCalendarId,
@@ -23,6 +26,7 @@ import type { EventArtifactDeletionResult } from './eventArtifactDeletion';
 import { EVENTS_JOBS } from './manifest';
 import { releaseEligibleEventPollReplacementReceipts } from './pollReplacement';
 import { cancelEventStartTimeAgreementPolls } from './startTimeAgreement';
+import { cancelEventAttendanceLifecycle } from './attendanceLifecycle';
 import {
   cancelEventStartTimeAgreement,
   getEventStartTimeAgreement
@@ -182,6 +186,82 @@ export async function cancelEventLifecycle(input: {
     if (!cancelled) {
       releaseCancellationClaim(db, cancellationClaim);
       return { status: 'not_cancellable', reason: 'event lifecycle changed during cancellation' };
+    }
+  }
+  if (event.attendanceLifecycle?.owner === 'poll_assistant') {
+    const lifecycle = event.attendanceLifecycle;
+    try {
+      if (!event.actorIdentityId) {
+        throw new Error('Event has no authoritative Poll Assistant organizer identity.');
+      }
+      const cancellation = await cancelEventAttendanceLifecycle({
+        services: context.services,
+        scopeId: event.scopeId,
+        actorIdentityId: event.actorIdentityId,
+        ...(event.groupId ? { groupId: event.groupId } : {}),
+        groupWid: lifecycle.request.groupWid
+      }, lifecycle, input.reason ?? 'event cancelled');
+      bindEventPollAssistantAttendanceLifecycle(db, {
+        eventId: event.id,
+        scopeId: event.scopeId,
+        generation: lifecycle.generation,
+        sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+        pollId: cancellation.lifecycle.pollId,
+        roundId: cancellation.lifecycle.roundId,
+        ...(cancellation.lifecycle.pollWaMessageId
+          ? { pollWaMessageId: cancellation.lifecycle.pollWaMessageId }
+          : {}),
+        boundAt: cancellation.acknowledgedAt
+      });
+      if (input.deleteAnnouncementMessages !== false && cancellation.lifecycle.pollWaMessageId) {
+        const pollArtifacts = listEventAnnouncementMessages(db, event.id)
+          .filter((artifact) =>
+            artifact.kind === 'poll'
+            && artifact.messageId === cancellation.lifecycle.pollWaMessageId
+          );
+        beginEventArtifactDeletionCleanup(
+          db,
+          event.id,
+          pollArtifacts.map((artifact) => artifact.id),
+          cancellation.acknowledgedAt
+        );
+      }
+      markEventPollAssistantAttendanceCancelled(db, {
+        eventId: event.id,
+        generation: lifecycle.generation,
+        sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+        cancelledAt: cancellation.acknowledgedAt
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.attendance_lifecycle.cancellation_deferred',
+        metadata: {
+          generation: lifecycle.generation,
+          sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+          reason
+        }
+      });
+      try {
+        await runtime.enqueuePluginJob({
+          jobName: EVENTS_JOBS.attendanceLifecycle,
+          scopeId: event.scopeId,
+          ...(event.groupId ? { groupId: event.groupId } : {}),
+          ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+          delayMs: 30_000,
+          payload: { eventId: event.id, pollGeneration: lifecycle.generation },
+          dedupeKey: `${EVENTS_JOBS.attendanceLifecycle}:${event.id}:${lifecycle.generation}:cancel`
+        });
+      } catch (enqueueError) {
+        appendEventLog(db, {
+          eventId: event.id,
+          action: 'events.attendance_lifecycle.cancellation_enqueue_failed',
+          metadata: {
+            reason: enqueueError instanceof Error ? enqueueError.message : String(enqueueError)
+          }
+        });
+      }
     }
   }
   const startTimeAgreement = getEventStartTimeAgreement(db, event.id);

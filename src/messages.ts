@@ -24,6 +24,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.location.invalid': 'That event place selection is no longer valid. Start again.',
   'official.community-events.location.wrongRequester': 'The event place was not confirmed by the original requester.',
   'official.community-events.pollPublished': 'Event poll published.',
+  'official.community-events.pollLifecycleQueued': 'Event recorded. Poll Assistant is publishing the attendance poll and will recover it automatically if delivery is delayed.',
   'official.community-events.unplannedPublished': 'Unplanned event group created.',
   'official.community-events.unplannedProvisioningPending': 'The event “{title}” was recorded, but its group setup is still waiting. I will retry automatically and confirm when it is ready. Event ID: {eventId}.',
   'official.community-events.unplannedProvisioningOperatorRequired': 'The event group “{title}” was created, but automatic setup stopped because its community link needs operator reconciliation. Event ID: {eventId}.',

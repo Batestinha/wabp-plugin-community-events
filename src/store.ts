@@ -9,7 +9,11 @@ import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messag
 import { comparePollVoteRevisions } from '../../../platform/transport/pollVoteOrdering';
 import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { CalendarPublicationOutcome } from './calendarPublication';
-import { EVENTS_DATABASE } from './manifest';
+import type {
+  PollAssistantLifecycleEnsureInput,
+  PollAssistantLifecycleSnapshot
+} from '../poll-assistant/lifecycleServiceApi';
+import { EVENTS_DATABASE, EVENTS_PLUGIN_ID } from './manifest';
 import type { EventSpanKind } from './span';
 import { inferredEventSpanKind } from './span';
 
@@ -212,6 +216,27 @@ export interface StoredEventLocation {
   providerRef?: string | undefined;
 }
 
+export interface StoredLegacyEventAttendanceLifecycle {
+  owner: 'legacy_events';
+}
+
+export interface StoredPollAssistantEventAttendanceLifecycle {
+  owner: 'poll_assistant';
+  generation: number;
+  sourceIdempotencyKey: string;
+  request: PollAssistantLifecycleEnsureInput;
+  pollId?: string | undefined;
+  roundId?: string | undefined;
+  snapshotSha256?: string | undefined;
+  snapshot?: PollAssistantLifecycleSnapshot | undefined;
+  finalizedAt?: string | undefined;
+  cancelledAt?: string | undefined;
+}
+
+export type StoredEventAttendanceLifecycle =
+  | StoredLegacyEventAttendanceLifecycle
+  | StoredPollAssistantEventAttendanceLifecycle;
+
 export interface StoredEventRecord {
   id: string;
   scopeId: string;
@@ -244,6 +269,8 @@ export interface StoredEventRecord {
   pollGeneration: number;
   /** Immutable attendance readback boundary once finalization has begun. */
   pollCloseCutoffAt?: string | undefined;
+  /** Undefined is accepted on in-memory legacy fixtures; persisted rows always expose an owner. */
+  attendanceLifecycle?: StoredEventAttendanceLifecycle | undefined;
   pollQuestion?: string | undefined;
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
@@ -352,6 +379,7 @@ export interface StoredEventPollReplacement {
   sourcePluginId: string;
   artifactIds: string[];
   publishIdempotencyKey: string;
+  attendanceLifecycle?: StoredEventAttendanceLifecycle | undefined;
   newPollWaMsgId?: string | undefined;
   publicationClaimToken?: string | undefined;
   publicationLeaseExpiresAt?: string | undefined;
@@ -594,6 +622,16 @@ interface EventRow extends PluginDatabaseRow {
   poll_wa_msg_id: string | null;
   poll_generation: number;
   poll_close_cutoff_at: string | null;
+  attendance_lifecycle_owner: 'legacy_events' | 'poll_assistant';
+  attendance_lifecycle_generation: number | null;
+  attendance_lifecycle_source_key: string | null;
+  attendance_lifecycle_request_json: string | null;
+  attendance_lifecycle_poll_id: string | null;
+  attendance_lifecycle_round_id: string | null;
+  attendance_lifecycle_snapshot_sha256: string | null;
+  attendance_lifecycle_snapshot_json: string | null;
+  attendance_lifecycle_finalized_at: string | null;
+  attendance_lifecycle_cancelled_at: string | null;
   poll_question: string | null;
   poll_options_json: string;
   response_classes_json: string;
@@ -648,6 +686,12 @@ interface EventPollReplacementRow extends PluginDatabaseRow {
   source_plugin_id: string;
   artifact_ids_json: string;
   publish_idempotency_key: string;
+  attendance_lifecycle_owner: 'legacy_events' | 'poll_assistant';
+  attendance_lifecycle_generation: number | null;
+  attendance_lifecycle_source_key: string | null;
+  attendance_lifecycle_request_json: string | null;
+  attendance_lifecycle_poll_id: string | null;
+  attendance_lifecycle_round_id: string | null;
   new_poll_wa_msg_id: string | null;
   publication_claim_token: string | null;
   publication_lease_expires_at: string | null;
@@ -853,7 +897,11 @@ export function eventsDatabase(registry: PluginDatabaseRegistry | undefined): Pl
   return registry.open(EVENTS_DATABASE);
 }
 
-export function newEventId(): string {
+export function newEventId(stableSource?: string): string {
+  const source = stableSource?.trim();
+  if (source) {
+    return `evt-${createHash('sha256').update(source).digest('hex').slice(0, 12)}`;
+  }
   return `evt-${randomUUID().slice(0, 8)}`;
 }
 
@@ -1173,6 +1221,14 @@ export function insertEvent(
   ).toISOString();
   const lifecycleCompleteAt = event.lifecycleCompleteAt ?? endsAt;
   const spanKind = event.spanKind ?? inferredEventSpanKind(event.calendarDurationMinutes);
+  const pollGeneration = event.pollGeneration ?? (event.pollWaMsgId ? 1 : 0);
+  const attendanceLifecycle = event.attendanceLifecycle ?? { owner: 'legacy_events' as const };
+  if (
+    attendanceLifecycle.owner === 'poll_assistant'
+    && attendanceLifecycle.generation !== pollGeneration
+  ) {
+    throw new Error('New event Poll Assistant lifecycle generation is inconsistent.');
+  }
   if (
     (calendarOwnershipStatus === 'assigned' && !calendarId) ||
     (calendarOwnershipStatus === 'none' && calendarId !== null)
@@ -1184,14 +1240,24 @@ export function insertEvent(
       id, scope_id, group_id, group_wid, profile_id, profile_revision, profile_label, origin,
       event_status, group_lifecycle_status, calendar_status, calendar_id, calendar_ownership_status,
       actor_identity_id, actor_wid, actor_label,
-      announcement_group_wid, poll_wa_msg_id, poll_generation, poll_question, poll_options_json, response_classes_json,
+      announcement_group_wid, poll_wa_msg_id, poll_generation, poll_close_cutoff_at,
+      attendance_lifecycle_owner, attendance_lifecycle_generation,
+      attendance_lifecycle_source_key, attendance_lifecycle_request_json,
+      attendance_lifecycle_poll_id, attendance_lifecycle_round_id,
+      attendance_lifecycle_snapshot_sha256, attendance_lifecycle_snapshot_json,
+      attendance_lifecycle_finalized_at, attendance_lifecycle_cancelled_at,
+      poll_question, poll_options_json, response_classes_json,
       answers_json, event_location_json, starts_at, starts_at_utc, ends_at, lifecycle_complete_at, span_kind, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
       cancel_reason, error, provisioning_recovery_generation, provisioning_recovery_attempt,
       provisioning_recovery_next_run_at, provisioning_recovery_halted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    )`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -1210,7 +1276,34 @@ export function insertEvent(
     event.actorLabel,
     event.announcementGroupWid ?? null,
     event.pollWaMsgId ?? null,
-    event.pollGeneration ?? (event.pollWaMsgId ? 1 : 0),
+    pollGeneration,
+    event.pollCloseCutoffAt ?? (
+      attendanceLifecycle.owner === 'poll_assistant'
+        ? attendanceLifecycle.snapshot?.cutoffAt ?? null
+        : null
+    ),
+    attendanceLifecycle.owner,
+    attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.generation : null,
+    attendanceLifecycle.owner === 'poll_assistant'
+      ? attendanceLifecycle.sourceIdempotencyKey
+      : null,
+    attendanceLifecycle.owner === 'poll_assistant'
+      ? JSON.stringify(attendanceLifecycle.request)
+      : null,
+    attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.pollId ?? null : null,
+    attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.roundId ?? null : null,
+    attendanceLifecycle.owner === 'poll_assistant'
+      ? attendanceLifecycle.snapshotSha256 ?? null
+      : null,
+    attendanceLifecycle.owner === 'poll_assistant' && attendanceLifecycle.snapshot
+      ? JSON.stringify(attendanceLifecycle.snapshot)
+      : null,
+    attendanceLifecycle.owner === 'poll_assistant'
+      ? attendanceLifecycle.finalizedAt ?? null
+      : null,
+    attendanceLifecycle.owner === 'poll_assistant'
+      ? attendanceLifecycle.cancelledAt ?? null
+      : null,
     event.pollQuestion ?? null,
     JSON.stringify(event.pollOptions),
     JSON.stringify(event.responseClasses),
@@ -1560,6 +1653,341 @@ export function getEvent(db: PluginDatabase, eventId: string): StoredEventRecord
   return row ? eventFromRow(row) : undefined;
 }
 
+export function bindEventPollAssistantAttendanceLifecycle(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: number;
+  sourceIdempotencyKey: string;
+  pollId: string;
+  roundId: string;
+  pollWaMessageId?: string | undefined;
+  boundAt?: string | undefined;
+}): StoredEventRecord {
+  return db.transaction(() => {
+    const current = getEvent(db, input.eventId);
+    const lifecycle = current?.attendanceLifecycle;
+    if (
+      !current
+      || current.scopeId !== input.scopeId
+      || lifecycle?.owner !== 'poll_assistant'
+      || lifecycle.generation !== input.generation
+      || lifecycle.sourceIdempotencyKey !== input.sourceIdempotencyKey
+    ) {
+      throw new Error(`Event ${input.eventId} rejected its Poll Assistant lifecycle binding.`);
+    }
+    if (
+      (lifecycle.pollId && lifecycle.pollId !== input.pollId)
+      || (lifecycle.roundId && lifecycle.roundId !== input.roundId)
+      || (current.pollWaMsgId && input.pollWaMessageId && current.pollWaMsgId !== input.pollWaMessageId)
+    ) {
+      throw new Error(`Event ${input.eventId} received conflicting Poll Assistant lifecycle references.`);
+    }
+    if (
+      lifecycle.pollId === input.pollId
+      && lifecycle.roundId === input.roundId
+      && (!input.pollWaMessageId || current.pollWaMsgId === input.pollWaMessageId)
+    ) {
+      return current;
+    }
+    const boundAt = nextEventRevisionTimestamp(current.updatedAt, input.boundAt
+      ? new Date(input.boundAt)
+      : new Date());
+    const changed = db.run(
+      `UPDATE event_records
+          SET attendance_lifecycle_poll_id = COALESCE(attendance_lifecycle_poll_id, ?),
+              attendance_lifecycle_round_id = COALESCE(attendance_lifecycle_round_id, ?),
+              poll_wa_msg_id = COALESCE(poll_wa_msg_id, ?),
+              updated_at = ?
+        WHERE id = ? AND scope_id = ?
+          AND attendance_lifecycle_owner = 'poll_assistant'
+          AND attendance_lifecycle_generation = ?
+          AND attendance_lifecycle_source_key = ?
+          AND (attendance_lifecycle_poll_id IS NULL OR attendance_lifecycle_poll_id = ?)
+          AND (attendance_lifecycle_round_id IS NULL OR attendance_lifecycle_round_id = ?)
+          AND (poll_wa_msg_id IS NULL OR ? IS NULL OR poll_wa_msg_id = ?)`,
+      input.pollId,
+      input.roundId,
+      input.pollWaMessageId ?? null,
+      boundAt,
+      input.eventId,
+      input.scopeId,
+      input.generation,
+      input.sourceIdempotencyKey,
+      input.pollId,
+      input.roundId,
+      input.pollWaMessageId ?? null,
+      input.pollWaMessageId ?? null
+    ).changes;
+    if (changed !== 1) {
+      throw new Error(`Event ${input.eventId} changed while binding its Poll Assistant lifecycle.`);
+    }
+    const updated = getEvent(db, input.eventId)!;
+    if (input.pollWaMessageId) {
+      const chatId = updated.announcementGroupWid?.trim() || updated.groupWid?.trim();
+      if (!chatId) {
+        throw new Error(`Event ${input.eventId} has no announcement group for its attendance poll.`);
+      }
+      recordEventAnnouncementMessage(db, {
+        eventId: updated.id,
+        scopeId: updated.scopeId,
+        kind: 'poll',
+        deliveryKey: `attendance:${input.generation}`,
+        chatId,
+        messageId: input.pollWaMessageId,
+        createdAt: boundAt
+      });
+    }
+    return getEvent(db, input.eventId)!;
+  });
+}
+
+export function bindEventPollReplacementPollAssistantLifecycle(db: PluginDatabase, input: {
+  operationId: string;
+  generation: number;
+  sourceIdempotencyKey: string;
+  pollId: string;
+  roundId: string;
+  boundAt?: string | undefined;
+}): StoredEventPollReplacement {
+  const current = getEventPollReplacement(db, input.operationId);
+  const lifecycle = current?.attendanceLifecycle;
+  if (
+    !current
+    || lifecycle?.owner !== 'poll_assistant'
+    || lifecycle.generation !== input.generation
+    || lifecycle.sourceIdempotencyKey !== input.sourceIdempotencyKey
+    || (lifecycle.pollId && lifecycle.pollId !== input.pollId)
+    || (lifecycle.roundId && lifecycle.roundId !== input.roundId)
+  ) {
+    throw new Error(`Event poll replacement ${input.operationId} rejected its Poll Assistant binding.`);
+  }
+  if (lifecycle.pollId === input.pollId && lifecycle.roundId === input.roundId) {
+    return current;
+  }
+  const boundAt = input.boundAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_poll_replacements
+        SET attendance_lifecycle_poll_id = COALESCE(attendance_lifecycle_poll_id, ?),
+            attendance_lifecycle_round_id = COALESCE(attendance_lifecycle_round_id, ?),
+            updated_at = ?
+      WHERE operation_id = ?
+        AND attendance_lifecycle_owner = 'poll_assistant'
+        AND attendance_lifecycle_generation = ?
+        AND attendance_lifecycle_source_key = ?
+        AND (attendance_lifecycle_poll_id IS NULL OR attendance_lifecycle_poll_id = ?)
+        AND (attendance_lifecycle_round_id IS NULL OR attendance_lifecycle_round_id = ?)`,
+    input.pollId,
+    input.roundId,
+    boundAt,
+    input.operationId,
+    input.generation,
+    input.sourceIdempotencyKey,
+    input.pollId,
+    input.roundId
+  ).changes;
+  if (changed !== 1) {
+    throw new Error(`Event poll replacement ${input.operationId} changed during Poll Assistant binding.`);
+  }
+  return requireEventPollReplacement(db, input.operationId);
+}
+
+export function persistEventPollAssistantAttendanceSnapshot(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: number;
+  sourceIdempotencyKey: string;
+  pollId: string;
+  roundId: string;
+  snapshot: PollAssistantLifecycleSnapshot;
+  snapshotSha256: string;
+  persistedAt?: string | undefined;
+}): StoredEventRecord {
+  const snapshotJson = JSON.stringify(input.snapshot);
+  const calculatedSha256 = createHash('sha256').update(snapshotJson).digest('hex');
+  if (calculatedSha256 !== input.snapshotSha256) {
+    throw new Error(`Event ${input.eventId} rejected a mismatched Poll Assistant snapshot digest.`);
+  }
+  return db.transaction(() => {
+    const current = getEvent(db, input.eventId);
+    const lifecycle = current?.attendanceLifecycle;
+    if (
+      !current
+      || current.scopeId !== input.scopeId
+      || current.eventStatus !== 'active'
+      || current.groupLifecycleStatus !== 'poll_open'
+      || current.pollGeneration !== input.generation
+      || lifecycle?.owner !== 'poll_assistant'
+      || lifecycle.generation !== input.generation
+      || lifecycle.sourceIdempotencyKey !== input.sourceIdempotencyKey
+      || lifecycle.pollId !== input.pollId
+      || lifecycle.roundId !== input.roundId
+      || input.snapshot.sourcePluginId !== EVENTS_PLUGIN_ID
+      || input.snapshot.sourceIdempotencyKey !== input.sourceIdempotencyKey
+      || input.snapshot.pollId !== input.pollId
+      || input.snapshot.roundId !== input.roundId
+      || input.snapshot.groupWid !== lifecycle.request.groupWid
+      || input.snapshot.cutoffAt !== current.closeAt
+      || input.snapshot.ballots.some((ballot) => ballot.selectedOptionIds.some(
+        (optionId) => !current.pollOptions.some((option) => option.id === optionId)
+      ))
+      || hasActiveEventPollReplacement(db, input.eventId)
+    ) {
+      throw new Error(`Event ${input.eventId} rejected its Poll Assistant final snapshot.`);
+    }
+    if (
+      (current.pollWaMsgId && current.pollWaMsgId !== input.snapshot.pollWaMessageId)
+      || (current.pollCloseCutoffAt && current.pollCloseCutoffAt !== input.snapshot.cutoffAt)
+    ) {
+      throw new Error(`Event ${input.eventId} received a conflicting Poll Assistant final snapshot.`);
+    }
+    if (lifecycle.snapshot) {
+      if (
+        lifecycle.snapshotSha256 !== input.snapshotSha256
+        || JSON.stringify(lifecycle.snapshot) !== snapshotJson
+      ) {
+        throw new Error(`Event ${input.eventId} Poll Assistant snapshot is immutable.`);
+      }
+      return current;
+    }
+    const persistedAt = nextEventRevisionTimestamp(current.updatedAt, input.persistedAt
+      ? new Date(input.persistedAt)
+      : new Date());
+    const changed = db.run(
+      `UPDATE event_records
+          SET poll_wa_msg_id = ?, poll_close_cutoff_at = ?,
+              attendance_lifecycle_snapshot_sha256 = ?,
+              attendance_lifecycle_snapshot_json = ?,
+              attendance_lifecycle_finalized_at = ?,
+              updated_at = ?
+        WHERE id = ? AND scope_id = ?
+          AND event_status = 'active' AND group_lifecycle_status = 'poll_open'
+          AND poll_generation = ?
+          AND attendance_lifecycle_owner = 'poll_assistant'
+          AND attendance_lifecycle_generation = ?
+          AND attendance_lifecycle_source_key = ?
+          AND attendance_lifecycle_poll_id = ?
+          AND attendance_lifecycle_round_id = ?
+          AND attendance_lifecycle_snapshot_json IS NULL
+          AND (poll_wa_msg_id IS NULL OR poll_wa_msg_id = ?)
+          AND (poll_close_cutoff_at IS NULL OR poll_close_cutoff_at = ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM event_poll_replacements replacement
+             WHERE replacement.event_id = event_records.id
+               AND replacement.status NOT IN ('completed', 'aborted')
+          )`,
+      input.snapshot.pollWaMessageId,
+      input.snapshot.cutoffAt,
+      input.snapshotSha256,
+      snapshotJson,
+      input.snapshot.finalizedAt,
+      persistedAt,
+      input.eventId,
+      input.scopeId,
+      input.generation,
+      input.generation,
+      input.sourceIdempotencyKey,
+      input.pollId,
+      input.roundId,
+      input.snapshot.pollWaMessageId,
+      input.snapshot.cutoffAt
+    ).changes;
+    if (changed !== 1) {
+      throw new Error(`Event ${input.eventId} changed while persisting its Poll Assistant snapshot.`);
+    }
+    const updated = getEvent(db, input.eventId)!;
+    const chatId = updated.announcementGroupWid?.trim() || updated.groupWid?.trim();
+    if (!chatId) {
+      throw new Error(`Event ${input.eventId} has no announcement group for its attendance poll.`);
+    }
+    recordEventAnnouncementMessage(db, {
+      eventId: updated.id,
+      scopeId: updated.scopeId,
+      kind: 'poll',
+      deliveryKey: `attendance:${input.generation}`,
+      chatId,
+      messageId: input.snapshot.pollWaMessageId,
+      createdAt: persistedAt
+    });
+    appendEventLog(db, {
+      eventId: updated.id,
+      action: 'events.attendance_lifecycle.snapshot_persisted',
+      metadata: {
+        generation: input.generation,
+        pollId: input.pollId,
+        roundId: input.roundId,
+        pollWaMsgId: input.snapshot.pollWaMessageId,
+        cutoffAt: input.snapshot.cutoffAt,
+        snapshotSha256: input.snapshotSha256,
+        ballotCount: input.snapshot.ballots.length
+      }
+    });
+    return getEvent(db, input.eventId)!;
+  });
+}
+
+export function markEventPollAssistantAttendanceCancelled(db: PluginDatabase, input: {
+  eventId: string;
+  generation: number;
+  sourceIdempotencyKey: string;
+  cancelledAt?: string | undefined;
+}): StoredEventRecord {
+  const current = getEvent(db, input.eventId);
+  const lifecycle = current?.attendanceLifecycle;
+  if (
+    !current
+    || current.eventStatus !== 'cancelled'
+    || lifecycle?.owner !== 'poll_assistant'
+    || lifecycle.generation !== input.generation
+    || lifecycle.sourceIdempotencyKey !== input.sourceIdempotencyKey
+  ) {
+    throw new Error(`Event ${input.eventId} rejected its Poll Assistant cancellation receipt.`);
+  }
+  if (lifecycle.cancelledAt) {
+    return current;
+  }
+  const cancelledAt = input.cancelledAt ?? new Date().toISOString();
+  const changed = db.run(
+    `UPDATE event_records
+        SET attendance_lifecycle_cancelled_at = ?, updated_at = ?
+      WHERE id = ? AND event_status = 'cancelled'
+        AND attendance_lifecycle_owner = 'poll_assistant'
+        AND attendance_lifecycle_generation = ?
+        AND attendance_lifecycle_source_key = ?
+        AND attendance_lifecycle_cancelled_at IS NULL`,
+    cancelledAt,
+    nextEventRevisionTimestamp(current.updatedAt, new Date(cancelledAt)),
+    input.eventId,
+    input.generation,
+    input.sourceIdempotencyKey
+  ).changes;
+  if (changed !== 1) {
+    throw new Error(`Event ${input.eventId} changed while acknowledging Poll Assistant cancellation.`);
+  }
+  return getEvent(db, input.eventId)!;
+}
+
+export function listEventPollAssistantAttendanceRecoveries(
+  db: PluginDatabase
+): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE attendance_lifecycle_owner = 'poll_assistant'
+        AND (
+          (
+            event_status = 'active'
+            AND group_lifecycle_status = 'poll_open'
+            AND poll_wa_msg_id IS NULL
+          )
+          OR
+          (
+            event_status = 'cancelled'
+            AND attendance_lifecycle_cancelled_at IS NULL
+          )
+        )
+      ORDER BY updated_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
 export function beginEventPollReplacement(db: PluginDatabase, input: {
   operationId: string;
   eventId: string;
@@ -1574,6 +2002,7 @@ export function beginEventPollReplacement(db: PluginDatabase, input: {
   locale: string;
   sourcePluginId: string;
   publishIdempotencyKey: string;
+  attendanceLifecycle?: StoredEventAttendanceLifecycle | undefined;
   createdAt?: string | undefined;
 }): StoredEventPollReplacement {
   return db.transaction(() => {
@@ -1646,6 +2075,15 @@ export function beginEventPollReplacement(db: PluginDatabase, input: {
         `Event ${input.eventId} changed before its poll replacement could begin.`
       );
     }
+    const attendanceLifecycle = input.attendanceLifecycle ?? { owner: 'legacy_events' as const };
+    if (
+      attendanceLifecycle.owner === 'poll_assistant'
+      && attendanceLifecycle.generation !== input.expectedPollGeneration + 1
+    ) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${input.operationId} has an invalid Poll Assistant generation.`
+      );
+    }
     const persistedPollArtifact = db.get<{ id: string }>(
       `SELECT id FROM event_announcement_messages
         WHERE event_id = ? AND kind = 'poll' AND message_id = ?
@@ -1681,13 +2119,17 @@ export function beginEventPollReplacement(db: PluginDatabase, input: {
          operation_id, event_id, scope_id, status, expected_event_updated_at,
          old_poll_wa_msg_id, old_poll_generation, target_json,
          editor_identity_id, editor_wid, editor_label, locale, source_plugin_id,
-         artifact_ids_json, publish_idempotency_key, new_poll_wa_msg_id,
+         artifact_ids_json, publish_idempotency_key,
+         attendance_lifecycle_owner, attendance_lifecycle_generation,
+         attendance_lifecycle_source_key, attendance_lifecycle_request_json,
+         attendance_lifecycle_poll_id, attendance_lifecycle_round_id,
+         new_poll_wa_msg_id,
          publication_claim_token, publication_lease_expires_at, publication_started_at,
          failure_count, next_attempt_at, last_error, created_at, updated_at,
          published_at, swapped_at, completed_at, retired_at, retirement_error,
          retirement_failure_count, receipt_released_at, receipt_release_error,
          receipt_release_failure_count, receipt_release_next_attempt_at
-       ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
+       ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL,
                  0, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, 0,
                  NULL, NULL, 0, NULL)`,
       input.operationId,
@@ -1704,6 +2146,16 @@ export function beginEventPollReplacement(db: PluginDatabase, input: {
       input.sourcePluginId,
       JSON.stringify(artifactIds),
       input.publishIdempotencyKey,
+      attendanceLifecycle.owner,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.generation : null,
+      attendanceLifecycle.owner === 'poll_assistant'
+        ? attendanceLifecycle.sourceIdempotencyKey
+        : null,
+      attendanceLifecycle.owner === 'poll_assistant'
+        ? JSON.stringify(attendanceLifecycle.request)
+        : null,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.pollId ?? null : null,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.roundId ?? null : null,
       now,
       now
     );
@@ -1994,6 +2446,19 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
     ).toISOString();
     const targetLifecycleCompleteAt = target.lifecycleCompleteAt ?? targetEndsAt;
     const targetSpanKind = target.spanKind ?? inferredEventSpanKind(target.calendarDurationMinutes);
+    const attendanceLifecycle = replacement.attendanceLifecycle ?? { owner: 'legacy_events' as const };
+    if (
+      attendanceLifecycle.owner === 'poll_assistant'
+      && (
+        attendanceLifecycle.generation !== replacement.oldPollGeneration + 1
+        || !attendanceLifecycle.pollId
+        || !attendanceLifecycle.roundId
+      )
+    ) {
+      throw new EventPollReplacementConflictError(
+        `Event poll replacement ${replacement.operationId} has no complete Poll Assistant reference.`
+      );
+    }
     const swappedAt = nextEventRevisionTimestamp(
       replacement.expectedEventUpdatedAt,
       input.swappedAt ? new Date(input.swappedAt) : new Date()
@@ -2004,6 +2469,13 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
         `UPDATE event_records
           SET profile_label = ?, profile_revision = ?, poll_wa_msg_id = ?,
               poll_generation = ?, poll_close_cutoff_at = NULL,
+              attendance_lifecycle_owner = ?, attendance_lifecycle_generation = ?,
+              attendance_lifecycle_source_key = ?, attendance_lifecycle_request_json = ?,
+              attendance_lifecycle_poll_id = ?, attendance_lifecycle_round_id = ?,
+              attendance_lifecycle_snapshot_sha256 = NULL,
+              attendance_lifecycle_snapshot_json = NULL,
+              attendance_lifecycle_finalized_at = NULL,
+              attendance_lifecycle_cancelled_at = NULL,
               poll_question = ?, poll_options_json = ?,
               response_classes_json = ?, answers_json = ?, event_location_json = ?,
               starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
@@ -2027,6 +2499,16 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       target.profileRevision,
       replacement.newPollWaMsgId,
       replacement.oldPollGeneration + 1,
+      attendanceLifecycle.owner,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.generation : null,
+      attendanceLifecycle.owner === 'poll_assistant'
+        ? attendanceLifecycle.sourceIdempotencyKey
+        : null,
+      attendanceLifecycle.owner === 'poll_assistant'
+        ? JSON.stringify(attendanceLifecycle.request)
+        : null,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.pollId ?? null : null,
+      attendanceLifecycle.owner === 'poll_assistant' ? attendanceLifecycle.roundId ?? null : null,
       target.pollQuestion,
       JSON.stringify(target.pollOptions),
       JSON.stringify(target.responseClasses),
@@ -2175,7 +2657,15 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
         oldPollWaMsgId: replacement.oldPollWaMsgId,
         newPollWaMsgId: replacement.newPollWaMsgId,
         oldPollGeneration: replacement.oldPollGeneration,
-        pollGeneration: replacement.oldPollGeneration + 1
+        pollGeneration: replacement.oldPollGeneration + 1,
+        attendanceLifecycleOwner: attendanceLifecycle.owner,
+        ...(attendanceLifecycle.owner === 'poll_assistant'
+          ? {
+              attendanceLifecycleSourceKey: attendanceLifecycle.sourceIdempotencyKey,
+              attendanceLifecyclePollId: attendanceLifecycle.pollId,
+              attendanceLifecycleRoundId: attendanceLifecycle.roundId
+            }
+          : {})
       }
     });
     return {
@@ -2437,6 +2927,7 @@ export function eventPollReplacementReceiptReleaseEligible(
   replacement: StoredEventPollReplacement
 ): boolean {
   if (
+    replacement.attendanceLifecycle?.owner === 'poll_assistant' ||
     !replacement.newPollWaMsgId ||
     replacement.receiptReleasedAt ||
     (replacement.status !== 'completed' && replacement.status !== 'aborted')
@@ -8423,6 +8914,7 @@ export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEven
 
 function eventFromRow(row: EventRow): StoredEventRecord {
   const eventLocation = parseStoredEventLocation(row.event_location_json);
+  const attendanceLifecycle = eventAttendanceLifecycleFromRow(row);
   return {
     id: row.id,
     scopeId: row.scope_id,
@@ -8444,6 +8936,7 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     ...(row.poll_wa_msg_id ? { pollWaMsgId: row.poll_wa_msg_id } : {}),
     pollGeneration: Number(row.poll_generation ?? (row.poll_wa_msg_id ? 1 : 0)),
     ...(row.poll_close_cutoff_at ? { pollCloseCutoffAt: row.poll_close_cutoff_at } : {}),
+    attendanceLifecycle,
     ...(row.poll_question ? { pollQuestion: row.poll_question } : {}),
     pollOptions: parseJson<StoredEventPollOption[]>(row.poll_options_json, []),
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
@@ -8494,6 +8987,61 @@ function eventFromRow(row: EventRow): StoredEventRecord {
   };
 }
 
+function eventAttendanceLifecycleFromRow(
+  row: Pick<
+    EventRow,
+    | 'attendance_lifecycle_owner'
+    | 'attendance_lifecycle_generation'
+    | 'attendance_lifecycle_source_key'
+    | 'attendance_lifecycle_request_json'
+    | 'attendance_lifecycle_poll_id'
+    | 'attendance_lifecycle_round_id'
+    | 'attendance_lifecycle_snapshot_sha256'
+    | 'attendance_lifecycle_snapshot_json'
+    | 'attendance_lifecycle_finalized_at'
+    | 'attendance_lifecycle_cancelled_at'
+  >
+): StoredEventAttendanceLifecycle {
+  if (row.attendance_lifecycle_owner !== 'poll_assistant') {
+    return { owner: 'legacy_events' };
+  }
+  if (
+    row.attendance_lifecycle_generation === null
+    || !row.attendance_lifecycle_source_key
+    || !row.attendance_lifecycle_request_json
+  ) {
+    throw new Error('Stored Poll Assistant attendance lifecycle is incomplete.');
+  }
+  const request = parseRequiredJson<PollAssistantLifecycleEnsureInput>(
+    row.attendance_lifecycle_request_json,
+    'Poll Assistant attendance lifecycle request'
+  );
+  const snapshot = row.attendance_lifecycle_snapshot_json
+    ? parseRequiredJson<PollAssistantLifecycleSnapshot>(
+        row.attendance_lifecycle_snapshot_json,
+        'Poll Assistant attendance lifecycle snapshot'
+      )
+    : undefined;
+  return {
+    owner: 'poll_assistant',
+    generation: Number(row.attendance_lifecycle_generation),
+    sourceIdempotencyKey: row.attendance_lifecycle_source_key,
+    request,
+    ...(row.attendance_lifecycle_poll_id ? { pollId: row.attendance_lifecycle_poll_id } : {}),
+    ...(row.attendance_lifecycle_round_id ? { roundId: row.attendance_lifecycle_round_id } : {}),
+    ...(row.attendance_lifecycle_snapshot_sha256
+      ? { snapshotSha256: row.attendance_lifecycle_snapshot_sha256 }
+      : {}),
+    ...(snapshot ? { snapshot } : {}),
+    ...(row.attendance_lifecycle_finalized_at
+      ? { finalizedAt: row.attendance_lifecycle_finalized_at }
+      : {}),
+    ...(row.attendance_lifecycle_cancelled_at
+      ? { cancelledAt: row.attendance_lifecycle_cancelled_at }
+      : {})
+  };
+}
+
 function requireEventPollReplacement(
   db: PluginDatabase,
   operationId: string
@@ -8506,6 +9054,7 @@ function requireEventPollReplacement(
 }
 
 function eventPollReplacementFromRow(row: EventPollReplacementRow): StoredEventPollReplacement {
+  const attendanceLifecycle = replacementAttendanceLifecycleFromRow(row);
   return {
     operationId: row.operation_id,
     eventId: row.event_id,
@@ -8540,6 +9089,7 @@ function eventPollReplacementFromRow(row: EventPollReplacementRow): StoredEventP
     sourcePluginId: row.source_plugin_id,
     artifactIds: parseJson<string[]>(row.artifact_ids_json, []),
     publishIdempotencyKey: row.publish_idempotency_key,
+    attendanceLifecycle,
     ...(row.new_poll_wa_msg_id ? { newPollWaMsgId: row.new_poll_wa_msg_id } : {}),
     ...(row.publication_claim_token
       ? { publicationClaimToken: row.publication_claim_token }
@@ -8565,6 +9115,40 @@ function eventPollReplacementFromRow(row: EventPollReplacementRow): StoredEventP
     ...(row.receipt_release_next_attempt_at
       ? { receiptReleaseNextAttemptAt: row.receipt_release_next_attempt_at }
       : {})
+  };
+}
+
+function replacementAttendanceLifecycleFromRow(
+  row: Pick<
+    EventPollReplacementRow,
+    | 'attendance_lifecycle_owner'
+    | 'attendance_lifecycle_generation'
+    | 'attendance_lifecycle_source_key'
+    | 'attendance_lifecycle_request_json'
+    | 'attendance_lifecycle_poll_id'
+    | 'attendance_lifecycle_round_id'
+  >
+): StoredEventAttendanceLifecycle {
+  if (row.attendance_lifecycle_owner !== 'poll_assistant') {
+    return { owner: 'legacy_events' };
+  }
+  if (
+    row.attendance_lifecycle_generation === null
+    || !row.attendance_lifecycle_source_key
+    || !row.attendance_lifecycle_request_json
+  ) {
+    throw new Error('Stored replacement Poll Assistant attendance lifecycle is incomplete.');
+  }
+  return {
+    owner: 'poll_assistant',
+    generation: Number(row.attendance_lifecycle_generation),
+    sourceIdempotencyKey: row.attendance_lifecycle_source_key,
+    request: parseRequiredJson<PollAssistantLifecycleEnsureInput>(
+      row.attendance_lifecycle_request_json,
+      'replacement Poll Assistant attendance lifecycle request'
+    ),
+    ...(row.attendance_lifecycle_poll_id ? { pollId: row.attendance_lifecycle_poll_id } : {}),
+    ...(row.attendance_lifecycle_round_id ? { roundId: row.attendance_lifecycle_round_id } : {})
   };
 }
 
@@ -8976,5 +9560,13 @@ function parseJson<T>(value: string, fallback: T): T {
     return JSON.parse(value) as T;
   } catch {
     return fallback;
+  }
+}
+
+function parseRequiredJson<T>(value: string, label: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    throw new Error(`Stored ${label} is invalid JSON.`);
   }
 }

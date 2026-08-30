@@ -24,7 +24,17 @@ import { enqueuePluginJob } from '../../../platform/jobs/queue';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
-import { voterWidsForResponseBehavior } from './attendance';
+import { voterWidsForResponseBehavior, type EventVoteSelection } from './attendance';
+import {
+  cancelEventAttendanceLifecycle,
+  ensureEventAttendanceLifecycle,
+  eventAttendanceVotesFromSnapshot,
+  finalizeEventAttendanceLifecycle,
+  PendingEventAttendanceLifecycleError,
+  pollAssistantAttendanceLifecycle,
+  requirePollAssistantAttendanceLifecycle,
+  validateEventAttendanceSnapshot
+} from './attendanceLifecycle';
 import {
   eventCalendarPublicationConfigFingerprint,
   writePublishAndRecordScopeCalendar
@@ -64,6 +74,7 @@ import {
 import {
   appendEventLog,
   bindClaimedInitialPlannedEventProvisioningChild,
+  bindEventPollAssistantAttendanceLifecycle,
   failClaimedBoundPlannedEventProvisioningChild,
   EVENT_CLEANUP_CLAIM_LEASE_MS,
   checkpointClaimedEventProvisioningChild,
@@ -94,6 +105,7 @@ import {
   listEventCalendarPublicationGenerations,
   listInterruptedEventPreCreateClaims,
   listOpenPollEvents,
+  listEventPollAssistantAttendanceRecoveries,
   listFailedProvisioningEvents,
   listPendingUnplannedEventFinalizations,
   listPendingCleanupEvents,
@@ -115,6 +127,7 @@ import {
   completeUnplannedEventFinalization,
   initializeEventProvisioningRecovery,
   markClaimedEventCleaned,
+  markEventPollAssistantAttendanceCancelled,
   markClaimedEventCleanupFailed,
   markEventCleaned,
   markEventCompletedAtEnd,
@@ -127,6 +140,7 @@ import {
   markUnclaimedEventFailed,
   markUnclaimedEventPreCreateProvisioningMissed,
   replaceVotesForOpenPollGeneration,
+  persistEventPollAssistantAttendanceSnapshot,
   rearmClaimedEventPreCreateProvisioningAttempt,
   rearmClaimedKnownChildEventProvisioningForStartup,
   releaseEventCleanupClaim,
@@ -358,10 +372,11 @@ export async function recoverEventQueueHandoffs(
   context: PluginRuntimeContext,
   options: EventRecoveryOptions = {}
 ): Promise<number> {
+  const attendanceLifecycleJobs = await recoverEventAttendanceLifecycleJobs(context, options.now);
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
   const startTimeAgreementJobs = await recoverEventStartTimeAgreementJobs(context, options.now);
-  return pollReplacementJobs + closeJobs + startTimeAgreementJobs;
+  return attendanceLifecycleJobs + pollReplacementJobs + closeJobs + startTimeAgreementJobs;
 }
 
 export async function recoverEventJobs(
@@ -384,6 +399,7 @@ export async function recoverEventJobs(
   const questionKeyRenames = await recoverEventQuestionKeyRenames(context, options);
   const editRepairJobs = await recoverEventEditRepairJobs(context);
   const announcementDeliveryJobs = await recoverEventAnnouncementDeliveryJobs(context, options);
+  const attendanceLifecycleJobs = await recoverEventAttendanceLifecycleJobs(context, options.now);
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
   const completionJobs = await recoverEventCompletionJobs(context, options);
@@ -394,7 +410,7 @@ export async function recoverEventJobs(
   const provisioningJobs = await recoverEventProvisioningJobs(context, options);
   const unplannedFinalizationJobs = await recoverUnplannedEventFinalizationJobs(context);
   const suggestionReconcileJobs = await recoverEventSuggestionConversionJobs(context, options.now);
-  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + pollReplacementJobs + closeJobs + completionJobs + startTimeAgreementJobs + cleanupJobs + cancellationCleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
+  const enqueued = questionKeyRenames.scheduled + editRepairJobs + announcementDeliveryJobs + attendanceLifecycleJobs + pollReplacementJobs + closeJobs + completionJobs + startTimeAgreementJobs + cleanupJobs + cancellationCleanupJobs + weatherForecastJobs + provisioningJobs + unplannedFinalizationJobs + suggestionReconcileJobs;
   if (
     enqueued > 0 ||
     interruptedPreCreateClaims > 0 ||
@@ -403,7 +419,7 @@ export async function recoverEventJobs(
     questionKeyRenames.unresolved > 0
   ) {
     context.logger.info(
-      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, completionJobs, startTimeAgreementJobs, cleanupJobs, cancellationCleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
+      { enqueued, calendarPublications, questionKeyRenames, editRepairJobs, announcementDeliveryJobs, attendanceLifecycleJobs, pollReplacementJobs, interruptedPreCreateClaims, closeJobs, completionJobs, startTimeAgreementJobs, cleanupJobs, cancellationCleanupJobs, weatherForecastJobs, provisioningJobs, unplannedFinalizationJobs, suggestionReconcileJobs },
       'Recovered official.community-events jobs'
     );
   }
@@ -742,8 +758,9 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       continue;
     }
     const config = parseEventsConfig(await context.configFor(candidate.scopeId));
-    const closeAt = effectiveCloseAt(candidate, config);
-    const record = persistEffectiveCloseAt(db, candidate, closeAt, now);
+    const paOwned = candidate.attendanceLifecycle?.owner === 'poll_assistant';
+    const closeAt = paOwned ? new Date(candidate.closeAt) : effectiveCloseAt(candidate, config);
+    const record = paOwned ? candidate : persistEffectiveCloseAt(db, candidate, closeAt, now);
     const closeAtIso = Number.isFinite(closeAt.getTime()) ? closeAt.toISOString() : 'invalid';
     const due = Boolean(record.subgroupChatId) ||
       (Number.isFinite(closeAt.getTime()) && closeAt.getTime() <= now.getTime());
@@ -761,11 +778,32 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       payload: {
         eventId: record.id,
         pollGeneration: record.pollGeneration,
-        pollWaMsgId: record.pollWaMsgId
+        ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {})
       },
       dedupeKey: record.subgroupChatId
         ? eventProvisioningResumeDedupeKey(record.id, record.subgroupChatId)
         : `${EVENTS_JOBS.close}:${record.id}:${due ? 'startup-due' : 'startup'}:${closeAtIso}:${record.updatedAt}`
+    });
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
+export async function recoverEventAttendanceLifecycleJobs(
+  context: PluginRuntimeContext,
+  now: Date = new Date()
+): Promise<number> {
+  let enqueued = 0;
+  for (const event of listEventPollAssistantAttendanceRecoveries(eventsDatabase(context.databases))) {
+    await enqueuePluginJob(context.queue, {
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.attendanceLifecycle,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: now,
+      payload: { eventId: event.id, pollGeneration: event.pollGeneration },
+      dedupeKey: `${EVENTS_JOBS.attendanceLifecycle}:${event.id}:${event.pollGeneration}:startup:${event.updatedAt}`
     });
     enqueued += 1;
   }
@@ -1180,6 +1218,18 @@ async function handlePollVote(context: PluginRuntimeContext, event: PluginPollVo
   if (!record) {
     return;
   }
+  if (record.attendanceLifecycle?.owner === 'poll_assistant') {
+    appendEventLog(db, {
+      eventId: record.id,
+      action: 'events.attendance_lifecycle.direct_vote_ignored',
+      metadata: {
+        pollGeneration: record.pollGeneration,
+        pollWaMsgId: event.vote.pollWaMsgId,
+        voterIdentityId: event.vote.voterIdentityId
+      }
+    });
+    return;
+  }
   if (!record.pollWaMsgId || !upsertVoteForOpenPollGeneration(db, {
     eventId: record.id,
     pollWaMsgId: record.pollWaMsgId,
@@ -1225,6 +1275,9 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
   if (event.jobName === EVENTS_JOBS.pollReplacement) {
     return replaceEventPollJob(context, event);
   }
+  if (event.jobName === EVENTS_JOBS.attendanceLifecycle) {
+    return reconcileEventAttendanceLifecycleJob(context, event);
+  }
   if (event.jobName === EVENTS_JOBS.close) {
     return closeEvent(context, event);
   }
@@ -1259,6 +1312,154 @@ async function handleEventJob(context: PluginRuntimeContext, event: PluginJobEve
     return handleEventWeatherForecastJob(context, db, event, profile);
   }
   return [];
+}
+
+async function reconcileEventAttendanceLifecycleJob(
+  context: PluginRuntimeContext,
+  job: PluginJobEvent
+): Promise<PluginAction[]> {
+  const eventId = jobPayloadEventId(job.payload);
+  if (!eventId) {
+    return [audit('events.job.skipped', { jobName: job.jobName, reason: 'missing eventId' })];
+  }
+  const db = eventsDatabase(context.databases);
+  const event = getEvent(db, eventId);
+  const lifecycle = event ? pollAssistantAttendanceLifecycle(event) : undefined;
+  const expectedGeneration = jobPayloadPollGeneration(job.payload);
+  if (
+    !event
+    || !lifecycle
+    || event.scopeId !== job.scopeId
+    || (expectedGeneration !== undefined && expectedGeneration !== lifecycle.generation)
+  ) {
+    return [audit('events.attendance_lifecycle.skipped', {
+      eventId,
+      reason: 'missing, non-PA, scope-mismatched, or stale attendance lifecycle',
+      expectedGeneration,
+      pollGeneration: event?.pollGeneration
+    })];
+  }
+  if (!event.actorIdentityId) {
+    return [audit('events.attendance_lifecycle.blocked', {
+      eventId,
+      reason: 'authoritative event actor identity is unavailable'
+    })];
+  }
+  const caller = {
+    services: context.services,
+    scopeId: event.scopeId,
+    actorIdentityId: event.actorIdentityId,
+    ...(event.groupId ? { groupId: event.groupId } : {}),
+    groupWid: lifecycle.request.groupWid
+  };
+  try {
+    if (event.eventStatus === 'cancelled') {
+      if (lifecycle.cancelledAt) {
+        return [];
+      }
+      const cancellation = await cancelEventAttendanceLifecycle(
+        caller,
+        lifecycle,
+        event.cancelReason ?? 'event cancelled'
+      );
+      bindEventPollAssistantAttendanceLifecycle(db, {
+        eventId: event.id,
+        scopeId: event.scopeId,
+        generation: lifecycle.generation,
+        sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+        pollId: cancellation.lifecycle.pollId,
+        roundId: cancellation.lifecycle.roundId,
+        ...(cancellation.lifecycle.pollWaMessageId
+          ? { pollWaMessageId: cancellation.lifecycle.pollWaMessageId }
+          : {}),
+        boundAt: cancellation.acknowledgedAt
+      });
+      markEventPollAssistantAttendanceCancelled(db, {
+        eventId: event.id,
+        generation: lifecycle.generation,
+        sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+        cancelledAt: cancellation.acknowledgedAt
+      });
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.attendance_lifecycle.cancelled',
+        metadata: {
+          generation: lifecycle.generation,
+          sourceIdempotencyKey: lifecycle.sourceIdempotencyKey
+        }
+      });
+      return [audit('events.attendance_lifecycle.cancelled', {
+        eventId: event.id,
+        pollGeneration: lifecycle.generation
+      })];
+    }
+    if (event.eventStatus !== 'active' || event.groupLifecycleStatus !== 'poll_open') {
+      return [audit('events.attendance_lifecycle.skipped', {
+        eventId: event.id,
+        reason: `event lifecycle is ${event.eventStatus}/${event.groupLifecycleStatus}`
+      })];
+    }
+    const ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request);
+    const updated = bindEventPollAssistantAttendanceLifecycle(db, {
+      eventId: event.id,
+      scopeId: event.scopeId,
+      generation: lifecycle.generation,
+      sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+      pollId: ensured.pollId,
+      roundId: ensured.roundId,
+      ...(ensured.pollWaMessageId ? { pollWaMessageId: ensured.pollWaMessageId } : {})
+    });
+    if (updated.pollWaMsgId) {
+      appendEventLog(db, {
+        eventId: updated.id,
+        action: 'events.attendance_lifecycle.published',
+        metadata: {
+          generation: lifecycle.generation,
+          pollId: ensured.pollId,
+          roundId: ensured.roundId,
+          pollWaMsgId: updated.pollWaMsgId
+        }
+      });
+      return [audit('events.attendance_lifecycle.published', {
+        eventId: updated.id,
+        pollGeneration: lifecycle.generation,
+        pollWaMsgId: updated.pollWaMsgId
+      })];
+    }
+    throw new PendingEventAttendanceLifecycleError(
+      'Poll Assistant attendance publication is still pending.',
+      'publication',
+      ensured.roundStatus
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const retryAt = new Date(Date.now() + 30_000);
+    appendEventLog(db, {
+      eventId: event.id,
+      action: 'events.attendance_lifecycle.deferred',
+      metadata: {
+        generation: lifecycle.generation,
+        reason,
+        retryAt: retryAt.toISOString()
+      }
+    });
+    return [{
+      type: 'plugin.enqueueJob',
+      pluginId: EVENTS_PLUGIN_ID,
+      jobName: EVENTS_JOBS.attendanceLifecycle,
+      scopeId: event.scopeId,
+      ...(event.groupId ? { groupId: event.groupId } : {}),
+      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+      runAt: retryAt,
+      payload: { eventId: event.id, pollGeneration: lifecycle.generation },
+      dedupeKey: `${EVENTS_JOBS.attendanceLifecycle}:${event.id}:${lifecycle.generation}:retry:${retryAt.toISOString()}`
+    }, audit('events.attendance_lifecycle.deferred', {
+      eventId: event.id,
+      pollGeneration: lifecycle.generation,
+      reason,
+      retryAt: retryAt.toISOString()
+    })];
+  }
 }
 
 async function completeEventAtEnd(context: PluginRuntimeContext, job: PluginJobEvent): Promise<PluginAction[]> {
@@ -2143,14 +2344,15 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       retryAt: retryAt.toISOString()
     })];
   }
-  if (!record.pollWaMsgId) {
+  const pollAssistantOwned = record.attendanceLifecycle?.owner === 'poll_assistant';
+  if (!record.pollWaMsgId && !pollAssistantOwned) {
     return [audit('events.job.skipped', { jobName: job.jobName, eventId, reason: 'event has no poll' })];
   }
   // A close job owns exactly the poll generation it observed before its first await. Every
   // later mutation is fenced against these values so a replacement cannot turn an old close
   // invocation into an early close/failure of the successor poll.
   const closingPollGeneration = record.pollGeneration;
-  const closingPollWaMsgId = record.pollWaMsgId;
+  let closingPollWaMsgId = record.pollWaMsgId;
 
   let closePersisted = false;
   let pollReceiptReleaseActions: PluginAction[] = [];
@@ -2178,8 +2380,8 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
   } | undefined;
   try {
     const config = parseEventsConfig(await context.configFor(record.scopeId));
-    const closeAt = effectiveCloseAt(record, config);
-    record = persistEffectiveCloseAt(db, record, closeAt);
+    const closeAt = pollAssistantOwned ? new Date(record.closeAt) : effectiveCloseAt(record, config);
+    record = pollAssistantOwned ? record : persistEffectiveCloseAt(db, record, closeAt);
     if (
       record.eventStatus !== 'active' ||
       record.groupLifecycleStatus !== 'poll_open' ||
@@ -2210,89 +2412,211 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           payload: {
             eventId: record.id,
             pollGeneration: record.pollGeneration,
-            pollWaMsgId: record.pollWaMsgId
+            ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {})
           },
           dedupeKey: `${EVENTS_JOBS.close}:${record.id}:deferred:${closeAt.toISOString()}`
         }
       ];
     }
-    const cutoffWasAlreadyFrozen = Boolean(record.pollCloseCutoffAt);
-    const frozenRecord = freezeEventPollCloseCutoff(db, {
-      eventId: record.id,
-      scopeId: record.scopeId,
-      expectedPollWaMsgId: closingPollWaMsgId,
-      expectedPollGeneration: closingPollGeneration,
-      cutoffAt: closeAt.toISOString(),
-      frozenAt: now.toISOString()
-    });
-    if (!frozenRecord?.pollCloseCutoffAt) {
-      return [audit('events.close.poll_generation_changed', {
+    let votes: EventVoteSelection[];
+    if (pollAssistantOwned) {
+      let lifecycle = requirePollAssistantAttendanceLifecycle(record);
+      let snapshot = lifecycle.snapshot;
+      let snapshotSha256 = lifecycle.snapshotSha256;
+      if (!snapshot || !snapshotSha256) {
+        if (!record.actorIdentityId) {
+          throw new Error(`Event ${record.id} has no authoritative Poll Assistant organizer.`);
+        }
+        const caller = {
+          services: context.services,
+          scopeId: record.scopeId,
+          actorIdentityId: record.actorIdentityId,
+          ...(record.groupId ? { groupId: record.groupId } : {}),
+          groupWid: lifecycle.request.groupWid
+        };
+        let ensured: Awaited<ReturnType<typeof ensureEventAttendanceLifecycle>>;
+        try {
+          ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request);
+        } catch (error) {
+          throw new PendingEventAttendanceLifecycleError(
+            error instanceof Error ? error.message : String(error),
+            'publication'
+          );
+        }
+        record = bindEventPollAssistantAttendanceLifecycle(db, {
+          eventId: record.id,
+          scopeId: record.scopeId,
+          generation: closingPollGeneration,
+          sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+          pollId: ensured.pollId,
+          roundId: ensured.roundId,
+          ...(ensured.pollWaMessageId ? { pollWaMessageId: ensured.pollWaMessageId } : {})
+        });
+        lifecycle = requirePollAssistantAttendanceLifecycle(record);
+        if (!ensured.pollWaMessageId) {
+          throw new PendingEventAttendanceLifecycleError(
+            'Poll Assistant attendance publication is still pending.',
+            'publication',
+            ensured.roundStatus
+          );
+        }
+        let finalized;
+        try {
+          finalized = await finalizeEventAttendanceLifecycle(caller, lifecycle);
+        } catch (error) {
+          throw new PendingEventAttendanceLifecycleError(
+            error instanceof Error ? error.message : String(error),
+            'finalization'
+          );
+        }
+        if (finalized.kind === 'cancelled' || finalized.kind === 'failed') {
+          throw new Error(
+            `Poll Assistant attendance lifecycle reached terminal state ${finalized.kind}.`
+          );
+        }
+        if (!finalized.snapshot || !finalized.snapshotSha256) {
+          throw new PendingEventAttendanceLifecycleError(
+            'Poll Assistant attendance finalization is still pending.',
+            'finalization',
+            finalized.roundStatus
+          );
+        }
+        snapshot = validateEventAttendanceSnapshot({
+          event: record,
+          lifecycle,
+          snapshot: finalized.snapshot,
+          snapshotSha256: finalized.snapshotSha256
+        });
+        snapshotSha256 = finalized.snapshotSha256;
+        record = persistEventPollAssistantAttendanceSnapshot(db, {
+          eventId: record.id,
+          scopeId: record.scopeId,
+          generation: closingPollGeneration,
+          sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
+          pollId: lifecycle.pollId!,
+          roundId: lifecycle.roundId!,
+          snapshot,
+          snapshotSha256
+        });
+        appendEventLog(db, {
+          eventId: record.id,
+          action: 'events.close.cutoff_adopted',
+          metadata: {
+            pollWaMsgId: snapshot.pollWaMessageId,
+            pollGeneration: closingPollGeneration,
+            pollCloseCutoffAt: snapshot.cutoffAt,
+            snapshotSha256
+          }
+        });
+      } else {
+        snapshot = validateEventAttendanceSnapshot({
+          event: record,
+          lifecycle,
+          snapshot,
+          snapshotSha256
+        });
+      }
+      closingPollWaMsgId = snapshot.pollWaMessageId;
+      if (
+        record.eventStatus !== 'active'
+        || record.groupLifecycleStatus !== 'poll_open'
+        || record.pollGeneration !== closingPollGeneration
+        || record.pollWaMsgId !== closingPollWaMsgId
+        || record.pollCloseCutoffAt !== snapshot.cutoffAt
+        || hasActiveEventPollReplacement(db, record.id)
+      ) {
+        return [audit('events.close.poll_generation_changed', {
+          eventId: record.id,
+          pollGeneration: closingPollGeneration,
+          pollWaMsgId: closingPollWaMsgId
+        })];
+      }
+      votes = eventAttendanceVotesFromSnapshot(record, snapshot);
+    } else {
+      if (!closingPollWaMsgId) {
+        throw new Error(`Legacy event ${record.id} has no attendance poll message.`);
+      }
+      const cutoffWasAlreadyFrozen = Boolean(record.pollCloseCutoffAt);
+      const frozenRecord = freezeEventPollCloseCutoff(db, {
         eventId: record.id,
-        pollGeneration: closingPollGeneration,
-        pollWaMsgId: closingPollWaMsgId,
-        reason: 'attendance cutoff could not be frozen'
-      })];
-    }
-    const pollCloseCutoffValue = frozenRecord.pollCloseCutoffAt;
-    record = frozenRecord;
-    const pollCloseCutoff = new Date(pollCloseCutoffValue);
-    if (!Number.isFinite(pollCloseCutoff.getTime())) {
-      throw new Error(`Event ${record.id} has an invalid immutable poll close cutoff.`);
-    }
-    if (!cutoffWasAlreadyFrozen) {
-      appendEventLog(db, {
-        eventId: record.id,
-        action: 'events.close.cutoff_frozen',
-        metadata: {
+        scopeId: record.scopeId,
+        expectedPollWaMsgId: closingPollWaMsgId,
+        expectedPollGeneration: closingPollGeneration,
+        cutoffAt: closeAt.toISOString(),
+        frozenAt: now.toISOString()
+      });
+      if (!frozenRecord?.pollCloseCutoffAt) {
+        return [audit('events.close.poll_generation_changed', {
+          eventId: record.id,
+          pollGeneration: closingPollGeneration,
+          pollWaMsgId: closingPollWaMsgId,
+          reason: 'attendance cutoff could not be frozen'
+        })];
+      }
+      const pollCloseCutoffValue = frozenRecord.pollCloseCutoffAt;
+      record = frozenRecord;
+      const pollCloseCutoff = new Date(pollCloseCutoffValue);
+      if (!Number.isFinite(pollCloseCutoff.getTime())) {
+        throw new Error(`Event ${record.id} has an invalid immutable poll close cutoff.`);
+      }
+      if (!cutoffWasAlreadyFrozen) {
+        appendEventLog(db, {
+          eventId: record.id,
+          action: 'events.close.cutoff_frozen',
+          metadata: {
+            pollWaMsgId: closingPollWaMsgId,
+            pollGeneration: closingPollGeneration,
+            pollCloseCutoffAt: pollCloseCutoff.toISOString()
+          }
+        });
+      }
+      if (!context.pollVoteReadbackFor) {
+        throw new IncompletePollVoteReadbackError({
+          pollWaMsgId: closingPollWaMsgId,
+          coverage: 'incomplete',
+          source: 'plugin-runtime',
+          votes: [],
+          reason: 'poll_readback_not_configured'
+        });
+      }
+      const liveVotes = await resolvePluginPollVotes(
+        requirePollVotesThroughCutoff({
+          readback: await context.pollVoteReadbackFor(closingPollWaMsgId, { asOf: pollCloseCutoff }),
+          expectedPollWaMsgId: closingPollWaMsgId,
+          cutoff: pollCloseCutoff
+        }),
+        requirePollVoteIdentityResolver(context)
+      );
+      const postReadbackRecord = getEvent(db, record.id);
+      if (
+        !postReadbackRecord ||
+        postReadbackRecord.eventStatus !== 'active' ||
+        postReadbackRecord.groupLifecycleStatus !== 'poll_open' ||
+        postReadbackRecord.pollGeneration !== closingPollGeneration ||
+        postReadbackRecord.pollWaMsgId !== closingPollWaMsgId ||
+        postReadbackRecord.pollCloseCutoffAt !== pollCloseCutoff.toISOString() ||
+        hasActiveEventPollReplacement(db, record.id) ||
+        !replaceVotesForOpenPollGeneration(db, {
+          eventId: record.id,
           pollWaMsgId: closingPollWaMsgId,
           pollGeneration: closingPollGeneration,
-          pollCloseCutoffAt: pollCloseCutoff.toISOString()
-        }
-      });
+          pollCloseCutoffAt: pollCloseCutoff.toISOString(),
+          votes: liveVotes
+        })
+      ) {
+        return [audit('events.close.poll_generation_changed', {
+          eventId: record.id,
+          pollGeneration: closingPollGeneration,
+          pollWaMsgId: closingPollWaMsgId
+        })];
+      }
+      record = getEvent(db, record.id)!;
+      votes = liveVotes;
     }
-    const pollWaMsgId = closingPollWaMsgId;
-    if (!context.pollVoteReadbackFor) {
-      throw new IncompletePollVoteReadbackError({
-        pollWaMsgId,
-        coverage: 'incomplete',
-        source: 'plugin-runtime',
-        votes: [],
-        reason: 'poll_readback_not_configured'
-      });
+    if (!closingPollWaMsgId) {
+      throw new Error(`Event ${record.id} has no authoritative attendance poll message.`);
     }
-    const liveVotes = await resolvePluginPollVotes(
-      requirePollVotesThroughCutoff({
-        readback: await context.pollVoteReadbackFor(pollWaMsgId, { asOf: pollCloseCutoff }),
-        expectedPollWaMsgId: pollWaMsgId,
-        cutoff: pollCloseCutoff
-      }),
-      requirePollVoteIdentityResolver(context)
-    );
-    const postReadbackRecord = getEvent(db, record.id);
-    if (
-      !postReadbackRecord ||
-      postReadbackRecord.eventStatus !== 'active' ||
-      postReadbackRecord.groupLifecycleStatus !== 'poll_open' ||
-      postReadbackRecord.pollGeneration !== closingPollGeneration ||
-      postReadbackRecord.pollWaMsgId !== closingPollWaMsgId ||
-      postReadbackRecord.pollCloseCutoffAt !== pollCloseCutoff.toISOString() ||
-      hasActiveEventPollReplacement(db, record.id) ||
-      !replaceVotesForOpenPollGeneration(db, {
-        eventId: record.id,
-        pollWaMsgId: closingPollWaMsgId,
-        pollGeneration: closingPollGeneration,
-        pollCloseCutoffAt: pollCloseCutoff.toISOString(),
-        votes: liveVotes
-      })
-    ) {
-      return [audit('events.close.poll_generation_changed', {
-        eventId: record.id,
-        pollGeneration: closingPollGeneration,
-        pollWaMsgId: closingPollWaMsgId
-      })];
-    }
-    record = getEvent(db, record.id)!;
-    for (const vote of liveVotes) {
+    for (const vote of votes) {
       await appendJsonLog(context, {
         action: 'poll.vote.snapshot',
         scopeId: record.scopeId,
@@ -2308,7 +2632,6 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
       });
     }
-    const votes = liveVotes;
     const attendeeWids = voterWidsForResponseBehavior(record, votes, 'includeInEventGroup');
     let subgroupChatId = record.subgroupChatId;
     let subgroupTitle = record.subgroupTitle ?? (subgroupChatId ? record.groupTitle : undefined);
@@ -2728,6 +3051,42 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         audit('events.close.side_effect_failed', { eventId: record.id, reason })
       ];
     }
+    if (error instanceof PendingEventAttendanceLifecycleError) {
+      record = getEvent(db, record.id) ?? record;
+      const retryAt = new Date(Date.now() + 60_000);
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.close.attendance_lifecycle_pending',
+        metadata: {
+          reason,
+          phase: error.phase,
+          status: error.status,
+          retryAt: retryAt.toISOString()
+        }
+      });
+      return [{
+        type: 'plugin.enqueueJob',
+        pluginId: EVENTS_PLUGIN_ID,
+        jobName: EVENTS_JOBS.close,
+        scopeId: record.scopeId,
+        ...(record.groupId ? { groupId: record.groupId } : {}),
+        ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+        runAt: retryAt,
+        payload: {
+          eventId: record.id,
+          pollGeneration: record.pollGeneration,
+          ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {})
+        },
+        dedupeKey: `${EVENTS_JOBS.close}:${record.id}:attendance:${error.phase}:${retryAt.toISOString()}`
+      }, audit('events.close.attendance_lifecycle_pending', {
+        eventId: record.id,
+        pollGeneration: record.pollGeneration,
+        phase: error.phase,
+        status: error.status,
+        reason,
+        retryAt: retryAt.toISOString()
+      })];
+    }
     if (error instanceof IncompletePollVoteReadbackError) {
       const retryAt = new Date(Date.now() + 60_000);
       appendEventLog(db, {
@@ -2761,7 +3120,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           payload: {
             eventId: record.id,
             pollGeneration: record.pollGeneration,
-            pollWaMsgId: record.pollWaMsgId
+            ...(record.pollWaMsgId ? { pollWaMsgId: record.pollWaMsgId } : {})
           },
           dedupeKey: `${EVENTS_JOBS.close}:${record.id}:readback:${retryAt.toISOString()}`
         },
@@ -2772,6 +3131,40 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
           retryAt: retryAt.toISOString()
         })
       ];
+    }
+    if (pollAssistantOwned && !closingPollWaMsgId) {
+      record = getEvent(db, record.id) ?? record;
+      closingPollWaMsgId = record.pollWaMsgId;
+      if (!closingPollWaMsgId) {
+        const retryAt = new Date(Date.now() + 60_000);
+        appendEventLog(db, {
+          eventId: record.id,
+          action: 'events.close.attendance_lifecycle_error_deferred',
+          metadata: { reason, retryAt: retryAt.toISOString() }
+        });
+        return [{
+          type: 'plugin.enqueueJob',
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.close,
+          scopeId: record.scopeId,
+          ...(record.groupId ? { groupId: record.groupId } : {}),
+          ...(record.groupWid ? { groupWid: record.groupWid } : {}),
+          runAt: retryAt,
+          payload: { eventId: record.id, pollGeneration: record.pollGeneration },
+          dedupeKey: `${EVENTS_JOBS.close}:${record.id}:attendance-error:${retryAt.toISOString()}`
+        }, audit('events.close.attendance_lifecycle_error_deferred', {
+          eventId: record.id,
+          pollGeneration: record.pollGeneration,
+          reason,
+          retryAt: retryAt.toISOString()
+        })];
+      }
+    }
+    if (!closingPollWaMsgId) {
+      return [audit('events.close.failure_stale', {
+        eventId: record.id,
+        reason: 'attendance poll message is unavailable while persisting failure'
+      })];
     }
     const failedAt = new Date().toISOString();
     let failureMetadata: Record<string, unknown> = { reason };

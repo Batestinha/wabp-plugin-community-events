@@ -23,6 +23,7 @@ export const EVENTS_JOBS = {
   announcementDelivery: 'event.announcementDelivery',
   editRepair: 'event.editRepair',
   pollReplacement: 'event.pollReplacement',
+  attendanceLifecycle: 'event.attendanceLifecycle',
   weatherForecast: 'event.weatherForecast',
   startTimeAgreement: 'event.startTimeAgreement',
   questionKeyRenameRecovery: 'event.questionKeyRenameRecovery',
@@ -45,7 +46,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.12.2',
+  version: '0.13.0',
   coreApiRange: '>=0.2.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
@@ -163,6 +164,7 @@ export const eventsManifest: PluginManifest = {
     EVENTS_JOBS.announcementDelivery,
     EVENTS_JOBS.editRepair,
     EVENTS_JOBS.pollReplacement,
+    EVENTS_JOBS.attendanceLifecycle,
     EVENTS_JOBS.weatherForecast,
     EVENTS_JOBS.startTimeAgreement,
     EVENTS_JOBS.questionKeyRenameRecovery,
@@ -234,13 +236,13 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.doas', versionRange: '>=0.3.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '>=0.1.0' },
-    { pluginId: 'official.poll-assistant', versionRange: '>=0.2.0', optional: true },
+    { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
     { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true },
     { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '16',
+  dataVersion: '17',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [
@@ -255,6 +257,7 @@ export const eventsManifest: PluginManifest = {
       'official.doas must be enabled for the target scope.',
       'official.community-subgroups must be installed so event subgroups use the shared creation policy.',
       'official.geocoder must be enabled for event profiles whose location comes from a question.',
+      'official.poll-assistant 0.3.0 or newer must be enabled in the target scope for new and replacement attendance polls.',
       'The bot must be an admin of the announcement and community groups.',
       'The caller needs the configured profile-specific events.create.* permission to create events.',
       'The event creator or an events.manage actor can cancel active events.',

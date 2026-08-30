@@ -57,6 +57,11 @@ import {
   renderEventGroupAnnouncement
 } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
+import {
+  ensureEventAttendanceLifecycle,
+  eventAttendanceLifecycleRequest,
+  preflightEventAttendanceLifecycle
+} from './attendanceLifecycle';
 import { EventConditionalTextConfigurationError } from './template';
 import {
   createEventStartTimeAgreement,
@@ -97,13 +102,9 @@ import {
   type GeocoderPlace
 } from '../geocoder/serviceApi';
 import {
-  DOAS_POLL_PUBLISH_METHOD,
-  DOAS_POLL_SERVICE_ID,
-  type DoasPollPublishOutput
-} from '../doas/serviceApi';
-import {
   appendEventLog,
   beginEventPollReplacement,
+  bindEventPollAssistantAttendanceLifecycle,
   beginEventArtifactDeletionCleanup,
   checkpointClaimedEventProvisioningChild,
   checkpointClaimedEventParticipantOutcomes,
@@ -1478,6 +1479,27 @@ async function replaceOpenEventPollLifecycle(input: {
         }
       : {})
   };
+  const attendanceGroupWid = input.event.announcementGroupWid?.trim()
+    || input.event.groupWid?.trim();
+  if (!attendanceGroupWid) {
+    throw new Error('Event attendance lifecycle has no announcement group.');
+  }
+  const attendanceRequest = eventAttendanceLifecycleRequest({
+    eventId: input.event.id,
+    generation: input.event.pollGeneration + 1,
+    groupWid: attendanceGroupWid,
+    question: input.materialized.pollQuestion,
+    options: input.materialized.pollOptions,
+    allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
+    closeAt: input.materialized.closeAt.toISOString()
+  });
+  await preflightEventAttendanceLifecycle({
+    services: input.context.services,
+    scopeId: input.event.scopeId,
+    actorIdentityId: input.actorIdentityId,
+    ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
+    groupWid: attendanceGroupWid
+  }, attendanceRequest);
   beginEventPollReplacement(input.db, {
     operationId: input.operationId,
     eventId: input.event.id,
@@ -1526,6 +1548,12 @@ async function replaceOpenEventPollLifecycle(input: {
       operationId: input.operationId,
       nextPollGeneration: input.event.pollGeneration + 1
     }),
+    attendanceLifecycle: {
+      owner: 'poll_assistant',
+      generation: input.event.pollGeneration + 1,
+      sourceIdempotencyKey: attendanceRequest.sourceIdempotencyKey,
+      request: attendanceRequest
+    },
     createdAt: input.now.toISOString()
   });
   const run = await runEventPollReplacement({
@@ -3508,7 +3536,7 @@ async function publishConfirmedEvent(input: {
   eventLocation: StoredEventLocation;
   t: CommandContext['t'];
 }): Promise<void> {
-  const eventId = newEventId();
+  const eventId = newEventId(`creation-flow:${input.draft.flowSessionId}`);
   let creationMode: 'poll' | 'unplanned' = 'poll';
   try {
     if (!await eventProfileSnapshotIsCurrent({
@@ -3626,28 +3654,25 @@ async function publishConfirmedEvent(input: {
       }
       return;
     }
-    if (!input.context.services) {
-      throw new Error('Plugin service registry is unavailable.');
-    }
-    const sent = await input.context.services.call<DoasPollPublishOutput>({
-      serviceId: DOAS_POLL_SERVICE_ID,
-      method: DOAS_POLL_PUBLISH_METHOD,
+    const attendanceRequest = eventAttendanceLifecycleRequest({
+      eventId,
+      generation: 1,
+      groupWid: input.announcementGroupWid,
+      question: materialized.pollQuestion,
+      options: materialized.pollOptions,
+      allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
+      closeAt: materialized.closeAt.toISOString()
+    });
+    const attendanceCaller = {
+      services: input.context.services,
       scopeId: input.draft.scopeId,
       actorIdentityId: input.draft.actorIdentityId,
-      groupWid: input.announcementGroupWid,
-      input: {
-        groupWid: input.announcementGroupWid,
-        question: materialized.pollQuestion,
-        options: materialized.pollOptions.map((option) => option.label),
-        allowMultipleAnswers: input.profile.poll.allowMultipleAnswers,
-        reason: `event ${input.profile.id}`,
-        sourcePluginId: EVENTS_PLUGIN_ID
-      }
-    });
-    if (!sent?.messageId) {
-      throw new Error('doas poll service did not return a message id');
-    }
-    const pollMessageId = sent.messageId;
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      groupWid: input.announcementGroupWid
+    };
+    // The read call is an explicit dependency/authorization preflight. Only
+    // after it succeeds may Events persist a new attendance generation.
+    await preflightEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
     const nowIso = now.toISOString();
     const event: NewStoredEventRecord & StoredEventRecord = {
       id: eventId,
@@ -3666,8 +3691,13 @@ async function publishConfirmedEvent(input: {
       actorWid: input.draft.actorWid,
       actorLabel: input.draft.actorLabel,
       announcementGroupWid: input.announcementGroupWid,
-      pollWaMsgId: pollMessageId,
       pollGeneration: 1,
+      attendanceLifecycle: {
+        owner: 'poll_assistant',
+        generation: 1,
+        sourceIdempotencyKey: attendanceRequest.sourceIdempotencyKey,
+        request: attendanceRequest
+      },
       pollQuestion: materialized.pollQuestion,
       pollOptions: materialized.pollOptions,
       responseClasses: materialized.responseClasses,
@@ -3691,29 +3721,73 @@ async function publishConfirmedEvent(input: {
       createdAt: nowIso,
       updatedAt: nowIso
     };
-    db.transaction(() => {
-      insertEvent(db, event);
-      if (input.profile.startTimeAgreement.enabled && !materialized.localTime) {
-        createEventStartTimeAgreement(db, {
-          eventId: event.id,
-          profile: input.profile,
-          createdAt: nowIso,
-          nextRunAt: new Date(Math.max(now.getTime(), materialized.closeAt.getTime())).toISOString()
-        });
+    const existing = getEvent(db, event.id);
+    if (existing) {
+      const lifecycle = existing.attendanceLifecycle;
+      if (
+        existing.scopeId !== event.scopeId
+        || existing.actorIdentityId !== event.actorIdentityId
+        || lifecycle?.owner !== 'poll_assistant'
+        || lifecycle.generation !== 1
+        || lifecycle.sourceIdempotencyKey !== attendanceRequest.sourceIdempotencyKey
+        || JSON.stringify(lifecycle.request) !== JSON.stringify(attendanceRequest)
+      ) {
+        throw new Error(`Event creation flow ${input.draft.flowSessionId} is already bound differently.`);
       }
-      recordEventAnnouncementMessage(db, {
+    } else {
+      db.transaction(() => {
+        insertEvent(db, event);
+        if (input.profile.startTimeAgreement.enabled && !materialized.localTime) {
+          createEventStartTimeAgreement(db, {
+            eventId: event.id,
+            profile: input.profile,
+            createdAt: nowIso,
+            nextRunAt: new Date(Math.max(now.getTime(), materialized.closeAt.getTime())).toISOString()
+          });
+        }
+      });
+    }
+    try {
+      await input.runtime.enqueuePluginJob({
+        jobName: EVENTS_JOBS.attendanceLifecycle,
+        scopeId: event.scopeId,
+        ...(event.groupId ? { groupId: event.groupId } : {}),
+        ...(event.groupWid ? { groupWid: event.groupWid } : {}),
+        payload: { eventId: event.id, pollGeneration: event.pollGeneration },
+        dedupeKey: `${EVENTS_JOBS.attendanceLifecycle}:${event.id}:${event.pollGeneration}:publication`
+      });
+    } catch (error) {
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.attendance_lifecycle.enqueue_failed',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
+    let persistedEvent = getEvent(db, event.id)!;
+    try {
+      const lifecycle = await ensureEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
+      persistedEvent = bindEventPollAssistantAttendanceLifecycle(db, {
         eventId: event.id,
         scopeId: event.scopeId,
-        kind: 'poll',
-        deliveryKey: 'initial',
-        chatId: input.announcementGroupWid,
-        messageId: pollMessageId,
-        createdAt: nowIso
+        generation: event.pollGeneration,
+        sourceIdempotencyKey: attendanceRequest.sourceIdempotencyKey,
+        pollId: lifecycle.pollId,
+        roundId: lifecycle.roundId,
+        ...(lifecycle.pollWaMessageId
+          ? { pollWaMessageId: lifecycle.pollWaMessageId }
+          : {}),
+        boundAt: nowIso
       });
-    });
+    } catch (error) {
+      appendEventLog(db, {
+        eventId: event.id,
+        action: 'events.attendance_lifecycle.ensure_deferred',
+        metadata: { reason: error instanceof Error ? error.message : String(error) }
+      });
+    }
     try {
       const calendarConfig = draftEventsConfig(input.draft);
-      const calendarId = resolvedEventCalendarId(event);
+      const calendarId = resolvedEventCalendarId(persistedEvent);
       const calendar = calendarId
         ? calendarConfig.calendars.find((candidate) => candidate.id === calendarId)
         : undefined;
@@ -3733,7 +3807,7 @@ async function publishConfirmedEvent(input: {
         eventId,
         actorWid: input.draft.actorWid,
         profileId: input.profile.id,
-        pollWaMsgId: sent.messageId,
+        ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {}),
         metadata: {
           calendarEnabled: calendar?.enabled === true,
           calendarId: calendarId ?? '',
@@ -3747,7 +3821,7 @@ async function publishConfirmedEvent(input: {
         eventId,
         actorWid: input.draft.actorWid,
         profileId: input.profile.id,
-        pollWaMsgId: sent.messageId,
+        ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {}),
         metadata: { reason: error instanceof Error ? error.message : String(error) }
       });
     }
@@ -3757,7 +3831,7 @@ async function publishConfirmedEvent(input: {
       eventId,
       actorWid: input.draft.actorWid,
       profileId: input.profile.id,
-      pollWaMsgId: sent.messageId,
+      ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {}),
       metadata: {
         announcementGroupWid: input.announcementGroupWid,
         pollQuestion: materialized.pollQuestion,
@@ -3777,17 +3851,21 @@ async function publishConfirmedEvent(input: {
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
       runAt: materialized.closeAt,
-      payload: { eventId, pollGeneration: 1, pollWaMsgId: sent.messageId },
+      payload: {
+        eventId,
+        pollGeneration: 1,
+        ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {})
+      },
       dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
     });
     await input.runtime.enqueuePluginJob({
       jobName: EVENTS_JOBS.complete,
-      scopeId: event.scopeId,
-      ...(event.groupId ? { groupId: event.groupId } : {}),
-      ...(event.groupWid ? { groupWid: event.groupWid } : {}),
-      runAt: new Date(event.lifecycleCompleteAt),
-      payload: { eventId: event.id },
-      dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.lifecycleCompleteAt}`
+      scopeId: persistedEvent.scopeId,
+      ...(persistedEvent.groupId ? { groupId: persistedEvent.groupId } : {}),
+      ...(persistedEvent.groupWid ? { groupWid: persistedEvent.groupWid } : {}),
+      runAt: new Date(persistedEvent.lifecycleCompleteAt),
+      payload: { eventId: persistedEvent.id },
+      dedupeKey: `${EVENTS_JOBS.complete}:${persistedEvent.id}:${persistedEvent.lifecycleCompleteAt}`
     });
     await sendEventCalendarHint({
       context: input.context,
@@ -3796,7 +3874,7 @@ async function publishConfirmedEvent(input: {
       trigger: 'poll_published',
       scopeId: input.draft.scopeId,
       announcementGroupWid: input.announcementGroupWid,
-      event,
+      event: persistedEvent,
       profile: input.profile,
       calendars: input.draft.calendars,
       timezone: input.draft.timezone,
@@ -3805,7 +3883,9 @@ async function publishConfirmedEvent(input: {
     });
     await input.activeTransport.sendText(
       input.responseChatId,
-      input.t('official.community-events.pollPublished')
+      input.t(persistedEvent.pollWaMsgId
+        ? 'official.community-events.pollPublished'
+        : 'official.community-events.pollLifecycleQueued')
     );
   } catch (error) {
     const templateFailure = error instanceof EventConditionalTextConfigurationError ? error : undefined;

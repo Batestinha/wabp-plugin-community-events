@@ -19,6 +19,7 @@ import {
 } from '../../../platform/transport/transportErrors';
 import type { OfficialPluginCommandRuntime } from '../shared';
 import { voterWidsForResponseBehavior } from './attendance';
+import { eventAttendanceVotesFromSnapshot } from './attendanceLifecycle';
 import { parseEventsConfig, type EventProfile } from './config';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -1540,9 +1541,17 @@ export async function resumeEventProvisioning(
   if (event.origin === 'unplanned') {
     attendeeWids = [];
   } else {
+    const attendanceVotes = event.attendanceLifecycle?.owner === 'poll_assistant'
+      ? event.attendanceLifecycle.snapshot
+        ? eventAttendanceVotesFromSnapshot(event, event.attendanceLifecycle.snapshot)
+        : undefined
+      : listVotes(db, event.id);
+    if (!attendanceVotes) {
+      return rejected(event, `Event ${event.id} has no immutable Poll Assistant attendance snapshot.`);
+    }
     attendeeWids = voterWidsForResponseBehavior(
       event,
-      listVotes(db, event.id),
+      attendanceVotes,
       'includeInEventGroup'
     );
   }

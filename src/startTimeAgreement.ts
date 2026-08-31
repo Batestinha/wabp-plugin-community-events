@@ -629,6 +629,7 @@ async function ensurePoll(
     input: {
       groupWid: event.subgroupChatId,
       sourceIdempotencyKey: sourceKey(event.id, agreement.generation, round),
+      workingHoursTimezone: event.timezone,
       definition
     } satisfies PollAssistantEnsurePollInput
   });

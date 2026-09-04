@@ -286,6 +286,8 @@ const EVENT_EDIT_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-edit-selection';
 const EVENT_EDIT_FREE_TEXT_OPTION_ID = 'event-query';
 const EVENT_EDIT_SELECTION_TTL_SECONDS = 30 * 60;
 const EVENT_UPDATE_CONFLICT_ERROR = 'event_update_conflict';
+const EVENT_POLL_PUBLICATION_OBSERVATION_MS = 35_000;
+const EVENT_POLL_PUBLICATION_OBSERVATION_INTERVAL_MS = 1_000;
 
 export function registerEventsCommands(context: PluginCommandContext): void {
   const runtime = requireOfficialCommandRuntime(context);
@@ -3538,6 +3540,8 @@ async function publishConfirmedEvent(input: {
 }): Promise<void> {
   const eventId = newEventId(`creation-flow:${input.draft.flowSessionId}`);
   let creationMode: 'poll' | 'unplanned' = 'poll';
+  let db: ReturnType<typeof eventsDatabase> | undefined;
+  let eventCommitSucceeded = false;
   try {
     if (!await eventProfileSnapshotIsCurrent({
       runtime: input.runtime,
@@ -3552,7 +3556,8 @@ async function publishConfirmedEvent(input: {
       );
       return;
     }
-    const db = eventsDatabase(input.runtime.databases);
+    db = eventsDatabase(input.runtime.databases);
+    const eventDb = db;
     const materialized = materializeEventLifecycle({
       profile: input.profile,
       answers: input.answers,
@@ -3670,9 +3675,6 @@ async function publishConfirmedEvent(input: {
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
       groupWid: input.announcementGroupWid
     };
-    // The read call is an explicit dependency/authorization preflight. Only
-    // after it succeeds may Events persist a new attendance generation.
-    await preflightEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
     const nowIso = now.toISOString();
     const event: NewStoredEventRecord & StoredEventRecord = {
       id: eventId,
@@ -3721,7 +3723,7 @@ async function publishConfirmedEvent(input: {
       createdAt: nowIso,
       updatedAt: nowIso
     };
-    const existing = getEvent(db, event.id);
+    const existing = getEvent(eventDb, event.id);
     if (existing) {
       const lifecycle = existing.attendanceLifecycle;
       if (
@@ -3734,11 +3736,15 @@ async function publishConfirmedEvent(input: {
       ) {
         throw new Error(`Event creation flow ${input.draft.flowSessionId} is already bound differently.`);
       }
+      eventCommitSucceeded = true;
     } else {
-      db.transaction(() => {
-        insertEvent(db, event);
+      // This read call is an explicit dependency/authorization preflight. Only
+      // after it succeeds may Events persist a new attendance generation.
+      await preflightEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
+      eventDb.transaction(() => {
+        insertEvent(eventDb, event);
         if (input.profile.startTimeAgreement.enabled && !materialized.localTime) {
-          createEventStartTimeAgreement(db, {
+          createEventStartTimeAgreement(eventDb, {
             eventId: event.id,
             profile: input.profile,
             createdAt: nowIso,
@@ -3746,46 +3752,71 @@ async function publishConfirmedEvent(input: {
           });
         }
       });
+      eventCommitSucceeded = true;
     }
-    try {
-      await input.runtime.enqueuePluginJob({
+    const pollObservationStartedAt = Date.now();
+    const postCommit = <T>(
+      phase: string,
+      operation: () => Promise<T>,
+      legacyAction?: string
+    ) => runEventPostCommitPhase({
+      context: input.context,
+      db: eventDb,
+      event,
+      phase,
+      operation,
+      ...(legacyAction ? { legacyAction } : {})
+    });
+    const pollObservation = startEventPollPublicationObservation({
+      db: eventDb,
+      eventId: event.id,
+      startedAt: pollObservationStartedAt
+    });
+    const pollObservationResult = postCommit(
+      'poll_binding_observation',
+      () => pollObservation.promise
+    );
+
+    await postCommit(
+      'attendance_job_enqueue',
+      () => input.runtime.enqueuePluginJob({
         jobName: EVENTS_JOBS.attendanceLifecycle,
         scopeId: event.scopeId,
         ...(event.groupId ? { groupId: event.groupId } : {}),
         ...(event.groupWid ? { groupWid: event.groupWid } : {}),
         payload: { eventId: event.id, pollGeneration: event.pollGeneration },
         dedupeKey: `${EVENTS_JOBS.attendanceLifecycle}:${event.id}:${event.pollGeneration}:publication`
-      });
-    } catch (error) {
-      appendEventLog(db, {
-        eventId: event.id,
-        action: 'events.attendance_lifecycle.enqueue_failed',
-        metadata: { reason: error instanceof Error ? error.message : String(error) }
-      });
+      }),
+      'events.attendance_lifecycle.enqueue_failed'
+    );
+
+    let persistedEvent = getEvent(eventDb, event.id) ?? event;
+    const attendanceResult = await postCommit(
+      'attendance_lifecycle_ensure',
+      async () => {
+        const lifecycle = await ensureEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
+        return bindEventPollAssistantAttendanceLifecycle(eventDb, {
+          eventId: event.id,
+          scopeId: event.scopeId,
+          generation: event.pollGeneration,
+          sourceIdempotencyKey: attendanceRequest.sourceIdempotencyKey,
+          pollId: lifecycle.pollId,
+          roundId: lifecycle.roundId,
+          ...(lifecycle.pollWaMessageId
+            ? { pollWaMessageId: lifecycle.pollWaMessageId }
+            : {}),
+          boundAt: new Date().toISOString()
+        });
+      },
+      'events.attendance_lifecycle.ensure_deferred'
+    );
+    if (attendanceResult.ok) {
+      persistedEvent = attendanceResult.value;
+    } else {
+      persistedEvent = safelyGetStoredEvent(eventDb, event.id) ?? persistedEvent;
     }
-    let persistedEvent = getEvent(db, event.id)!;
-    try {
-      const lifecycle = await ensureEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
-      persistedEvent = bindEventPollAssistantAttendanceLifecycle(db, {
-        eventId: event.id,
-        scopeId: event.scopeId,
-        generation: event.pollGeneration,
-        sourceIdempotencyKey: attendanceRequest.sourceIdempotencyKey,
-        pollId: lifecycle.pollId,
-        roundId: lifecycle.roundId,
-        ...(lifecycle.pollWaMessageId
-          ? { pollWaMessageId: lifecycle.pollWaMessageId }
-          : {}),
-        boundAt: nowIso
-      });
-    } catch (error) {
-      appendEventLog(db, {
-        eventId: event.id,
-        action: 'events.attendance_lifecycle.ensure_deferred',
-        metadata: { reason: error instanceof Error ? error.message : String(error) }
-      });
-    }
-    try {
+
+    await postCommit('calendar_publication', async () => {
       const calendarConfig = draftEventsConfig(input.draft);
       const calendarId = resolvedEventCalendarId(persistedEvent);
       const calendar = calendarId
@@ -3794,7 +3825,7 @@ async function publishConfirmedEvent(input: {
       const publication = calendarId
         ? await writePublishAndRecordScopeCalendar({
           appConfig: input.runtime.config,
-          db,
+          db: eventDb,
           config: calendarConfig,
           scopeId: input.draft.scopeId,
           calendarId,
@@ -3814,18 +3845,9 @@ async function publishConfirmedEvent(input: {
           ...(publication ? { publication } : {})
         }
       });
-    } catch (error) {
-      await appendEventJsonLog(input.context, {
-        action: 'calendar.export_failed',
-        scopeId: input.draft.scopeId,
-        eventId,
-        actorWid: input.draft.actorWid,
-        profileId: input.profile.id,
-        ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {}),
-        metadata: { reason: error instanceof Error ? error.message : String(error) }
-      });
-    }
-    await appendEventJsonLog(input.context, {
+    });
+
+    await postCommit('event_created_log', () => appendEventJsonLog(input.context, {
       action: 'event.created',
       scopeId: input.draft.scopeId,
       eventId,
@@ -3844,8 +3866,9 @@ async function publishConfirmedEvent(input: {
         cleanupAt: materialized.cleanupAt.toISOString(),
         prefill: input.draft.prefill
       }
-    });
-    await input.runtime.enqueuePluginJob({
+    }));
+
+    await postCommit('close_job_enqueue', () => input.runtime.enqueuePluginJob({
       jobName: EVENTS_JOBS.close,
       scopeId: input.draft.scopeId,
       ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
@@ -3857,8 +3880,9 @@ async function publishConfirmedEvent(input: {
         ...(persistedEvent.pollWaMsgId ? { pollWaMsgId: persistedEvent.pollWaMsgId } : {})
       },
       dedupeKey: `${EVENTS_JOBS.close}:${eventId}`
-    });
-    await input.runtime.enqueuePluginJob({
+    }));
+
+    await postCommit('completion_job_enqueue', () => input.runtime.enqueuePluginJob({
       jobName: EVENTS_JOBS.complete,
       scopeId: persistedEvent.scopeId,
       ...(persistedEvent.groupId ? { groupId: persistedEvent.groupId } : {}),
@@ -3866,8 +3890,9 @@ async function publishConfirmedEvent(input: {
       runAt: new Date(persistedEvent.lifecycleCompleteAt),
       payload: { eventId: persistedEvent.id },
       dedupeKey: `${EVENTS_JOBS.complete}:${persistedEvent.id}:${persistedEvent.lifecycleCompleteAt}`
-    });
-    await sendEventCalendarHint({
+    }));
+
+    await postCommit('calendar_hint_notification', () => sendEventCalendarHint({
       context: input.context,
       runtime: input.runtime,
       activeTransport: input.activeTransport,
@@ -3880,14 +3905,51 @@ async function publishConfirmedEvent(input: {
       timezone: input.draft.timezone,
       locale: input.draft.locale,
       creatorDisplayName: input.draft.actorLabel || input.draft.actorWid
-    });
-    await input.activeTransport.sendText(
+    }));
+
+    if (safelyGetStoredEvent(eventDb, event.id)?.pollWaMsgId) {
+      pollObservation.cancel();
+    }
+    const observed = await pollObservationResult;
+    if (observed.ok) {
+      persistedEvent = observed.value;
+    } else {
+      persistedEvent = safelyGetStoredEvent(eventDb, event.id) ?? persistedEvent;
+    }
+
+    await postCommit('creator_notification', () => input.activeTransport.sendText(
       input.responseChatId,
       input.t(persistedEvent.pollWaMsgId
         ? 'official.community-events.pollPublished'
-        : 'official.community-events.pollLifecycleQueued')
-    );
+        : 'official.community-events.pollLifecycleQueued'),
+      { idempotencyKey: eventCreatorPublicationNotificationIdempotencyKey(event.id) }
+    ));
   } catch (error) {
+    const unplannedCommittedEvent = creationMode === 'unplanned' && db
+      ? safelyGetStoredEvent(db, eventId)
+      : undefined;
+    if (
+      eventCommitSucceeded ||
+      (
+        unplannedCommittedEvent?.scopeId === input.draft.scopeId &&
+        unplannedCommittedEvent.actorIdentityId === input.draft.actorIdentityId &&
+        unplannedCommittedEvent.profileId === input.profile.id
+      )
+    ) {
+      if (db) {
+        await recordEventPostCommitDeferred({
+          context: input.context,
+          db,
+          eventId,
+          scopeId: input.draft.scopeId,
+          actorWid: input.draft.actorWid,
+          profileId: input.profile.id,
+          phase: 'unexpected_post_commit',
+          error
+        });
+      }
+      return;
+    }
     const templateFailure = error instanceof EventConditionalTextConfigurationError ? error : undefined;
     await appendEventJsonLog(input.context, {
       action: creationMode === 'unplanned' ? 'event.unplanned_failed' : 'event.publish_failed',
@@ -3911,6 +3973,179 @@ async function publishConfirmedEvent(input: {
           )
     );
   }
+}
+
+type EventPostCommitPhaseResult<T> =
+  | { ok: true; value: T }
+  | { ok: false };
+
+async function runEventPostCommitPhase<T>(input: {
+  context: EventFlowCompletionContext;
+  db: ReturnType<typeof eventsDatabase>;
+  event: StoredEventRecord;
+  phase: string;
+  operation: () => Promise<T>;
+  legacyAction?: string | undefined;
+}): Promise<EventPostCommitPhaseResult<T>> {
+  try {
+    return { ok: true, value: await input.operation() };
+  } catch (error) {
+    await recordEventPostCommitDeferred({
+      context: input.context,
+      db: input.db,
+      eventId: input.event.id,
+      scopeId: input.event.scopeId,
+      actorWid: input.event.actorWid,
+      profileId: input.event.profileId,
+      phase: input.phase,
+      error,
+      ...(input.legacyAction ? { legacyAction: input.legacyAction } : {})
+    });
+    return { ok: false };
+  }
+}
+
+async function recordEventPostCommitDeferred(input: {
+  context: EventFlowCompletionContext;
+  db: ReturnType<typeof eventsDatabase>;
+  eventId: string;
+  scopeId: string;
+  actorWid: string;
+  profileId: string;
+  phase: string;
+  error: unknown;
+  legacyAction?: string | undefined;
+}): Promise<void> {
+  const reason = input.error instanceof Error ? input.error.message : String(input.error);
+  const metadata = { phase: input.phase, reason };
+  for (const action of ['event.post_commit_deferred', input.legacyAction].filter(
+    (action): action is string => Boolean(action)
+  )) {
+    try {
+      appendEventLog(input.db, {
+        eventId: input.eventId,
+        action,
+        metadata
+      });
+    } catch {
+      // The durable event remains the success boundary even when diagnostics are unavailable.
+    }
+  }
+  await appendEventJsonLog(input.context, {
+    action: 'event.post_commit_deferred',
+    scopeId: input.scopeId,
+    eventId: input.eventId,
+    actorWid: input.actorWid,
+    profileId: input.profileId,
+    metadata
+  });
+  if (input.phase === 'calendar_publication') {
+    await appendEventJsonLog(input.context, {
+      action: 'calendar.export_failed',
+      scopeId: input.scopeId,
+      eventId: input.eventId,
+      actorWid: input.actorWid,
+      profileId: input.profileId,
+      metadata: { reason }
+    });
+  }
+  if ('logger' in input.context) {
+    try {
+      input.context.logger.warn(
+        {
+          eventId: input.eventId,
+          scopeId: input.scopeId,
+          phase: input.phase,
+          reason
+        },
+        'Deferred official.community-events post-commit work'
+      );
+    } catch {
+      // Diagnostics must never turn a durable creation into a user-visible failure.
+    }
+  }
+}
+
+function startEventPollPublicationObservation(input: {
+  db: ReturnType<typeof eventsDatabase>;
+  eventId: string;
+  startedAt: number;
+}): { promise: Promise<StoredEventRecord>; cancel: () => void } {
+  const controller = new AbortController();
+  return {
+    promise: observeEventPollPublication({ ...input, signal: controller.signal }),
+    cancel: () => controller.abort()
+  };
+}
+
+async function observeEventPollPublication(input: {
+  db: ReturnType<typeof eventsDatabase>;
+  eventId: string;
+  startedAt: number;
+  signal: AbortSignal;
+}): Promise<StoredEventRecord> {
+  let event = requireStoredEvent(input.db, input.eventId);
+  if (event.pollWaMsgId) {
+    return event;
+  }
+  const deadline = input.startedAt + EVENT_POLL_PUBLICATION_OBSERVATION_MS;
+  while (!input.signal.aborted && Date.now() < deadline) {
+    await waitForEventPollObservation(Math.min(
+      EVENT_POLL_PUBLICATION_OBSERVATION_INTERVAL_MS,
+      deadline - Date.now()
+    ), input.signal);
+    event = requireStoredEvent(input.db, input.eventId);
+    if (event.pollWaMsgId) {
+      return event;
+    }
+  }
+  return event;
+}
+
+function requireStoredEvent(
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string
+): StoredEventRecord {
+  const event = getEvent(db, eventId);
+  if (!event) {
+    throw new Error(`Durably recorded event ${eventId} is unavailable during publication observation.`);
+  }
+  return event;
+}
+
+function safelyGetStoredEvent(
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string
+): StoredEventRecord | undefined {
+  try {
+    return getEvent(db, eventId);
+  } catch {
+    return undefined;
+  }
+}
+
+function waitForEventPollObservation(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, Math.max(0, delayMs));
+    signal.addEventListener('abort', done, { once: true });
+    if (signal.aborted) {
+      done();
+    }
+  });
+}
+
+function eventCreatorPublicationNotificationIdempotencyKey(eventId: string): string {
+  return `community-events:event-creation:${eventId}:creator-notification`;
 }
 
 async function eventProfileSnapshotIsCurrent(input: {

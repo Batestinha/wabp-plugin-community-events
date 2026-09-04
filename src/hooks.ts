@@ -375,8 +375,9 @@ export async function recoverEventQueueHandoffs(
   const attendanceLifecycleJobs = await recoverEventAttendanceLifecycleJobs(context, options.now);
   const pollReplacementJobs = await recoverEventPollReplacementJobs(context, options.now);
   const closeJobs = await recoverEventCloseJobs(context, options);
+  const completionJobs = await recoverEventCompletionJobs(context, options);
   const startTimeAgreementJobs = await recoverEventStartTimeAgreementJobs(context, options.now);
-  return attendanceLifecycleJobs + pollReplacementJobs + closeJobs + startTimeAgreementJobs;
+  return attendanceLifecycleJobs + pollReplacementJobs + closeJobs + completionJobs + startTimeAgreementJobs;
 }
 
 export async function recoverEventJobs(

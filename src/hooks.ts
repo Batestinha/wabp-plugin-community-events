@@ -105,6 +105,7 @@ import {
   listEventCalendarPublicationGenerations,
   listInterruptedEventPreCreateClaims,
   listOpenPollEvents,
+  listUnclaimedFailedEventCloseCandidates,
   listEventPollAssistantAttendanceRecoveries,
   listFailedProvisioningEvents,
   listPendingUnplannedEventFinalizations,
@@ -143,6 +144,7 @@ import {
   persistEventPollAssistantAttendanceSnapshot,
   rearmClaimedEventPreCreateProvisioningAttempt,
   rearmClaimedKnownChildEventProvisioningForStartup,
+  rearmUnclaimedFailedEventClose,
   releaseEventCleanupClaim,
   releaseExpiredEventCleanupClaims,
   resolvedEventCalendarId,
@@ -202,8 +204,60 @@ type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' 
 
 const EVENT_EDIT_REPAIR_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000] as const;
 const EVENT_ANNOUNCEMENT_DELIVERY_RETRY_MS = 60_000;
+const EVENT_CLOSE_INFRASTRUCTURE_RETRY_MS = 60_000;
 export const EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS = 30_000;
 export const EVENT_QUEUE_HANDOFF_RECOVERY_SWEEP_MS = 30_000;
+
+const RETRYABLE_PRISMA_EVENT_CLOSE_CODES = new Set([
+  'P1001',
+  'P1002',
+  'P1008',
+  'P1017',
+  'P2024',
+  'P2028',
+  'P2034'
+]);
+
+const RETRYABLE_PRISMA_EVENT_CLOSE_MESSAGES = [
+  "Can't reach database server at",
+  'Timed out fetching a new connection from the connection pool',
+  'Transaction API error: Unable to start a transaction in the given time',
+  'Transaction API error: Transaction not found',
+  'Transaction API error: Transaction already closed',
+  'Server has closed the connection'
+] as const;
+
+function isRetryableEventCloseInfrastructureError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; current !== undefined && current !== null && depth < 5; depth += 1) {
+    if (seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    const code = typeof current === 'object' && 'code' in current
+      ? (current as { code?: unknown }).code
+      : undefined;
+    if (typeof code === 'string' && RETRYABLE_PRISMA_EVENT_CLOSE_CODES.has(code)) {
+      return true;
+    }
+    const message = typeof current === 'string'
+      ? current
+      : current instanceof Error
+        ? current.message
+        : typeof current === 'object' && 'message' in current &&
+            typeof (current as { message?: unknown }).message === 'string'
+          ? (current as { message: string }).message
+          : '';
+    if (RETRYABLE_PRISMA_EVENT_CLOSE_MESSAGES.some((fragment) => message.includes(fragment))) {
+      return true;
+    }
+    current = typeof current === 'object' && 'cause' in current
+      ? (current as { cause?: unknown }).cause
+      : undefined;
+  }
+  return false;
+}
 
 interface EventRecoveryOptions {
   now?: Date | undefined;
@@ -744,8 +798,35 @@ export async function recoverEventProvisioningJobs(
 
 export async function recoverEventCloseJobs(context: PluginRuntimeContext, options: EventRecoveryOptions = {}): Promise<number> {
   const db = eventsDatabase(context.databases);
-  const records = listOpenPollEvents(db);
   const now = options.now ?? new Date();
+  for (const failed of listUnclaimedFailedEventCloseCandidates(db)) {
+    if (!failed.error || !failed.pollWaMsgId || !isRetryableEventCloseInfrastructureError(failed.error)) {
+      continue;
+    }
+    const rearmedAt = nextEventRevisionTimestamp(failed.updatedAt, now);
+    const rearmed = rearmUnclaimedFailedEventClose(db, {
+      eventId: failed.id,
+      scopeId: failed.scopeId,
+      expectedUpdatedAt: failed.updatedAt,
+      expectedPollGeneration: failed.pollGeneration,
+      expectedPollWaMsgId: failed.pollWaMsgId,
+      expectedError: failed.error,
+      rearmedAt
+    });
+    if (rearmed) {
+      appendEventLog(db, {
+        eventId: failed.id,
+        action: 'events.close.infrastructure_failure_rearmed',
+        metadata: {
+          reason: failed.error,
+          pollGeneration: failed.pollGeneration,
+          pollWaMsgId: failed.pollWaMsgId,
+          rearmedAt
+        }
+      });
+    }
+  }
+  const records = listOpenPollEvents(db);
   let enqueued = 0;
   for (const candidate of records) {
     if (hasActiveEventPollReplacement(db, candidate.id)) {
@@ -3051,6 +3132,53 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         ...pollReceiptReleaseActions,
         audit('events.close.side_effect_failed', { eventId: record.id, reason })
       ];
+    }
+    if (!preCreateClaim && isRetryableEventCloseInfrastructureError(error)) {
+      const current = getEvent(db, record.id);
+      if (
+        current &&
+        current.eventStatus === 'active' &&
+        current.groupLifecycleStatus === 'poll_open' &&
+        current.pollGeneration === closingPollGeneration &&
+        current.pollWaMsgId === closingPollWaMsgId &&
+        !hasActiveEventPollReplacement(db, current.id)
+      ) {
+        const retryAt = new Date(Date.now() + EVENT_CLOSE_INFRASTRUCTURE_RETRY_MS);
+        appendEventLog(db, {
+          eventId: current.id,
+          action: 'events.close.infrastructure_retry_scheduled',
+          metadata: {
+            reason,
+            pollGeneration: current.pollGeneration,
+            pollWaMsgId: current.pollWaMsgId,
+            retryAt: retryAt.toISOString()
+          }
+        });
+        context.logger.warn(
+          { error, eventId: current.id, scopeId: current.scopeId, retryAt },
+          'Event close deferred after a retryable infrastructure failure'
+        );
+        return [{
+          type: 'plugin.enqueueJob',
+          pluginId: EVENTS_PLUGIN_ID,
+          jobName: EVENTS_JOBS.close,
+          scopeId: current.scopeId,
+          ...(current.groupId ? { groupId: current.groupId } : {}),
+          ...(current.groupWid ? { groupWid: current.groupWid } : {}),
+          runAt: retryAt,
+          payload: {
+            eventId: current.id,
+            pollGeneration: current.pollGeneration,
+            ...(current.pollWaMsgId ? { pollWaMsgId: current.pollWaMsgId } : {})
+          },
+          dedupeKey: `${EVENTS_JOBS.close}:${current.id}:infrastructure:${current.pollGeneration}:${retryAt.toISOString()}`
+        }, audit('events.close.infrastructure_retry_scheduled', {
+          eventId: current.id,
+          pollGeneration: current.pollGeneration,
+          reason,
+          retryAt: retryAt.toISOString()
+        })];
+      }
     }
     if (error instanceof PendingEventAttendanceLifecycleError) {
       record = getEvent(db, record.id) ?? record;

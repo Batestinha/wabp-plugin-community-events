@@ -3134,6 +3134,27 @@ export function listOpenPollEvents(db: PluginDatabase): StoredEventRecord[] {
   ).map(eventFromRow);
 }
 
+export function listUnclaimedFailedEventCloseCandidates(db: PluginDatabase): StoredEventRecord[] {
+  return db.all<EventRow>(
+    `SELECT * FROM event_records
+      WHERE origin IN ('created', 'adopted_poll')
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND calendar_status = 'hidden'
+        AND poll_wa_msg_id IS NOT NULL
+        AND subgroup_chat_id IS NULL
+        AND closed_at IS NULL
+        AND cancelled_at IS NULL
+        AND cleaned_at IS NULL
+        AND error IS NOT NULL
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL
+        AND provisioning_recovery_halted_at IS NULL
+      ORDER BY updated_at ASC, id ASC`
+  ).map(eventFromRow);
+}
+
 export function listInterruptedEventPreCreateClaims(db: PluginDatabase): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records
@@ -6664,6 +6685,55 @@ export function markUnclaimedEventFailed(db: PluginDatabase, input: {
     input.expectedPollWaMsgId
   );
   return result.changes === 1;
+}
+
+export function rearmUnclaimedFailedEventClose(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  expectedUpdatedAt: string;
+  expectedPollGeneration: number;
+  expectedPollWaMsgId: string;
+  expectedError: string;
+  rearmedAt: string;
+}): boolean {
+  return db.run(
+    `UPDATE event_records
+        SET event_status = 'active',
+            group_lifecycle_status = 'poll_open',
+            calendar_status = 'included',
+            error = NULL,
+            updated_at = ?
+      WHERE id = ?
+        AND scope_id = ?
+        AND origin IN ('created', 'adopted_poll')
+        AND event_status = 'failed'
+        AND group_lifecycle_status = 'none'
+        AND calendar_status = 'hidden'
+        AND subgroup_chat_id IS NULL
+        AND closed_at IS NULL
+        AND cancelled_at IS NULL
+        AND cleaned_at IS NULL
+        AND updated_at = ?
+        AND poll_generation = ?
+        AND poll_wa_msg_id = ?
+        AND error = ?
+        AND provisioning_recovery_generation IS NULL
+        AND provisioning_recovery_attempt IS NULL
+        AND provisioning_recovery_next_run_at IS NULL
+        AND provisioning_recovery_halted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM event_poll_replacements
+           WHERE event_poll_replacements.event_id = event_records.id
+             AND event_poll_replacements.status NOT IN ('completed', 'aborted')
+        )`,
+    input.rearmedAt,
+    input.eventId,
+    input.scopeId,
+    input.expectedUpdatedAt,
+    input.expectedPollGeneration,
+    input.expectedPollWaMsgId,
+    input.expectedError
+  ).changes === 1;
 }
 
 export function claimInitialEventPreCreateProvisioningAttempt(db: PluginDatabase, input: {

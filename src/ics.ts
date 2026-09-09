@@ -8,8 +8,8 @@ import { renderEventTemplate } from './flow';
 import type { StoredEventRecord } from './store';
 
 const CALENDAR_EXPORT_ROOT = 'calendar-exports';
-const DEFAULT_CONTAINER_APP_UID = 1000;
-const DEFAULT_CONTAINER_APP_GID = 1000;
+const DEFAULT_CONTAINER_APP_UID = 62003;
+const DEFAULT_CONTAINER_APP_GID = 62003;
 const CALENDAR_SEQUENCE_EPOCH_MS = Date.UTC(2020, 0, 1);
 
 export interface PreparedScopeCalendar {

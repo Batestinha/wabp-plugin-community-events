@@ -26,8 +26,9 @@ export const eventActionCancelInputSchema = z.object({
 export type EventActionEditInput = z.infer<typeof eventActionEditInputSchema>;
 export type EventActionCancelInput = z.infer<typeof eventActionCancelInputSchema>;
 
-const eventId = { type: 'string', title: 'Event', format: 'event-reference' };
-const outputSchema = { type: 'object', properties: { eventId: { type: 'string' }, updatedAt: { type: 'string', format: 'date-time' } }, required: ['eventId', 'updatedAt'] };
+const eventId = { type: 'string', title: 'Event', format: 'event-reference', 'x-workflow-target': true };
+const outputSchema = { type: 'object', properties: { eventId: { type: 'string' }, updatedAt: { type: 'string', format: 'date-time' },
+  previousUpdatedAt: { type: 'string', format: 'date-time' }, appliedFields: { type: 'object', additionalProperties: {} } }, required: ['eventId', 'updatedAt'] };
 const editInputSchema = { type: 'object', additionalProperties: false, required: ['eventId', 'patch'], properties: {
   eventId, patch: { type: 'object', additionalProperties: false, properties: {
     answers: { type: 'object', title: 'Event fields', additionalProperties: { type: 'string' } },

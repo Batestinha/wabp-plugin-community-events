@@ -87,7 +87,7 @@ async function describe(context: PluginServiceRegistrationContext, operation: Op
   return { eventId: target.event.id, label: target.event.groupTitle, timezone: target.event.timezone,
     revision: target.event.updatedAt, inputSchema: eventWorkflowActions.find((action) => action.actionId.endsWith(`.${operation}`))!.inputSchema,
     fields: operation === 'edit' ? target.profile.questions.map((question) => ({
-      key: question.key, label: question.prompt, type: question.type, current: target.event.answers[question.key] ?? '',
+      key: question.key, path: ['patch', 'answers', question.key], label: question.prompt, type: 'string', required: false, current: target.event.answers[question.key] ?? '',
       question
     })) : [],
     current: operation === 'edit' ? eventUpdatePrefill(target.event, target.profile) : { eventStatus: target.event.eventStatus }
@@ -156,7 +156,9 @@ function prepareEdit(target: Awaited<ReturnType<typeof requireEvent>>, input: Ev
   if (input.patch.endLocalDate || input.patch.endLocalTime) changes.push(`${target.t('official.community-events.workflow.end')}: ${answers.endLocalDate} ${answers.endLocalTime ?? ''}`);
   if (input.patch.location) changes.push(`${target.t('official.community-events.workflow.location')}: ${location.displayLabel} (${location.latitude}, ${location.longitude})`);
   if (input.confirmPastCompletion) changes.push(target.t('official.community-events.workflow.allowCompletion'));
-  return { answers, location, changes: changes.join('; ') };
+  const expected = { ...target.event, ...materialized, endsAt: materialized.endsAt.toISOString() };
+  const appliedFields = Object.fromEntries(editFields(input).map((field) => [field, currentField(expected as StoredEventRecord, field)]));
+  return { answers, location, changes: changes.join('; '), appliedFields };
 }
 
 async function execute(context: PluginServiceRegistrationContext, operation: Operation, request: z.infer<typeof executeSchema>, call: PluginServiceCallContext): Promise<WorkflowActionResult> {
@@ -170,16 +172,29 @@ async function execute(context: PluginServiceRegistrationContext, operation: Ope
     return inspect(context, request.operationId, call);
   }
   const guard = z.object({ eventId: z.string(), revision: z.string(), profileDigest: z.string(), timezone: z.string(), fields: z.record(z.unknown()) }).strict().parse(request.guard);
-  const predecessorRevision = Object.values(request.predecessors).some((output) => output && typeof output === 'object'
-    && (output as Record<string, unknown>).eventId === eventId && (output as Record<string, unknown>).updatedAt === target.event.updatedAt);
+  const predecessors = Object.values(request.predecessors).filter((output): output is Record<string, unknown> => Boolean(output)
+    && typeof output === 'object' && (output as Record<string, unknown>).eventId === eventId);
+  const revisions = new Set([guard.revision]);
+  // A whole-event cancellation must retain an unbroken chain from the approved revision.
+  for (let index = 0; index < predecessors.length; index += 1) for (const output of predecessors) {
+    if (typeof output.previousUpdatedAt === 'string' && revisions.has(output.previousUpdatedAt) && typeof output.updatedAt === 'string') revisions.add(output.updatedAt);
+  }
   const conflict = guard.eventId !== eventId || guard.timezone !== target.event.timezone || guard.profileDigest !== workflowDigest(json(target.profile))
-    || (!predecessorRevision && Object.entries(guard.fields).some(([field, value]) => canonicalJson(value) !== canonicalJson(currentField(target.event, field))));
+    || Object.entries(guard.fields).some(([field, value]) => {
+      const current = canonicalJson(currentField(target.event, field));
+      if (canonicalJson(value) === current) return false;
+      if (field === '*') return !revisions.has(target.event.updatedAt);
+      // A preceding edit authorizes only the fields and values it actually proposed.
+      return !predecessors.some((output) => output.appliedFields && typeof output.appliedFields === 'object'
+        && Object.hasOwn(output.appliedFields, field) && canonicalJson((output.appliedFields as Record<string, unknown>)[field]) === current);
+    });
   if (conflict) return { status: 'blocked', reason: target.t('official.community-events.workflow.conflict'), retryable: false };
   const prepared = operation === 'edit' ? prepareEdit(target, eventActionEditInputSchema.parse(request.input)) : undefined;
   if (operation === 'edit' && !context.platform.workflowTransport) throw new Error('Event action transport is unavailable');
   const now = new Date().toISOString();
   db.run(`INSERT INTO event_workflow_operations (operation_id, scope_id, actor_identity_id, event_id, action, input_digest, input_json, guard_json, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`, request.operationId, call.scopeId, call.actorIdentityId!, eventId, operation, digest, canonicalJson(request.input), canonicalJson(request.guard), now, now);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`, request.operationId, call.scopeId, call.actorIdentityId!, eventId, operation, digest, canonicalJson(request.input),
+    canonicalJson({ ...request.guard, previousUpdatedAt: target.event.updatedAt, appliedFields: prepared?.appliedFields ?? {} }), now, now);
   const runtime = requireOfficialCommandRuntime(target.domain);
   let result: WorkflowActionResult;
   if (operation === 'edit') {
@@ -208,6 +223,7 @@ async function execute(context: PluginServiceRegistrationContext, operation: Ope
         ? { status: 'pending', operationId: request.operationId, summary: target.t('official.community-events.workflow.pending') }
         : { status: 'blocked', reason: cancelled.reason, retryable: false };
   }
+  if (result.status === 'completed') result.output = { ...result.output, previousUpdatedAt: target.event.updatedAt, appliedFields: prepared?.appliedFields ?? {} };
   saveResult(db, request.operationId, result);
   return result;
 }
@@ -227,9 +243,17 @@ async function inspect(context: PluginServiceRegistrationContext, operationId: s
     && cancellationSettled(db, row.event_id, eventActionCancelInputSchema.parse(JSON.parse(row.input_json)).deleteAnnouncementMessages)
     : (repair?.status === 'completed' || replacement?.status === 'completed');
   if (completed) {
-    const result: WorkflowActionResult = { status: 'completed', output: { eventId: target.event.id, updatedAt: target.event.updatedAt }, summary: target.t('official.community-events.workflow.applied', { event: target.event.groupTitle }) };
+    const stored = JSON.parse(row.guard_json) as { appliedFields?: Record<string, unknown>; previousUpdatedAt?: string };
+    const result: WorkflowActionResult = { status: 'completed', output: { eventId: target.event.id,
+      updatedAt: repair?.expectedEventUpdatedAt ?? replacement?.swappedAt ?? target.event.updatedAt,
+      previousUpdatedAt: stored.previousUpdatedAt ?? '', appliedFields: stored.appliedFields ?? {} }, summary: target.t('official.community-events.workflow.applied', { event: target.event.groupTitle }) };
     saveResult(db, operationId, result);
     return result;
+  }
+  if (replacement?.status === 'aborted') return { status: 'blocked', reason: target.t('official.community-events.workflow.conflict'), retryable: false };
+  if (row.action === 'cancel' && listEventAnnouncementMessages(db, row.event_id).some((artifact) => artifact.kind !== 'cancellation_notice'
+    && artifact.deletionFinalizedAt && artifact.deletionStatus !== 'confirmed')) {
+    return { status: 'blocked', reason: target.t('official.community-events.workflow.cleanupReview'), retryable: false };
   }
   return { status: 'pending', operationId, summary: target.t('official.community-events.workflow.pending') };
 }

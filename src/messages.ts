@@ -18,6 +18,7 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.workflow.cancelled': 'Cancelled {event}.',
   'official.community-events.workflow.applied': 'Updated {event}.',
   'official.community-events.workflow.pending': 'The event change is recorded; its lifecycle updates are still pending.',
+  'official.community-events.workflow.cleanupReview': 'The event was cancelled, but message cleanup needs review.',
   'official.community-events.workflow.span': 'Event span',
   'official.community-events.workflow.end': 'End date and time',
   'official.community-events.workflow.location': 'Location',

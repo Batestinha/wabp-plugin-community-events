@@ -447,10 +447,19 @@ function withSavedEventAnswer(
     promptForState: (state: FlowState) => prompt(step.promptForState?.(state) ?? step.prompt)
   };
   if (step.kind === 'choice') {
-    const options = (choices: FlowOption[]): FlowOption[] => [
-      { label: current, value: value ?? null },
-      ...choices.filter((choice) => choice.value !== value)
-    ];
+    const options = (choices: FlowOption[]): FlowOption[] => {
+      const existing = choices.some((choice) => choice.value === value);
+      const configured = choices.map((choice) => choice.value === value
+        ? { ...choice, replyAliases: [...(choice.replyAliases ?? []), '='] }
+        : choice);
+      if (!existing) configured.push({ label: current, value: value ?? null, replyAliases: ['='] });
+      if (optional) {
+        const unset = configured.find((choice) => choice.value === null);
+        if (unset) unset.replyAliases = [...(unset.replyAliases ?? []), '-'];
+        else configured.push({ label: t('official.community-events.flow.unset'), value: null, replyAliases: ['-'] });
+      }
+      return configured;
+    };
     return {
       ...shared,
       minSelections: 1,
@@ -458,16 +467,17 @@ function withSavedEventAnswer(
       optionsForState: (state) => options(step.optionsForState?.(state) ?? step.options ?? [])
     };
   }
+  const keepSavedValue: NonNullable<FlowStep['resolveInput']> = (input) => {
+    if (!value) {
+      return step.resolveSkippedInput?.(input) ?? { status: 'use-value', value: null };
+    }
+    // Reuse the original validators, including end-time validation against edited dates.
+    return step.resolveInput?.({ ...input, input: value }) ?? { status: 'use-value', value };
+  };
   return {
     ...shared,
-    resolveInput: (input) => {
-      if (input.input !== '1') return step.resolveInput?.(input);
-      if (!value) {
-        return step.resolveSkippedInput?.(input) ?? { status: 'use-value', value: null };
-      }
-      // Reuse the original validators, including end-time validation against edited dates.
-      return step.resolveInput?.({ ...input, input: value }) ?? { status: 'use-value', value };
-    }
+    resolveInput: (input) => input.input === '=' ? keepSavedValue(input) : step.resolveInput?.(input),
+    resolveSkippedInput: (input) => input.input === '=' ? keepSavedValue(input) : step.resolveSkippedInput?.(input)
   };
 }
 

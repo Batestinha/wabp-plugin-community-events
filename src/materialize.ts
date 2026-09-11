@@ -8,6 +8,7 @@ import {
 import {
   EVENT_DATE_TEMPLATE_TOKENS,
   EVENT_PROFILE_TEMPLATE_TOKENS,
+  EVENT_SPAN_TEMPLATE_TOKENS,
   type EventProfile
 } from './config';
 import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseClass } from './store';
@@ -86,7 +87,8 @@ export function materializeEventLifecycle(input: {
   const participantTextTokens = [
     ...profile.questions.map((question) => question.key),
     ...EVENT_DATE_TEMPLATE_TOKENS,
-    ...EVENT_PROFILE_TEMPLATE_TOKENS
+    ...EVENT_PROFILE_TEMPLATE_TOKENS,
+    ...EVENT_SPAN_TEMPLATE_TOKENS
   ];
   const participantTextValues = eventTemplateValues(templateInput);
   const pollOptions = profile.poll.options.map((option) => ({

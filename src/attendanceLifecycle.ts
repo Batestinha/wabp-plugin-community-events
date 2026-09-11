@@ -132,7 +132,8 @@ export async function preflightEventAttendanceLifecycle(
 
 export async function ensureEventAttendanceLifecycle(
   caller: EventAttendanceLifecycleCaller,
-  request: PollAssistantLifecycleEnsureInput
+  request: PollAssistantLifecycleEnsureInput,
+  cutoffAt?: string
 ): Promise<PollAssistantLifecycleEnsureOutput> {
   const services = requireServices(caller.services);
   const output = pollAssistantLifecycleEnsureOutputSchema.parse(
@@ -146,7 +147,7 @@ export async function ensureEventAttendanceLifecycle(
       input: request
     })
   );
-  assertAttendanceLifecycleEnvelope(request, output);
+  assertAttendanceLifecycleEnvelope(request, output, cutoffAt);
   return output;
 }
 
@@ -164,7 +165,8 @@ export async function inspectEventAttendanceLifecycle(
 
 export async function finalizeEventAttendanceLifecycle(
   caller: EventAttendanceLifecycleCaller,
-  lifecycle: StoredPollAssistantEventAttendanceLifecycle
+  lifecycle: StoredPollAssistantEventAttendanceLifecycle,
+  cutoffAt?: string
 ): Promise<PollAssistantLifecycleFinalizeOutput> {
   const services = requireServices(caller.services);
   const output = pollAssistantLifecycleFinalizeOutputSchema.parse(
@@ -178,11 +180,12 @@ export async function finalizeEventAttendanceLifecycle(
       input: {
         groupWid: lifecycle.request.groupWid,
         sourceIdempotencyKey: lifecycle.sourceIdempotencyKey,
-        finalizationIdempotencyKey: `${lifecycle.sourceIdempotencyKey}:finalize`
+        finalizationIdempotencyKey: `${lifecycle.sourceIdempotencyKey}:finalize`,
+        ...(cutoffAt ? { cutoffAt } : {})
       }
     })
   );
-  assertAttendanceLifecycleEnvelope(lifecycle.request, output);
+  assertAttendanceLifecycleEnvelope(lifecycle.request, output, cutoffAt);
   assertStoredAttendanceLifecycleReferences(lifecycle, output);
   return output;
 }
@@ -190,7 +193,8 @@ export async function finalizeEventAttendanceLifecycle(
 export async function cancelEventAttendanceLifecycle(
   caller: EventAttendanceLifecycleCaller,
   lifecycle: StoredPollAssistantEventAttendanceLifecycle,
-  reason: string
+  reason: string,
+  cutoffAt?: string
 ): Promise<{
   acknowledgedAt: string;
   lifecycle: PollAssistantLifecycleCancelOutput;
@@ -212,7 +216,7 @@ export async function cancelEventAttendanceLifecycle(
       }
     })
   );
-  assertAttendanceLifecycleEnvelope(lifecycle.request, output);
+  assertAttendanceLifecycleEnvelope(lifecycle.request, output, cutoffAt ?? lifecycle.snapshot?.cutoffAt);
   assertStoredAttendanceLifecycleReferences(lifecycle, output);
   return {
     acknowledgedAt: new Date().toISOString(),
@@ -309,7 +313,8 @@ function assertAttendanceLifecycleEnvelope(
   output: Exclude<PollAssistantLifecycleInspectOutput, { kind: 'unavailable' }>
     | PollAssistantLifecycleEnsureOutput
     | PollAssistantLifecycleFinalizeOutput
-    | ReturnType<typeof pollAssistantLifecycleCancelOutputSchema.parse>
+    | ReturnType<typeof pollAssistantLifecycleCancelOutputSchema.parse>,
+  cutoffAt?: string
 ): void {
   const expectedOptions = request.definition.options.map((option) => ({
     id: option.id,
@@ -331,7 +336,7 @@ function assertAttendanceLifecycleEnvelope(
       && request.definition.rule.kind === 'distribution'
       && request.definition.rule.allowMultipleAnswers
     )
-    || output.closesAt !== expectedClosesAt
+    || (output.closesAt !== expectedClosesAt && output.closesAt !== cutoffAt)
     || JSON.stringify(output.options) !== JSON.stringify(expectedOptions)
   ) {
     throw new Error('Poll Assistant returned a conflicting Community Events attendance lifecycle.');

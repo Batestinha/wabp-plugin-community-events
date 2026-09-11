@@ -1442,7 +1442,8 @@ async function reconcileEventAttendanceLifecycleJob(
       const cancellation = await cancelEventAttendanceLifecycle(
         caller,
         lifecycle,
-        event.cancelReason ?? 'event cancelled'
+        event.cancelReason ?? 'event cancelled',
+        event.pollCloseCutoffAt
       );
       bindEventPollAssistantAttendanceLifecycle(db, {
         eventId: event.id,
@@ -1481,7 +1482,7 @@ async function reconcileEventAttendanceLifecycleJob(
         reason: `event lifecycle is ${event.eventStatus}/${event.groupLifecycleStatus}`
       })];
     }
-    const ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request);
+    const ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request, event.pollCloseCutoffAt);
     const updated = bindEventPollAssistantAttendanceLifecycle(db, {
       eventId: event.id,
       scopeId: event.scopeId,
@@ -2518,7 +2519,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         };
         let ensured: Awaited<ReturnType<typeof ensureEventAttendanceLifecycle>>;
         try {
-          ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request);
+          ensured = await ensureEventAttendanceLifecycle(caller, lifecycle.request, record.pollCloseCutoffAt);
         } catch (error) {
           throw new PendingEventAttendanceLifecycleError(
             error instanceof Error ? error.message : String(error),
@@ -2544,7 +2545,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
         }
         let finalized;
         try {
-          finalized = await finalizeEventAttendanceLifecycle(caller, lifecycle);
+          finalized = await finalizeEventAttendanceLifecycle(caller, lifecycle, record.pollCloseCutoffAt);
         } catch (error) {
           throw new PendingEventAttendanceLifecycleError(
             error instanceof Error ? error.message : String(error),

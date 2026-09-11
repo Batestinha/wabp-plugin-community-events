@@ -131,6 +131,7 @@ import {
   renewClaimedEventCommunityLinkLease,
   renewClaimedKnownChildEventProvisioningLease,
   recordEventAnnouncementMessage,
+  requestEventPollClose,
   resolvedEventCalendarId,
   updateEventStructuredData,
   type EventAnnouncementDeliveryIntent,
@@ -198,6 +199,7 @@ interface EventUpdateDraft {
 }
 
 interface PendingEventEditSelection {
+  operation?: 'edit' | 'poll_close' | undefined;
   id: string;
   responseChatId: string;
   scopeId: string;
@@ -356,6 +358,23 @@ export function registerEventsCommands(context: PluginCommandContext): void {
       requiresConfirmation: true
     }
   }), async (ctx) => startEventEditFlow(context, ctx));
+
+  router.register('event', 'poll', eventCommand({
+    auditAction: 'events.poll.close',
+    usage: '/event poll close [event ID or title]',
+    topicId: 'close-event-polls',
+    descriptionKey: 'official.community-events.help.pollClose',
+    exampleKey: 'official.community-events.help.pollClose.example',
+    requiresCurrentManagedGroupMembership: false,
+    privateManagedTargetArgPosition: false,
+    assistant: {
+      intentTags: ['event', 'poll', 'close'],
+      argumentHints: ['close [event ID or title]'],
+      examples: ['/event poll close', '/event poll close evt-1234abcd'],
+      executable: true,
+      requiresConfirmation: false
+    }
+  }), async (ctx) => startEventPollClose(context, ctx));
 
   router.register('event', 'list', eventCommand({
     mutation: 'none',
@@ -588,6 +607,70 @@ async function startEventEditFlow(context: PluginCommandContext, ctx: CommandCon
   });
 }
 
+function eventPollIsOpen(event: StoredEventRecord): boolean {
+  return event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open' && Boolean(event.pollWaMsgId);
+}
+
+async function startEventPollClose(context: PluginCommandContext, ctx: CommandContext) {
+  if (ctx.command.args[0]?.toLowerCase() !== 'close') {
+    return { handled: true, text: ctx.t('official.community-events.pollClose.usage') };
+  }
+  const actor = eventAuthorizationActor(ctx);
+  if (!actor) return { handled: true, text: ctx.t('official.community-events.pollClose.permissionDenied') };
+  const runtime = requireOfficialCommandRuntime(context);
+  const scopeId = requireScopeId(ctx);
+  const query = ctx.command.args.slice(1).join(' ').trim();
+  const openEvents = listScopeEvents(eventsDatabase(runtime.databases), scopeId).filter(eventPollIsOpen);
+  const matches = query ? findEventMatches(openEvents, query, ctx.locale) : openEvents;
+  const candidates = matches.filter((event) => event.actorIdentityId === actor.identityId);
+  if (!candidates.length) {
+    return { handled: true, text: ctx.t(query && matches.length
+      ? 'official.community-events.pollClose.permissionDenied'
+      : 'official.community-events.pollClose.noEvents') };
+  }
+  await cancelActiveEventEditSelectionForActor(context, runtime, actor.identityId);
+  if (candidates.length > 1) {
+    return startEventEditSelection(context, ctx, { scopeId, actor, query, candidates, operation: 'poll_close' });
+  }
+  const result = await closeSelectedEventPoll(runtime, candidates[0]!, actor);
+  return { handled: true, text: ctx.t(result.messageKey, result.params) };
+}
+
+async function closeSelectedEventPoll(
+  runtime: OfficialPluginCommandRuntime,
+  event: StoredEventRecord,
+  actor: EventAuthorizationPrincipal
+): Promise<{ messageKey: string; params?: Record<string, string> }> {
+  if (event.actorIdentityId !== actor.identityId) {
+    return { messageKey: 'official.community-events.pollClose.permissionDenied' };
+  }
+  const config = parseEventsConfig(await runtime.configFor(event.scopeId, actor.identityId));
+  if (!config.enabled) return { messageKey: 'official.community-events.disabled' };
+  const db = eventsDatabase(runtime.databases);
+  const requested = requestEventPollClose(db, {
+    eventId: event.id, scopeId: event.scopeId, actorIdentityId: actor.identityId, requestedAt: new Date()
+  });
+  if (!requested) return { messageKey: 'official.community-events.pollClose.unavailable' };
+  try {
+    await runtime.enqueuePluginJob({
+      jobName: EVENTS_JOBS.close,
+      scopeId: requested.scopeId,
+      ...(requested.groupId ? { groupId: requested.groupId } : {}),
+      ...(requested.groupWid ? { groupWid: requested.groupWid } : {}),
+      runAt: new Date(requested.closeAt),
+      payload: { eventId: requested.id, pollGeneration: requested.pollGeneration, pollWaMsgId: requested.pollWaMsgId },
+      dedupeKey: `${EVENTS_JOBS.close}:${requested.id}:manual:${requested.pollGeneration}:${requested.pollCloseCutoffAt}`
+    });
+  } catch {
+    // The durable cutoff makes the existing queue-handoff recovery sweep retry this close.
+    appendEventLog(db, { eventId: requested.id, action: 'events.poll.manual_close_enqueue_pending' });
+  }
+  return {
+    messageKey: 'official.community-events.pollClose.queued',
+    params: { title: eventDisplayTitle(requested), eventId: requested.id }
+  };
+}
+
 async function startEventEditSelection(
   context: PluginCommandContext,
   ctx: CommandContext,
@@ -596,11 +679,13 @@ async function startEventEditSelection(
     actor: EventAuthorizationActor;
     query: string;
     candidates: StoredEventRecord[];
+    operation?: 'edit' | 'poll_close' | undefined;
   }
 ) {
   const runtime = requireOfficialCommandRuntime(context);
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, input.actor);
   const pending: PendingEventEditSelection = {
+    ...(input.operation ? { operation: input.operation } : {}),
     id: randomUUID(),
     responseChatId: input.actor.deliveryChatId,
     scopeId: input.scopeId,
@@ -665,8 +750,8 @@ async function promptEventEditSelection(input: {
       subjectType: 'CommunityEventEditSelection',
       subjectId: input.pending.id,
       question: input.t(options.length > 0
-        ? 'official.community-events.edit.select'
-        : 'official.community-events.edit.noMatches', {
+        ? input.pending.operation === 'poll_close' ? 'official.community-events.pollClose.select' : 'official.community-events.edit.select'
+        : input.pending.operation === 'poll_close' ? 'official.community-events.pollClose.noMatches' : 'official.community-events.edit.noMatches', {
         query: input.pending.query
       }),
       options,
@@ -2405,7 +2490,8 @@ function eventStructuredDataChanged(
 }
 
 function eventIsEditable(event: StoredEventRecord): boolean {
-  return event.eventStatus === 'active' || event.eventStatus === 'completed';
+  return (event.eventStatus === 'active' || event.eventStatus === 'completed')
+    && !(event.groupLifecycleStatus === 'poll_open' && event.pollCloseCutoffAt);
 }
 
 function eventIsBareEditDiscoveryCandidate(
@@ -3026,7 +3112,9 @@ function registerEventEditSelectionHandler(context: PluginCommandContext): void 
       await clearActiveEventEditSelection(runtime, pending);
       await activeTransport.sendText(
         pending.responseChatId,
-        t('official.community-events.edit.wrongRequester'),
+        t(pending.operation === 'poll_close'
+          ? 'official.community-events.pollClose.permissionDenied'
+          : 'official.community-events.edit.wrongRequester'),
         { idempotencyKey: `community-events:event-edit-selection:${pending.id}:wrong-requester` }
       );
       await context.flowEngine.acknowledgePromptLock(lock.flowPromptId);
@@ -3040,7 +3128,9 @@ function registerEventEditSelectionHandler(context: PluginCommandContext): void 
         await clearActiveEventEditSelection(runtime, pending);
         await activeTransport.sendText(
           pending.responseChatId,
-          t(query ? 'official.community-events.cancelled' : 'official.community-events.edit.invalidSelection'),
+          t(query ? 'official.community-events.cancelled' : pending.operation === 'poll_close'
+            ? 'official.community-events.pollClose.unavailable'
+            : 'official.community-events.edit.invalidSelection'),
           { idempotencyKey: `community-events:event-edit-selection:${pending.id}:cancelled` }
         );
         await context.flowEngine.acknowledgePromptLock(lock.flowPromptId);
@@ -3050,11 +3140,13 @@ function registerEventEditSelectionHandler(context: PluginCommandContext): void 
       const db = eventsDatabase(runtime.databases);
       const actor = eventEditSelectionActor(pending);
       const currentMatches = findEventMatches(
-        listScopeEvents(db, pending.scopeId).filter(eventIsEditable),
+        listScopeEvents(db, pending.scopeId).filter(pending.operation === 'poll_close' ? eventPollIsOpen : eventIsEditable),
         query,
         pending.locale
       );
-      const candidates = await authorizedEventEditCandidates(context, currentMatches, actor);
+      const candidates = pending.operation === 'poll_close'
+        ? currentMatches.filter((event) => event.actorIdentityId === actor.identityId)
+        : await authorizedEventEditCandidates(context, currentMatches, actor);
       if (candidates.length === 1) {
         return completeEventEditSelection({
           context,
@@ -3091,7 +3183,9 @@ function registerEventEditSelectionHandler(context: PluginCommandContext): void 
       await clearActiveEventEditSelection(runtime, pending);
       await activeTransport.sendText(
         pending.responseChatId,
-        t('official.community-events.edit.invalidSelection'),
+        t(pending.operation === 'poll_close'
+          ? 'official.community-events.pollClose.unavailable'
+          : 'official.community-events.edit.invalidSelection'),
         { idempotencyKey: `community-events:event-edit-selection:${pending.id}:invalid` }
       );
       await context.flowEngine.acknowledgePromptLock(lock.flowPromptId);
@@ -3134,6 +3228,14 @@ async function completeEventEditSelection(input: {
     await input.context.flowEngine.acknowledgePromptLock(input.lockFlowPromptId);
     return true;
   };
+
+  if (input.pending.operation === 'poll_close') {
+    if (!event || event.scopeId !== input.pending.scopeId || !input.pending.candidateEventIds.includes(event.id)) {
+      return terminal('official.community-events.pollClose.noEvents');
+    }
+    const result = await closeSelectedEventPoll(input.runtime, event, actor);
+    return terminal(result.messageKey, result.params);
+  }
 
   if (
     !event
@@ -3567,7 +3669,8 @@ async function publishConfirmedEvent(input: {
       eventLocation: input.eventLocation
     });
     const now = new Date();
-    creationMode = materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
+    creationMode = (input.answers.spanKind === 'multi_day' && input.answers.pollPhase === 'unplanned')
+      || materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
     if (creationMode === 'unplanned') {
       const result = await createUnplannedEventLifecycle({
         context: input.context,
@@ -4814,7 +4917,7 @@ function eventCommand(input: {
   auditAction: string;
   permission?: string | undefined;
   usage: string;
-  topicId: 'overview-events' | 'create-events' | 'inspect-events' | 'cancel-events' | 'edit-events' | 'list-events';
+  topicId: 'overview-events' | 'create-events' | 'inspect-events' | 'cancel-events' | 'edit-events' | 'list-events' | 'close-event-polls';
   descriptionKey: string;
   exampleKey?: string | undefined;
   requiresCurrentManagedGroupMembership?: boolean | undefined;

@@ -56,6 +56,7 @@ export const eventsManifest: PluginManifest = {
     '/event new',
     '/event edit',
     '/event list',
+    '/event poll close',
     '/event status',
     '/event cancel'
   ],
@@ -113,6 +114,16 @@ export const eventsManifest: PluginManifest = {
         commands: ['/event status'],
         exampleKeys: ['official.community-events.help.status.example'],
         keywords: ['status', 'configuration']
+      },
+      {
+        topicId: 'close-event-polls',
+        titleKey: 'official.community-events.help.pollClose.title',
+        summaryKey: 'official.community-events.help.pollClose',
+        order: 45,
+        commands: ['/event poll close'],
+        instructionKeys: ['official.community-events.help.pollClose.instruction'],
+        exampleKeys: ['official.community-events.help.pollClose.example'],
+        keywords: ['poll', 'close', 'early', 'creator']
       },
       {
         topicId: 'cancel-events',
@@ -214,10 +225,10 @@ export const eventsManifest: PluginManifest = {
       },
       {
         id: 'event-edit-selection',
-        description: 'Pending interactive event selection before a structured event update starts.',
+        description: 'Pending interactive event selection before an event update or creator poll close.',
         mode: 'plugin-handler',
         scope: 'actor-chat',
-        commands: ['/event edit'],
+        commands: ['/event edit', '/event poll close'],
         cancellableStates: ['active'],
         terminalStates: ['completed', 'cancelled', 'expired'],
         effects: ['discard-pending-event-edit-selection']

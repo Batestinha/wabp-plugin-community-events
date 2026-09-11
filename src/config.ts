@@ -3,6 +3,9 @@ import type { TranslateFn } from '../../../platform/i18n';
 import { eventsMessages } from './messages';
 import { MAX_DAY_TRIP_DURATION_MINUTES, MIN_DAY_TRIP_DURATION_MINUTES } from './span';
 import { validateEventConditionalText, validateEventTemplateText } from './template';
+import { EVENT_SPAN_TEMPLATE_TOKENS } from './templateVariables';
+
+export { EVENT_SPAN_TEMPLATE_TOKENS } from './templateVariables';
 
 export const EVENT_DATE_QUESTION_TYPE = 'date';
 export const EVENT_TIME_QUESTION_TYPE = 'time';
@@ -36,7 +39,6 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'windDirection',
   'weatherCode'
 ] as const;
-export const EVENT_SPAN_TEMPLATE_TOKENS = ['spanKind', 'endsAt', 'endDate', 'endTime'] as const;
 export const EVENT_SYSTEM_TEMPLATE_TOKENS = [...new Set<string>([
   ...EVENT_DATE_TEMPLATE_TOKENS,
   ...EVENT_PROFILE_TEMPLATE_TOKENS,
@@ -384,7 +386,8 @@ const eventProfileObjectSchema = z.object({
   const templateTokens = new Set([
     ...questionKeys,
     ...EVENT_DATE_TEMPLATE_TOKENS,
-    ...EVENT_PROFILE_TEMPLATE_TOKENS
+    ...EVENT_PROFILE_TEMPLATE_TOKENS,
+    ...EVENT_SPAN_TEMPLATE_TOKENS
   ]);
   const groupHintTemplateTokens = new Set([
     ...templateTokens,

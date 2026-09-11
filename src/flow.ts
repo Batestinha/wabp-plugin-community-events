@@ -35,6 +35,7 @@ import {
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
 export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
+export const EVENT_POLL_PHASE_STEP_ID_PREFIX = 'poll-phase-';
 export const EVENT_END_DATE_STEP_ID_PREFIX = 'end-date-';
 export const EVENT_END_TIME_STEP_ID_PREFIX = 'end-time-';
 const EVENT_CONFIRM_VALUE = 'yes';
@@ -47,6 +48,7 @@ export interface EventFlowAnswers {
   startsAt: Date;
   endsAt: Date;
   spanKind: EventSpanKind;
+  pollPhase?: 'poll' | 'unplanned' | undefined;
   localDate: string;
   localTime?: string | undefined;
   endLocalDate?: string | undefined;
@@ -57,6 +59,7 @@ export interface EventFlowPrefill {
   profileId?: string | undefined;
   answers: Record<string, string>;
   spanKind?: EventSpanKind | undefined;
+  pollPhase?: 'poll' | 'unplanned' | undefined;
   endLocalDate?: string | undefined;
   endLocalTime?: string | undefined;
 }
@@ -128,6 +131,7 @@ function buildEventFlowDefinition(input: {
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
 }, flowType: string): FlowDefinition {
+  const askPollPhase = isEventCreationFlowType(flowType);
   const timezone = input.timezone ?? 'UTC';
   const locale = input.locale ?? 'en';
   const initialData = input.initialData ?? eventInitialFlowData(input.profiles, input.prefill, {
@@ -170,7 +174,7 @@ function buildEventFlowDefinition(input: {
         ? questionStepId(profile, nextQuestion)
         : input.askPrefilledQuestions
           ? spanStepId(profile)
-          : firstMissingSpanStepId(profile, initialData) ?? confirmStepId(profile);
+          : firstMissingSpanStepId(profile, initialData, askPollPhase) ?? confirmStepId(profile);
       if (question.type === EVENT_CHOICE_QUESTION_TYPE) {
         const initialOptions = initialEventQuestionChoiceOptions(profile, question, initialData);
         steps[stepId] = {
@@ -244,9 +248,23 @@ function buildEventFlowDefinition(input: {
       maxSelections: 1,
       nextStepIdByValue: {
         day_trip: confirmStepId(profile),
-        multi_day: endDateStepId(profile)
+        multi_day: askPollPhase ? pollPhaseStepId(profile) : endDateStepId(profile)
       }
     };
+    if (askPollPhase) {
+      steps[pollPhaseStepId(profile)] = {
+        id: pollPhaseStepId(profile),
+        kind: 'choice',
+        prompt: input.t('official.community-events.flow.pollPhase'),
+        options: [
+          { label: input.t('official.community-events.flow.pollPhase.poll'), value: 'poll' },
+          { label: input.t('official.community-events.flow.pollPhase.unplanned'), value: 'unplanned' }
+        ],
+        minSelections: 1,
+        maxSelections: 1,
+        nextStepId: endDateStepId(profile)
+      };
+    }
     steps[endDateStepId(profile)] = {
       id: endDateStepId(profile),
       kind: 'text',
@@ -327,7 +345,7 @@ function buildEventFlowDefinition(input: {
       ? input.askPrefilledQuestions
         ? firstQuestionStepId(initialProfile)
         : firstMissingQuestionStepId(initialProfile, initialData)
-          ?? firstMissingSpanStepId(initialProfile, initialData)
+          ?? firstMissingSpanStepId(initialProfile, initialData, askPollPhase)
           ?? confirmStepId(initialProfile)
       : EVENT_PROFILE_STEP_ID,
     context: 'either',
@@ -368,6 +386,9 @@ export function eventInitialFlowData(
   }
   if (prefill?.spanKind) {
     data[spanStepId(profile)] = [prefill.spanKind];
+  }
+  if (prefill?.pollPhase) {
+    data[pollPhaseStepId(profile)] = [prefill.pollPhase];
   }
   if (prefill?.endLocalDate) {
     const parsed = parseEventDateInput(prefill.endLocalDate, {
@@ -531,8 +552,11 @@ export function eventTemplateValues(input: {
     profileId: input.profile.id,
     profileLabel: input.profile.label,
     creatorDisplayName: input.creatorDisplayName,
+    isMultiDay: input.spanKind === 'multi_day' ? 'true' : '',
     ...(input.spanKind ? { spanKind: input.spanKind } : {}),
     ...(input.endsAt ? {
+      ...Object.fromEntries(Object.entries(eventDateTemplateTokens(input.endsAt, input.timezone, input.locale))
+        .map(([token, value]) => [`end${token[0]!.toUpperCase()}${token.slice(1)}`, value])),
       endsAt: formatEventDateTime(input.endsAt, input.timezone, input.locale),
       endDate: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, dateStyle: 'medium' }).format(input.endsAt),
       endTime: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, timeStyle: 'short' }).format(input.endsAt)
@@ -645,6 +669,9 @@ function eventFlowAnswersFromData(
     startsAt,
     endsAt,
     spanKind: selectedSpanKind,
+    pollPhase: selectedSpanKind === 'multi_day' && eventPollPhase(data, profile) === 'unplanned'
+      ? 'unplanned'
+      : 'poll',
     localDate: formatEventDateParts(startDate),
     ...(explicitStartTime ? { localTime: formatEventTimeParts(explicitStartTime) } : {}),
     ...(endLocalDate ? { endLocalDate } : {}),
@@ -661,13 +688,14 @@ function firstMissingQuestionStepId(profile: EventProfile, data: Record<string, 
   return question ? questionStepId(profile, question) : undefined;
 }
 
-function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unknown>): string | undefined {
+function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unknown>, askPollPhase = false): string | undefined {
   const rawSpanKind = data[spanStepId(profile)];
   const spanKind = Array.isArray(rawSpanKind) ? rawSpanKind[0] : rawSpanKind;
   if (spanKind !== 'day_trip' && spanKind !== 'multi_day') {
     return spanStepId(profile);
   }
   if (spanKind === 'multi_day') {
+    if (askPollPhase && !eventPollPhase(data, profile)) return pollPhaseStepId(profile);
     if (!isEventDateAnswer(data[endDateStepId(profile)])) return endDateStepId(profile);
     const endTime = data[endTimeStepId(profile)];
     if (endTime !== null && !isEventTimeAnswer(endTime)) return endTimeStepId(profile);
@@ -685,6 +713,16 @@ function confirmStepId(profile: EventProfile): string {
 
 function spanStepId(profile: EventProfile): string {
   return `${EVENT_SPAN_STEP_ID_PREFIX}${profile.id}`;
+}
+
+function pollPhaseStepId(profile: EventProfile): string {
+  return `${EVENT_POLL_PHASE_STEP_ID_PREFIX}${profile.id}`;
+}
+
+function eventPollPhase(data: Record<string, unknown>, profile: EventProfile): 'poll' | 'unplanned' | undefined {
+  const raw = data[pollPhaseStepId(profile)];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value === 'poll' || value === 'unplanned' ? value : undefined;
 }
 
 function endDateStepId(profile: EventProfile): string {
@@ -1168,7 +1206,7 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
   if (!answers) {
     return profile.label;
   }
-  return t('official.community-events.flow.confirmSummary', {
+  const summary = t('official.community-events.flow.confirmSummary', {
     profile: profile.label,
     startsAt: formatEventDateTime(answers.startsAt, timezone, locale),
     endsAt: formatEventDateTime(answers.endsAt, timezone, locale),
@@ -1176,6 +1214,11 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
       ? 'official.community-events.span.dayTrip'
       : 'official.community-events.span.multiDay')
   });
+  return answers.spanKind === 'multi_day' && eventPollPhase(state.data, profile)
+    ? `${summary}\n${t(answers.pollPhase === 'unplanned'
+      ? 'official.community-events.flow.pollPhase.unplanned'
+      : 'official.community-events.flow.pollPhase.poll')}`
+    : summary;
 }
 
 function dateErrorMessage(t: TranslateFn, reason: string): string {

@@ -2029,6 +2029,7 @@ export function beginEventPollReplacement(db: PluginDatabase, input: {
           AND updated_at = ?
           AND poll_wa_msg_id = ?
           AND poll_generation = ?
+          AND poll_close_cutoff_at IS NULL
           AND provisioning_recovery_generation IS NULL
           AND provisioning_recovery_attempt IS NULL
           AND provisioning_recovery_next_run_at IS NULL
@@ -3524,6 +3525,41 @@ export function updateEventCloseAt(db: PluginDatabase, input: {
     input.expectedUpdatedAt
   );
   return result.changes === 1;
+}
+
+export function requestEventPollClose(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  actorIdentityId: string;
+  requestedAt: Date;
+}): StoredEventRecord | undefined {
+  return db.transaction(() => {
+    const current = getEvent(db, input.eventId);
+    if (!current || current.scopeId !== input.scopeId || current.actorIdentityId !== input.actorIdentityId
+      || current.eventStatus !== 'active' || current.groupLifecycleStatus !== 'poll_open'
+      || !current.pollWaMsgId || hasActiveEventPollReplacement(db, current.id)) return undefined;
+    if (current.pollCloseCutoffAt || Date.parse(current.closeAt) <= input.requestedAt.getTime()) return current;
+    const cutoffAt = new Date(Math.min(input.requestedAt.getTime(), Date.parse(current.closeAt))).toISOString();
+    const updatedAt = nextEventRevisionTimestamp(current.updatedAt, input.requestedAt);
+    if (!updateEventCloseAt(db, {
+      eventId: current.id,
+      scopeId: current.scopeId,
+      expectedUpdatedAt: current.updatedAt,
+      closeAt: cutoffAt,
+      updatedAt
+    })) return undefined;
+    const frozen = db.run(
+      'UPDATE event_records SET poll_close_cutoff_at = ? WHERE id = ? AND scope_id = ? AND updated_at = ?',
+      cutoffAt, current.id, current.scopeId, updatedAt
+    );
+    if (frozen.changes !== 1) throw new Error('Event changed while freezing the manual poll close.');
+    appendEventLog(db, {
+      eventId: current.id,
+      action: 'events.poll.manual_close_requested',
+      metadata: { actorIdentityId: input.actorIdentityId, cutoffAt, previousCloseAt: current.closeAt, pollGeneration: current.pollGeneration }
+    });
+    return getEvent(db, current.id);
+  });
 }
 
 export function freezeEventPollCloseCutoff(db: PluginDatabase, input: {

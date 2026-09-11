@@ -200,7 +200,7 @@ export async function cancelEventLifecycle(input: {
         actorIdentityId: event.actorIdentityId,
         ...(event.groupId ? { groupId: event.groupId } : {}),
         groupWid: lifecycle.request.groupWid
-      }, lifecycle, input.reason ?? 'event cancelled');
+      }, lifecycle, input.reason ?? 'event cancelled', event.pollCloseCutoffAt);
       bindEventPollAssistantAttendanceLifecycle(db, {
         eventId: event.id,
         scopeId: event.scopeId,

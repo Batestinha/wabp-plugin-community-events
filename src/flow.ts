@@ -15,7 +15,6 @@ import {
   eventDateAnswer,
   eventDateAndTimeToUtc,
   eventLifecycleCompleteAt,
-  eventDateTemplateTokens,
   eventTimeAnswer,
   formatEventDateParts,
   formatEventDateTime,
@@ -25,6 +24,7 @@ import {
   parseEventDateInput,
   parseEventTimeInput
 } from './datetime';
+import { eventSpanTemplateValues, formatEventTemplateDate } from './templateDates';
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
 import {
@@ -34,6 +34,8 @@ import {
 } from './template';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
+export const EVENT_CREATION_SPAN_STEP_ID = 'event-span';
+export const EVENT_CREATION_POLL_PHASE_STEP_ID = 'event-poll-phase';
 export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
 export const EVENT_POLL_PHASE_STEP_ID_PREFIX = 'poll-phase-';
 export const EVENT_END_DATE_STEP_ID_PREFIX = 'end-date-';
@@ -140,9 +142,7 @@ function buildEventFlowDefinition(input: {
     now: input.now?.(),
     allowPast: input.allowPastStartsAt
   });
-  const initialProfileId = typeof initialData[EVENT_PROFILE_STEP_ID] === 'string'
-    ? String(initialData[EVENT_PROFILE_STEP_ID])
-    : undefined;
+  const initialProfileId = singleChoiceValue(initialData[EVENT_PROFILE_STEP_ID]);
   const initialProfile = initialProfileId
     ? input.profiles.find((profile) => profile.id === initialProfileId)
     : undefined;
@@ -154,6 +154,9 @@ function buildEventFlowDefinition(input: {
       options: input.profiles.map((profile) => ({ label: profile.label, value: profile.id })),
       minSelections: 1,
       maxSelections: 1,
+      ...(askPollPhase ? {
+        nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+      } : {}),
       nextStepIdByValue: Object.fromEntries(input.profiles.map((profile) => [
         profile.id,
         firstQuestionStepId(profile)
@@ -161,8 +164,35 @@ function buildEventFlowDefinition(input: {
     }
   };
 
+  if (askPollPhase) {
+    steps[EVENT_CREATION_SPAN_STEP_ID] = {
+      id: EVENT_CREATION_SPAN_STEP_ID,
+      kind: 'choice',
+      prompt: input.t('official.community-events.flow.spanKind'),
+      options: [
+        { label: input.t('official.community-events.span.dayTrip'), value: 'day_trip' },
+        { label: input.t('official.community-events.span.multiDay'), value: 'multi_day' }
+      ],
+      minSelections: 1,
+      maxSelections: 1,
+      nextStepIdForState: (state) => firstCreationStepId(input.profiles, state.data)
+    };
+    steps[EVENT_CREATION_POLL_PHASE_STEP_ID] = {
+      id: EVENT_CREATION_POLL_PHASE_STEP_ID,
+      kind: 'choice',
+      prompt: input.t('official.community-events.flow.pollPhase'),
+      options: [
+        { label: input.t('official.community-events.flow.pollPhase.poll'), value: 'poll' },
+        { label: input.t('official.community-events.flow.pollPhase.unplanned'), value: 'unplanned' }
+      ],
+      minSelections: 1,
+      maxSelections: 1,
+      nextStepIdForState: (state) => firstCreationStepId(input.profiles, state.data)
+    };
+  }
+
   for (const profile of input.profiles) {
-    const visibleQuestions = input.askPrefilledQuestions
+    const visibleQuestions = askPollPhase || input.askPrefilledQuestions
       ? profile.questions
       : initialProfile?.id === profile.id
       ? profile.questions.filter((question) => !questionComplete(profile, question, initialData))
@@ -193,7 +223,10 @@ function buildEventFlowDefinition(input: {
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
           skipOnSymbolInput: !question.required,
-          nextStepId
+          nextStepId,
+          ...(askPollPhase ? {
+            nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+          } : {})
         };
         continue;
       }
@@ -209,6 +242,9 @@ function buildEventFlowDefinition(input: {
           input.prefill?.answers[question.key]
         ),
         nextStepId,
+        ...(askPollPhase ? {
+          nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+        } : {}),
         skipOnSymbolInput: !question.required,
         ...(question.type === EVENT_DATE_QUESTION_TYPE
           ? {
@@ -249,7 +285,10 @@ function buildEventFlowDefinition(input: {
       nextStepIdByValue: {
         day_trip: confirmStepId(profile),
         multi_day: askPollPhase ? pollPhaseStepId(profile) : endDateStepId(profile)
-      }
+      },
+      ...(askPollPhase ? {
+        nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+      } : {})
     };
     if (askPollPhase) {
       steps[pollPhaseStepId(profile)] = {
@@ -262,7 +301,8 @@ function buildEventFlowDefinition(input: {
         ],
         minSelections: 1,
         maxSelections: 1,
-        nextStepId: endDateStepId(profile)
+        nextStepId: endDateStepId(profile),
+        nextStepIdForState: (state) => firstCreationStepId(input.profiles, state.data)
       };
     }
     steps[endDateStepId(profile)] = {
@@ -341,7 +381,7 @@ function buildEventFlowDefinition(input: {
   return {
     flowType,
     t: input.t,
-    initialStepId: initialProfile
+    initialStepId: askPollPhase ? firstCreationStepId(input.profiles, initialData) : initialProfile
       ? input.askPrefilledQuestions
         ? firstQuestionStepId(initialProfile)
         : firstMissingQuestionStepId(initialProfile, initialData)
@@ -545,22 +585,15 @@ export function eventTemplateValues(input: {
   creatorDisplayName: string;
   extraTokens?: Record<string, string | undefined> | undefined;
 }): Record<string, string> {
-  const dateTokens = eventDateTemplateTokens(input.startsAt, input.timezone, input.locale);
   return {
     ...input.answers,
-    ...dateTokens,
+    ...(input.answers[input.profile.startsAtDateQuestionKey] ? {
+      [input.profile.startsAtDateQuestionKey]: formatEventTemplateDate(input.startsAt, input.timezone, input.locale)
+    } : {}),
+    ...eventSpanTemplateValues(input),
     profileId: input.profile.id,
     profileLabel: input.profile.label,
     creatorDisplayName: input.creatorDisplayName,
-    isMultiDay: input.spanKind === 'multi_day' ? 'true' : '',
-    ...(input.spanKind ? { spanKind: input.spanKind } : {}),
-    ...(input.endsAt ? {
-      ...Object.fromEntries(Object.entries(eventDateTemplateTokens(input.endsAt, input.timezone, input.locale))
-        .map(([token, value]) => [`end${token[0]!.toUpperCase()}${token.slice(1)}`, value])),
-      endsAt: formatEventDateTime(input.endsAt, input.timezone, input.locale),
-      endDate: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, dateStyle: 'medium' }).format(input.endsAt),
-      endTime: new Intl.DateTimeFormat(input.locale, { timeZone: input.timezone, timeStyle: 'short' }).format(input.endsAt)
-    } : {}),
     ...Object.fromEntries(Object.entries(input.extraTokens ?? {}).filter((entry): entry is [string, string] => Boolean(entry[1])))
   };
 }
@@ -603,11 +636,15 @@ function eventFlowAnswersFromData(
   locale = 'en',
   now?: Date | undefined
 ): EventFlowAnswers | undefined {
+  const selectedSpanKind = eventSpanKind(data, profile);
+  if (!selectedSpanKind) return undefined;
   const answers: Record<string, string> = {};
   let startDate: ReturnType<typeof eventDatePartsFromRaw>;
   let startTime: ReturnType<typeof eventTimePartsFromRaw>;
   for (const question of profile.questions) {
     const raw = data[questionStepId(profile, question)];
+    if (selectedSpanKind === 'multi_day' && question.key === profile.startsAtTimeQuestionKey
+      && (data[EVENT_CREATION_SPAN_STEP_ID] || !raw)) continue;
     const value = eventAnswerValue(raw, question, profile, answers);
     if (question.required && !value) {
       return undefined;
@@ -629,11 +666,6 @@ function eventFlowAnswersFromData(
   const materializedStartTime = explicitStartTime ?? { hour: 0, minute: 0, raw: '00:00' };
   const startsAt = materializeEventStart(startDate, materializedStartTime, { timezone, locale, now });
   if (!startsAt) {
-    return undefined;
-  }
-  const rawSpanKind = data[spanStepId(profile)];
-  const selectedSpanKind = Array.isArray(rawSpanKind) ? rawSpanKind[0] : rawSpanKind;
-  if (selectedSpanKind !== 'day_trip' && selectedSpanKind !== 'multi_day') {
     return undefined;
   }
   let endsAt: Date;
@@ -683,14 +715,38 @@ function firstQuestionStepId(profile: EventProfile): string {
   return questionStepId(profile, profile.questions[0]!);
 }
 
+function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>): string {
+  const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
+  const spanKind = eventSpanKind(data, profile);
+  if (!spanKind) return EVENT_CREATION_SPAN_STEP_ID;
+  if (spanKind === 'multi_day' && !eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
+  if (!profile) return EVENT_PROFILE_STEP_ID;
+  const question = profile.questions.find((candidate) => (
+    !(spanKind === 'multi_day' && candidate.key === profile.startsAtTimeQuestionKey)
+    && !questionComplete(profile, candidate, data)
+  ));
+  if (question) return questionStepId(profile, question);
+  return firstMissingSpanStepId(profile, data) ?? confirmStepId(profile);
+}
+
+function singleChoiceValue(value: unknown): string | undefined {
+  const selected = Array.isArray(value) ? value[0] : value;
+  return typeof selected === 'string' ? selected : undefined;
+}
+
+function eventSpanKind(data: Record<string, unknown>, profile?: EventProfile): EventSpanKind | undefined {
+  const value = singleChoiceValue(data[EVENT_CREATION_SPAN_STEP_ID])
+    ?? (profile ? singleChoiceValue(data[spanStepId(profile)]) : undefined);
+  return value === 'day_trip' || value === 'multi_day' ? value : undefined;
+}
+
 function firstMissingQuestionStepId(profile: EventProfile, data: Record<string, unknown>): string | undefined {
   const question = profile.questions.find((candidate) => !questionComplete(profile, candidate, data));
   return question ? questionStepId(profile, question) : undefined;
 }
 
 function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unknown>, askPollPhase = false): string | undefined {
-  const rawSpanKind = data[spanStepId(profile)];
-  const spanKind = Array.isArray(rawSpanKind) ? rawSpanKind[0] : rawSpanKind;
+  const spanKind = eventSpanKind(data, profile);
   if (spanKind !== 'day_trip' && spanKind !== 'multi_day') {
     return spanStepId(profile);
   }
@@ -719,9 +775,9 @@ function pollPhaseStepId(profile: EventProfile): string {
   return `${EVENT_POLL_PHASE_STEP_ID_PREFIX}${profile.id}`;
 }
 
-function eventPollPhase(data: Record<string, unknown>, profile: EventProfile): 'poll' | 'unplanned' | undefined {
-  const raw = data[pollPhaseStepId(profile)];
-  const value = Array.isArray(raw) ? raw[0] : raw;
+function eventPollPhase(data: Record<string, unknown>, profile?: EventProfile): 'poll' | 'unplanned' | undefined {
+  const value = singleChoiceValue(data[EVENT_CREATION_POLL_PHASE_STEP_ID])
+    ?? (profile ? singleChoiceValue(data[pollPhaseStepId(profile)]) : undefined);
   return value === 'poll' || value === 'unplanned' ? value : undefined;
 }
 
@@ -874,6 +930,8 @@ function eventQuestionAnswersBefore(
 ): Record<string, string> {
   const answers: Record<string, string> = {};
   for (const question of profile.questions.slice(0, Math.max(0, endExclusive))) {
+    if (data[EVENT_CREATION_SPAN_STEP_ID] && eventSpanKind(data, profile) === 'multi_day'
+      && question.key === profile.startsAtTimeQuestionKey) continue;
     const value = eventAnswerValue(data[questionStepId(profile, question)], question, profile, answers);
     if (value) answers[question.key] = value;
   }

@@ -92,6 +92,13 @@ export async function handleEventStartTimeAgreementJob(
       saveClaimedEventStartTimeAgreement(db, agreement, { now, lastError: 'event_missing_or_scope_mismatch' });
       return [audit('events.start_time_agreement.cancelled', { eventId, reason: 'event_missing_or_scope_mismatch' })];
     }
+    if (event.spanKind === 'multi_day') {
+      await cancelEventStartTimeAgreementPolls(context, event, agreement, 'multi-day events do not use start-time agreement');
+      agreement.status = 'cancelled';
+      agreement.cancelledAt = now.toISOString();
+      saveClaimedEventStartTimeAgreement(db, agreement, { now, lastError: 'multi_day_event' });
+      return [audit('events.start_time_agreement.cancelled', { eventId, reason: 'multi_day_event' })];
+    }
     if (event.localTime) {
       await cancelEventStartTimeAgreementPolls(context, event, agreement, 'event time configured outside agreement');
       agreement.status = 'applied';

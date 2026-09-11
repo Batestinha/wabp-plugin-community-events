@@ -4,6 +4,8 @@ import {
   type LocalizedDateParts
 } from '../../../platform/naturalDate/localizedDateTime';
 import type { EventSpanKind } from './span';
+import { eventDateTemplateTokens, formatEventDateTime } from './templateDates';
+export { eventDateTemplateTokens, formatEventDateTime } from './templateDates';
 
 const MAX_FUTURE_YEARS = 2;
 const STRICT_LOCAL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -282,35 +284,6 @@ export function isEventTimeAnswer(value: unknown): value is EventTimeAnswer {
 
 export function isEventDateDraft(value: unknown): value is EventDateDraft {
   return Boolean(value && typeof value === 'object' && (value as Partial<EventDateDraft>).kind === 'event-date-draft');
-}
-
-export function eventDateTemplateTokens(date: Date, timezone: string, locale = 'en'): Record<string, string> {
-  const parts = new Intl.DateTimeFormat(locale || 'en', {
-    timeZone: timezone,
-    weekday: 'long',
-    year: '2-digit',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(date);
-  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
-  const yyyy = new Intl.DateTimeFormat(locale || 'en', { timeZone: timezone, year: 'numeric' }).format(date);
-  return {
-    weekday: value('weekday'),
-    dd: value('day'),
-    mm: value('month'),
-    yy: value('year'),
-    yyyy,
-    hour: value('hour'),
-    minute: value('minute')
-  };
-}
-
-export function formatEventDateTime(date: Date, timezone: string, locale = 'en'): string {
-  const tokens = eventDateTemplateTokens(date, timezone, locale);
-  return `${tokens.weekday}, ${tokens.dd}-${tokens.mm}-${tokens.yy} ${tokens.hour}:${tokens.minute} ${timezone}`;
 }
 
 function parseTimeOnly(input: string, options: EventDateTimeParseOptions, draft: EventDateDraft): EventTimeParts | undefined {

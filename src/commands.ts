@@ -3846,7 +3846,7 @@ async function publishConfirmedEvent(input: {
       await preflightEventAttendanceLifecycle(attendanceCaller, attendanceRequest);
       eventDb.transaction(() => {
         insertEvent(eventDb, event);
-        if (input.profile.startTimeAgreement.enabled && !materialized.localTime) {
+        if (input.profile.startTimeAgreement.enabled && materialized.spanKind === 'day_trip' && !materialized.localTime) {
           createEventStartTimeAgreement(eventDb, {
             eventId: event.id,
             profile: input.profile,
@@ -4335,7 +4335,7 @@ async function createUnplannedEventLifecycle(input: {
 
   input.db.transaction(() => {
     insertEvent(input.db, intent);
-    if (input.profile.startTimeAgreement.enabled && !input.materialized.localTime) {
+    if (input.profile.startTimeAgreement.enabled && input.materialized.spanKind === 'day_trip' && !input.materialized.localTime) {
       createEventStartTimeAgreement(input.db, {
         eventId: intent.id,
         profile: input.profile,

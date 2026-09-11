@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import type { PluginOperationContext, PluginServiceRegistrationContext } from '../../../platform/pluginRuntime/types';
+import type { PluginServiceRegistrationContext } from '../../../platform/pluginRuntime/types';
 import type { PluginServiceCallContext, PluginServiceRegistration } from '../../../platform/pluginRuntime/pluginServices';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import { pluginWorkflowOperationContext } from '../../../platform/pluginRuntime/workflowContext';
 import { bindWorkflowInput, canonicalJson, preparedActionSchema, workflowActionResultSchema, workflowBindingSchema, workflowDigest,
   type PreparedAction, type WorkflowActionResult, type WorkflowBinding } from '../../../platform/workflows/contracts';
 import { requireOfficialCommandRuntime } from '../shared';
@@ -37,16 +37,6 @@ export function registerEventWorkflowServices(context: PluginServiceRegistration
   ]) }];
 }
 
-function operationContext(context: PluginServiceRegistrationContext): PluginOperationContext {
-  if (!context.flowEngine) throw new Error('Event workflow runtime is unavailable');
-  return { ...context, flowEngine: context.flowEngine,
-    releasePollSendReceipt: (chatId, key) => {
-      if (!context.platform.transport.releasePollSendReceipt) throw new Error('Poll receipt release is unavailable');
-      return context.platform.transport.releasePollSendReceipt(chatId, key, context.pluginId, { requiredProviderId: 'whatsmeow' });
-    },
-    enqueuePluginJob: (input) => enqueuePluginJob(context.queue, { pluginId: context.pluginId, ...input }) };
-}
-
 async function actorContext(context: PluginServiceRegistrationContext, call: PluginServiceCallContext) {
   if (!call.actorIdentityId || !context.resolveStableIdentityById) throw new Error('Workflow actions require the original requester identity');
   if (!await context.enabledFor(call.scopeId)) throw new Error('Community Events is disabled');
@@ -55,7 +45,7 @@ async function actorContext(context: PluginServiceRegistrationContext, call: Plu
   const locale = await context.i18n.resolveScopeLocale(call.scopeId);
   const t = await context.i18n.translatorForIdentity(call.actorIdentityId, call.scopeId);
   const config = parseEventsConfig(await context.configFor(call.scopeId, call.actorIdentityId));
-  return { actor, locale: locale.locale, t, config, domain: operationContext(context) };
+  return { actor, locale: locale.locale, t, config, domain: pluginWorkflowOperationContext(context) };
 }
 
 async function requireEvent(context: PluginServiceRegistrationContext, eventId: string, call: PluginServiceCallContext) {

@@ -2,6 +2,7 @@ import type { PluginManifest } from '../../../platform/pluginRuntime/manifest';
 import { POLL_HISTORY_OWNED_DATA_RESOURCE } from '../../../platform/pluginRuntime/pluginOwnedData';
 import { eventsConfigSchema } from './config';
 import { eventsMessages } from './messages';
+import { EVENT_WORKFLOW_SERVICE_ID, eventWorkflowActions } from './workflowActionApi';
 import {
   EVENT_ALBUM_SOURCE_LIST_METHOD,
   EVENT_ALBUM_SOURCE_RESOLVE_METHOD,
@@ -140,6 +141,14 @@ export const eventsManifest: PluginManifest = {
   eventSubscriptions: ['message', 'participant.change', 'poll.vote', 'plugin.job', 'group.dismantled'],
   services: [
     {
+      serviceId: EVENT_WORKFLOW_SERVICE_ID,
+      description: 'Prepare, apply and inspect requester-authorized event changes through the event lifecycle.',
+      methods: ['edit', 'cancel'].flatMap((action) => [
+        { name: `${action}Describe`, access: 'read' as const }, { name: `${action}Prepare`, access: 'read' as const },
+        { name: `${action}Execute`, access: 'mutation' as const, timeoutMs: 120000 }, { name: `${action}Inspect`, access: 'read' as const }
+      ])
+    },
+    {
       serviceId: EVENT_ALBUM_SOURCE_SERVICE_ID,
       description: 'List and resolve scoped community events as immutable album metadata sources.',
       methods: [
@@ -163,6 +172,7 @@ export const eventsManifest: PluginManifest = {
     EVENTS_PERMISSIONS.createClimbing
   ],
   requiredBotCapabilities: [],
+  workflowActions: eventWorkflowActions,
   configSchema: eventsConfigSchema,
   dangerousActions: ['message.delete'],
   backgroundJobs: [
@@ -253,7 +263,7 @@ export const eventsManifest: PluginManifest = {
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   databases: eventsDatabases,
-  dataVersion: '17',
+  dataVersion: '18',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

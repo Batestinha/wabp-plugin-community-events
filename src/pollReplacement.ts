@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PluginOperationContext } from '../../../platform/pluginRuntime/types';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
 import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
@@ -95,7 +95,7 @@ export interface EventPollReceiptReleaseRetry {
 }
 
 type EventPollReplacementContext = {
-  services?: PluginCommandContext['services'] | PluginRuntimeContext['services'] | undefined;
+  services?: PluginOperationContext['services'] | PluginRuntimeContext['services'] | undefined;
   releasePollSendReceipt?: PluginRuntimeContext['releasePollSendReceipt'] | undefined;
 };
 

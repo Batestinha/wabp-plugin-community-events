@@ -570,6 +570,7 @@ export function eventFlowAnswers(
 }
 
 export function eventFlowAnswersFromRaw(input: {
+  allowPast?: boolean | undefined;
   profile: EventProfile;
   answers: Record<string, string>;
   timezone: string;
@@ -591,7 +592,8 @@ export function eventFlowAnswersFromRaw(input: {
       const parsed = parseEventDateInput(value, {
         timezone: input.timezone,
         locale: input.locale,
-        now: input.now
+        now: input.now,
+        allowPast: input.allowPast
       });
       if (parsed.status !== 'ok') {
         return undefined;

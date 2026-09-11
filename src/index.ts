@@ -4,6 +4,7 @@ import { createEventsHooks } from './hooks';
 import { migrateEventIdentityData } from './identityMigration';
 import { eventsManifest } from './manifest';
 import { registerEventAlbumSourceServices } from './service';
+import { registerEventWorkflowServices } from './workflowActions';
 
 export const eventsPlugin: BotPlugin = {
   manifest: eventsManifest,
@@ -24,7 +25,7 @@ export const eventsPlugin: BotPlugin = {
     });
   },
   registerServices(context) {
-    return registerEventAlbumSourceServices(context);
+    return [...registerEventAlbumSourceServices(context), ...registerEventWorkflowServices(context)];
   }
 };
 

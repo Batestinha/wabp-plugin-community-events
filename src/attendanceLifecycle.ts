@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PluginOperationContext } from '../../../platform/pluginRuntime/types';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { POLL_ASSISTANT_SCHEMA_VERSION } from '../poll-assistant/domain';
 import {
@@ -30,7 +30,7 @@ import type {
 } from './store';
 
 type ServiceRegistry = NonNullable<
-  PluginCommandContext['services'] | PluginRuntimeContext['services']
+  PluginOperationContext['services'] | PluginRuntimeContext['services']
 >;
 
 export interface EventAttendanceLifecycleCaller {

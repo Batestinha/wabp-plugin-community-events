@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { WorkflowActionResult } from '../../../platform/workflows/contracts';
 import { PollSelectionRule } from '@prisma/client';
 import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
 import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
 import type { CommandContext } from '../../../adminBot/router/commandRouter';
-import type { PluginCancellationRegistration, PluginCommandContext } from '../../../platform/pluginRuntime/types';
+import type { PluginCancellationRegistration, PluginCommandContext, PluginOperationContext } from '../../../platform/pluginRuntime/types';
 import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
 import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../platform/jobs/queue';
 import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '../../../platform/transport/pollContract';
@@ -173,7 +174,7 @@ interface EventCancelDraft {
   createdAt: string;
 }
 
-interface EventUpdateDraft {
+export interface EventUpdateDraft {
   flowSessionId: string;
   flowType: string;
   scopeId: string;
@@ -227,7 +228,7 @@ interface EventAuthorizationActor extends EventAuthorizationPrincipal {
   mentionWid: string;
 }
 
-interface EventTextTransport {
+export interface EventTextTransport {
   sendText(
     chatId: string,
     text: string,
@@ -237,7 +238,7 @@ interface EventTextTransport {
   setGroupSubject(chatId: string, subject: string): Promise<void>;
 }
 
-export type EventFlowCompletionContext = PluginCommandContext | PluginRuntimeContext;
+export type EventFlowCompletionContext = PluginOperationContext | PluginRuntimeContext;
 
 type PendingEventFlowAnswers = Omit<EventFlowAnswers, 'startsAt' | 'endsAt'> & {
   startsAt: string;
@@ -411,7 +412,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => ({ handled: true, text: ctx.t('official.community-events.usage') }));
 }
 
-export function registerEventsCancellations(context: PluginCommandContext): PluginCancellationRegistration[] {
+export function registerEventsCancellations(context: PluginOperationContext): PluginCancellationRegistration[] {
   const runtime = requireOfficialCommandRuntime(context);
   return [
     {
@@ -457,7 +458,7 @@ export function registerEventsCancellations(context: PluginCommandContext): Plug
   ];
 }
 
-async function startEventFlow(context: PluginCommandContext, ctx: CommandContext) {
+async function startEventFlow(context: PluginOperationContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
   const actor = eventAuthorizationActor(ctx);
   if (!actor) {
@@ -530,7 +531,7 @@ async function startEventFlow(context: PluginCommandContext, ctx: CommandContext
   };
 }
 
-async function startEventEditFlow(context: PluginCommandContext, ctx: CommandContext) {
+async function startEventEditFlow(context: PluginOperationContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
   const actor = eventAuthorizationActor(ctx);
   if (!actor) {
@@ -611,7 +612,7 @@ function eventPollIsOpen(event: StoredEventRecord): boolean {
   return event.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open' && Boolean(event.pollWaMsgId);
 }
 
-async function startEventPollClose(context: PluginCommandContext, ctx: CommandContext) {
+async function startEventPollClose(context: PluginOperationContext, ctx: CommandContext) {
   if (ctx.command.args[0]?.toLowerCase() !== 'close') {
     return { handled: true, text: ctx.t('official.community-events.pollClose.usage') };
   }
@@ -672,7 +673,7 @@ async function closeSelectedEventPoll(
 }
 
 async function startEventEditSelection(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   ctx: CommandContext,
   input: {
     scopeId: string;
@@ -730,7 +731,7 @@ async function startEventEditSelection(
 }
 
 async function promptEventEditSelection(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   pending: PendingEventEditSelection;
   candidates: StoredEventRecord[];
@@ -782,7 +783,7 @@ async function promptEventEditSelection(input: {
   }
 }
 
-async function listFutureEvents(context: PluginCommandContext, ctx: CommandContext) {
+async function listFutureEvents(context: PluginOperationContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
   const scopeId = requireScopeId(ctx);
   const config = parseEventsConfig(await runtime.configFor(scopeId, eventAuthorizationActor(ctx)?.identityId));
@@ -823,7 +824,7 @@ async function listFutureEvents(context: PluginCommandContext, ctx: CommandConte
   };
 }
 
-async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandContext) {
+async function startEventCancelFlow(context: PluginOperationContext, ctx: CommandContext) {
   const runtime = requireOfficialCommandRuntime(context);
   const actor = eventAuthorizationActor(ctx);
   if (!actor) {
@@ -893,7 +894,7 @@ async function startEventCancelFlow(context: PluginCommandContext, ctx: CommandC
 }
 
 async function startEventUpdateFlow(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   ctx: CommandContext,
   input: {
     event: StoredEventRecord;
@@ -941,7 +942,7 @@ async function startEventUpdateFlow(
 }
 
 async function beginEventUpdateFlow(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   input: {
     event: StoredEventRecord;
     config: ReturnType<typeof parseEventsConfig>;
@@ -1046,7 +1047,7 @@ async function beginEventUpdateFlow(
 }
 
 function registerEventUpdateFlowCompletionHandler(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   flowType: string,
   profile: EventProfile,
   t: CommandContext['t']
@@ -1145,7 +1146,7 @@ function registerEventUpdateFlowCompletionHandler(
 }
 
 async function beginEventUpdateLocationSelection(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   responseChatId: string;
@@ -1157,7 +1158,7 @@ async function beginEventUpdateLocationSelection(input: {
 }): Promise<void> {
   const fixedLocation = fixedEventLocation(input.draft.profile, input.draft.timezone);
   if (fixedLocation) {
-    await completeEventUpdate({ ...input, eventId: input.event.id, eventLocation: fixedLocation });
+    await applyEventUpdate({ ...input, eventId: input.event.id, eventLocation: fixedLocation });
     return;
   }
   const place = eventLocationQuery(input.draft.profile, input.answers.answers);
@@ -1172,7 +1173,7 @@ async function beginEventUpdateLocationSelection(input: {
     input.event.eventLocation?.source === 'question' &&
     input.event.eventLocation.displayLabel === place
   ) {
-    await completeEventUpdate({
+    await applyEventUpdate({
       ...input,
       eventId: input.event.id,
       eventLocation: input.event.eventLocation
@@ -1249,8 +1250,9 @@ async function beginEventUpdateLocationSelection(input: {
   }
 }
 
-async function completeEventUpdate(input: {
-  context: PluginCommandContext;
+export async function applyEventUpdate(input: {
+  notify?: boolean | undefined;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   responseChatId: string;
@@ -1260,15 +1262,19 @@ async function completeEventUpdate(input: {
   eventLocation: StoredEventLocation;
   pastCompletionConfirmed: boolean;
   t: CommandContext['t'];
-}): Promise<void> {
+}): Promise<WorkflowActionResult> {
+  let replyText = '';
+  const reply = async (text: string) => {
+    replyText = text;
+    if (input.notify !== false) await input.activeTransport.sendText(input.responseChatId, text);
+  };
   const db = eventsDatabase(input.runtime.databases);
   const event = getEvent(db, input.eventId);
   if (!event || !eventIsEditable(event) || event.updatedAt !== input.draft.eventUpdatedAt) {
-    await input.activeTransport.sendText(
-      input.responseChatId,
+    await reply(
       input.t('official.community-events.update.invalid')
     );
-    return;
+    return { status: 'blocked', reason: replyText, retryable: false };
   }
   if (!await eventUpdateAllowed(input.context, {
     event,
@@ -1278,11 +1284,10 @@ async function completeEventUpdate(input: {
     },
     creatorIdentityId: input.draft.creatorIdentityId
   })) {
-    await input.activeTransport.sendText(
-      input.responseChatId,
+    await reply(
       input.t('official.community-events.update.permissionDenied')
     );
-    return;
+    return { status: 'blocked', reason: replyText, retryable: false };
   }
   if (!await eventProfileSnapshotIsCurrent({
     runtime: input.runtime,
@@ -1291,11 +1296,10 @@ async function completeEventUpdate(input: {
     snapshot: input.draft.profile,
     t: input.t
   })) {
-    await input.activeTransport.sendText(
-      input.responseChatId,
+    await reply(
       input.t('official.community-events.update.invalid')
     );
-    return;
+    return { status: 'blocked', reason: replyText, retryable: false };
   }
   try {
     const materialized = materializeEventLifecycle({
@@ -1309,11 +1313,10 @@ async function completeEventUpdate(input: {
     const now = new Date();
     const eventEnded = materialized.lifecycleCompleteAt.getTime() <= now.getTime();
     if (event.eventStatus === 'active' && eventEnded && !input.pastCompletionConfirmed) {
-      await input.activeTransport.sendText(
-        input.responseChatId,
+      await reply(
         input.t('official.community-events.update.pastCompletionConfirmationRequired')
       );
-      return;
+      return { status: 'blocked', reason: replyText, retryable: false };
     }
     const config = draftEventsConfig({
       timezone: input.draft.timezone,
@@ -1377,8 +1380,7 @@ async function completeEventUpdate(input: {
           sourcePluginId: input.draft.sourcePluginId
           });
     if ('replacementStatus' in outcome && outcome.replacementStatus !== 'completed') {
-      await input.activeTransport.sendText(
-        input.responseChatId,
+      await reply(
         input.t(outcome.replacementStatus === 'pending'
           ? 'official.community-events.update.replacementQueued'
           : 'official.community-events.update.replacementExpired', {
@@ -1386,17 +1388,18 @@ async function completeEventUpdate(input: {
           eventId: event.id
         })
       );
-      return;
+      return outcome.replacementStatus === 'pending'
+        ? { status: 'pending', operationId: input.draft.flowSessionId, summary: replyText }
+        : { status: 'blocked', reason: replyText, retryable: false };
     }
     if (!outcome.changed) {
-      await input.activeTransport.sendText(
-        input.responseChatId,
+      await reply(
         input.t('official.community-events.update.noChanges', {
           title: materialized.groupTitle,
           eventId: event.id
         })
       );
-      return;
+      return { status: 'completed', output: { eventId: event.id, updatedAt: event.updatedAt }, summary: replyText };
     }
     const doneMessageKey = 'convertedToUnplanned' in outcome && outcome.convertedToUnplanned
       ? 'official.community-events.update.convertedToUnplanned'
@@ -1407,8 +1410,7 @@ async function completeEventUpdate(input: {
       : outcome.completedNow
         ? 'official.community-events.update.donePastCompletion'
         : 'official.community-events.update.done';
-    await input.activeTransport.sendText(
-      input.responseChatId,
+    await reply(
       input.t(doneMessageKey, {
         title: materialized.groupTitle,
         eventId: event.id,
@@ -1417,6 +1419,9 @@ async function completeEventUpdate(input: {
         cleanupAt: formatEventDateTime(outcome.cleanupAt, event.timezone, input.draft.locale)
       })
     );
+    return outcome.repairPending
+      ? { status: 'pending', operationId: input.draft.flowSessionId, summary: replyText }
+      : { status: 'completed', output: { eventId: event.id, updatedAt: getEvent(db, event.id)!.updatedAt }, summary: replyText };
   } catch (error) {
     const templateFailure = error instanceof EventConditionalTextConfigurationError ? error : undefined;
     const reason = error instanceof Error ? error.message : String(error);
@@ -1430,19 +1435,19 @@ async function completeEventUpdate(input: {
         ? { field: templateFailure.field, code: templateFailure.code, sourcePluginId: input.draft.sourcePluginId }
         : { reason, sourcePluginId: input.draft.sourcePluginId }
     });
-    await input.activeTransport.sendText(
-      input.responseChatId,
+    await reply(
       templateFailure
         ? input.t('official.community-events.templateConfigurationInvalid')
         : reason === EVENT_UPDATE_CONFLICT_ERROR
           ? input.t('official.community-events.update.invalid')
           : input.t('official.community-events.update.failed')
     );
+    return { status: 'failed', reason: replyText, retryable: false };
   }
 }
 
 async function replaceOpenEventPollLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   db: ReturnType<typeof eventsDatabase>;
@@ -1925,7 +1930,7 @@ async function replaceOpenEventPollLifecycle(input: {
 }
 
 async function convertOpenPollEditToUnplannedLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   db: ReturnType<typeof eventsDatabase>;
@@ -2163,7 +2168,7 @@ async function convertOpenPollEditToUnplannedLifecycle(input: {
 }
 
 async function updateEventLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   db: ReturnType<typeof eventsDatabase>;
@@ -2489,7 +2494,7 @@ function eventStructuredDataChanged(
     normalizedOptional(event.calendarDescription) !== normalizedOptional(materialized.calendarDescription);
 }
 
-function eventIsEditable(event: StoredEventRecord): boolean {
+export function eventIsEditable(event: StoredEventRecord): boolean {
   return (event.eventStatus === 'active' || event.eventStatus === 'completed')
     && !(event.groupLifecycleStatus === 'poll_open' && event.pollCloseCutoffAt);
 }
@@ -2522,8 +2527,8 @@ function normalizedOptional(value: string | undefined): string {
   return value?.trim() ?? '';
 }
 
-async function eventUpdateAllowed(
-  context: PluginCommandContext,
+export async function eventUpdateAllowed(
+  context: PluginOperationContext,
   input: {
     event: StoredEventRecord;
     actor: EventAuthorizationPrincipal;
@@ -2549,7 +2554,7 @@ async function eventUpdateAllowed(
 }
 
 async function authorizedEventEditCandidates(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   events: StoredEventRecord[],
   actor: EventAuthorizationPrincipal
 ): Promise<StoredEventRecord[]> {
@@ -2574,7 +2579,7 @@ function orderedEventEditCandidates(events: StoredEventRecord[]): StoredEventRec
   ));
 }
 
-function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfile): EventFlowPrefill {
+export function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfile): EventFlowPrefill {
   const answers = { ...event.answers };
   if (event.localDate) {
     answers[profile.startsAtDateQuestionKey] = event.localDate;
@@ -2611,7 +2616,7 @@ function eventEndPrefill(event: StoredEventRecord): Pick<EventFlowPrefill, 'endL
 }
 
 function registerEventCancelFlowCompletionHandler(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   flowType: string,
   t: CommandContext['t']
 ): void {
@@ -2752,7 +2757,7 @@ function createEventCancelFlowDefinition(input: {
 }
 
 async function resolveEventCancelCandidates(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   input: {
     db: ReturnType<typeof eventsDatabase>;
     scopeId: string;
@@ -2812,7 +2817,7 @@ async function resolveEventCancelCandidates(
 }
 
 async function eventCancellationAllowed(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   input: {
     event: StoredEventRecord;
     actor: EventAuthorizationPrincipal;
@@ -3094,7 +3099,7 @@ export function registerEventFlowCompletionHandlers(
   }
 }
 
-function registerEventEditSelectionHandler(context: PluginCommandContext): void {
+function registerEventEditSelectionHandler(context: PluginOperationContext): void {
   const runtime = requireOfficialCommandRuntime(context);
   context.flowEngine.registerPromptHandler(EVENT_EDIT_SELECTION_PURPOSE, async (lock, activeTransport) => {
     const pending = lock.subjectId
@@ -3204,7 +3209,7 @@ function registerEventEditSelectionHandler(context: PluginCommandContext): void 
 }
 
 async function completeEventEditSelection(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
   lockFlowPromptId: string;
@@ -3292,7 +3297,7 @@ async function completeEventEditSelection(input: {
   return true;
 }
 
-function registerEventLocationSelectionHandler(context: PluginCommandContext): void {
+function registerEventLocationSelectionHandler(context: PluginOperationContext): void {
   const runtime = requireOfficialCommandRuntime(context);
   context.flowEngine.registerPromptHandler(EVENT_LOCATION_SELECTION_PURPOSE, async (lock, activeTransport) => {
     const pending = lock.subjectId
@@ -3390,7 +3395,7 @@ function registerEventLocationSelectionHandler(context: PluginCommandContext): v
         t
       });
     } else {
-      await completeEventUpdate({
+      await applyEventUpdate({
         context,
         runtime,
         activeTransport,
@@ -4983,9 +4988,6 @@ function requireEventFlowEngine(context: EventFlowCompletionContext) {
 }
 
 function requireEventFlowRuntime(context: EventFlowCompletionContext): OfficialPluginCommandRuntime {
-  if ('router' in context) {
-    return requireOfficialCommandRuntime(context);
-  }
   if (
     !context.pluginId
     || !context.manifest
@@ -5004,6 +5006,7 @@ function requireEventFlowRuntime(context: EventFlowCompletionContext): OfficialP
     ephemeralStore: context.ephemeralStore,
     ...(context.databases ? { databases: context.databases } : {}),
     ...(context.mediaStore ? { mediaStore: context.mediaStore } : {}),
+    ...(context.services ? { services: context.services } : {}),
     configFor: context.configFor,
     setConfig: context.setConfig,
     ...(context.communityGroupWidForScope
@@ -5016,7 +5019,7 @@ function requireEventFlowRuntime(context: EventFlowCompletionContext): OfficialP
       ? { sendAssistantStatusText: context.sendAssistantStatusText }
       : {}),
     enqueuePluginJob: (input) => enqueueRuntimePluginJob(context.queue, {
-      pluginId: context.pluginId,
+      pluginId: context.pluginId!,
       ...input
     })
   };
@@ -5257,7 +5260,7 @@ async function findActiveEventEditSelection(
 }
 
 async function cancelActiveEventEditSelectionForActor(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   runtime: OfficialPluginCommandRuntime,
   actorIdentityId: string
 ): Promise<{ cancelled: number; scopeId?: string | undefined }> {
@@ -5346,7 +5349,7 @@ async function findActiveEventLocationSelection(
 }
 
 async function cancelActiveEventLocationSelectionsForActor(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   runtime: OfficialPluginCommandRuntime,
   input: {
     actorIdentityId: string;

@@ -1,4 +1,4 @@
-import type { PluginCommandContext, PluginPollVote } from '../../../platform/pluginRuntime/types';
+import type { PluginOperationContext, PluginPollVote } from '../../../platform/pluginRuntime/types';
 import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
 import {
   IncompletePollVoteReadbackError,
@@ -110,7 +110,7 @@ export interface EventAdoptionReconcileEffects {
 }
 
 export async function adoptEventLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime?: OfficialPluginCommandRuntime | undefined;
   activeTransport?: EventTextTransport | undefined;
   adoption: EventAdoptionInput;
@@ -124,7 +124,7 @@ export async function adoptEventLifecycle(input: {
   if (!input.context.resolveStableIdentityById) {
     return { status: 'failed', reason: 'The authoritative identity address service is unavailable.' };
   }
-  let actorAddress: Awaited<ReturnType<NonNullable<PluginCommandContext['resolveStableIdentityById']>>>;
+  let actorAddress: Awaited<ReturnType<NonNullable<PluginOperationContext['resolveStableIdentityById']>>>;
   try {
     actorAddress = await input.context.resolveStableIdentityById(request.actorIdentityId);
   } catch {
@@ -448,7 +448,7 @@ export async function adoptEventLifecycle(input: {
 }
 
 async function reconcileAdoptedGroupLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   db: ReturnType<typeof eventsDatabase>;
   activeTransport?: EventTextTransport | undefined;
@@ -622,7 +622,7 @@ async function reconcileAdoptedGroupLifecycle(input: {
 }
 
 export async function validateAdoptedGroup(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   scopeId: string,
   chatId: string
 ): Promise<EventAdoptedGroupValidation> {
@@ -677,7 +677,7 @@ export type AdoptedEventGroupHintResult =
   | 'failed';
 
 export async function sendAdoptedEventGroupHint(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   db: ReturnType<typeof eventsDatabase>;
   activeTransport?: EventTextTransport | undefined;
   event: StoredEventRecord;
@@ -789,7 +789,7 @@ export async function sendAdoptedEventGroupHint(input: {
 }
 
 async function appendAdoptedAnnouncementSkipped(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   event: StoredEventRecord,
   reason: string,
   metadata: Record<string, unknown> = {}
@@ -817,8 +817,8 @@ function adoptionOrigin(mode: EventAdoptionMode): EventOrigin {
 }
 
 function requireAdoptionPollVoteIdentityResolver(
-  context: PluginCommandContext
-): NonNullable<PluginCommandContext['resolveIdentityAddress']> {
+  context: PluginOperationContext
+): NonNullable<PluginOperationContext['resolveIdentityAddress']> {
   if (!context.resolveIdentityAddress) {
     throw new Error('Authoritative poll-voter identity resolution is unavailable.');
   }
@@ -836,7 +836,7 @@ function normalizeAdoptionInput(input: EventAdoptionInput): EventAdoptionInput {
 }
 
 async function appendEventJsonLog(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   entry: Parameters<typeof appendScopeEventJsonLog>[0]['entry']
 ): Promise<void> {
   try {

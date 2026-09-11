@@ -1,4 +1,4 @@
-import type { PluginCommandContext, PluginGroupDismantleResult } from '../../../platform/pluginRuntime/types';
+import type { PluginOperationContext, PluginGroupDismantleResult } from '../../../platform/pluginRuntime/types';
 import { parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -54,7 +54,7 @@ export type EventCancellationResult =
   | { status: 'cleanup_failed'; reason: string; dismantleResult?: PluginGroupDismantleResult | undefined };
 
 export async function cancelEventLifecycle(input: {
-  context: PluginCommandContext;
+  context: PluginOperationContext;
   runtime: OfficialPluginCommandRuntime;
   db: Parameters<typeof markEventCancelled>[0];
   event: StoredEventRecord;
@@ -458,7 +458,7 @@ function releaseCancellationClaim(
 }
 
 async function recordCancellationFailure(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   runtime: OfficialPluginCommandRuntime,
   db: Parameters<typeof markEventCancelled>[0],
   event: StoredEventRecord,
@@ -539,7 +539,7 @@ async function setCleanupFailureStatus(
 }
 
 async function appendEventJsonLog(
-  context: PluginCommandContext,
+  context: PluginOperationContext,
   entry: Parameters<typeof appendScopeEventJsonLog>[0]['entry']
 ): Promise<void> {
   try {

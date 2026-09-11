@@ -156,8 +156,9 @@ function prepareEdit(target: Awaited<ReturnType<typeof requireEvent>>, input: Ev
   if (input.patch.endLocalDate || input.patch.endLocalTime) changes.push(`${target.t('official.community-events.workflow.end')}: ${answers.endLocalDate} ${answers.endLocalTime ?? ''}`);
   if (input.patch.location) changes.push(`${target.t('official.community-events.workflow.location')}: ${location.displayLabel} (${location.latitude}, ${location.longitude})`);
   if (input.confirmPastCompletion) changes.push(target.t('official.community-events.workflow.allowCompletion'));
-  const expected = { ...target.event, ...materialized, endsAt: materialized.endsAt.toISOString() };
-  const appliedFields = Object.fromEntries(editFields(input).map((field) => [field, currentField(expected as StoredEventRecord, field)]));
+  const expected = { ...target.event, answers: materialized.answers, endsAt: materialized.endsAt.toISOString(),
+    spanKind: materialized.spanKind, eventLocation: materialized.eventLocation };
+  const appliedFields = Object.fromEntries(editFields(input).map((field) => [field, currentField(expected, field)]));
   return { answers, location, changes: changes.join('; '), appliedFields };
 }
 

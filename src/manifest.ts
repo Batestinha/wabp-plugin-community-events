@@ -261,7 +261,7 @@ export const eventsManifest: PluginManifest = {
       'Cancel active event lifecycles by creator or event manager.',
       'Close polls before the event, gather attendees, and create event subgroups.',
       'Export one calendar file per scope.',
-      'Optionally send event-day weather forecasts into created event groups when the poll closes and, when configured, once per day.',
+      'When weather is enabled, send forecasts 15, 12, 7, 2 and 1 days before the event, on the event day and daily during multi-day events. Send immediately for groups created within the forecast window; each update covers the remaining event days available.',
       'For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community.'
     ],
     prerequisites: [

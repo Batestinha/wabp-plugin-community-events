@@ -66,9 +66,10 @@ import {
   reconcileEventCommunitySubgroupCreator
 } from './subgroups';
 import {
-  eventWeatherForecastJobAction,
+  eventWeatherForecastJobActions,
   eventWeatherForecastJobRequests,
   eventWeatherForecastRecoveryJobRequest,
+  eventWeatherForecastRecoverySkipReason,
   handleEventWeatherForecastJob
 } from './weather';
 import {
@@ -156,6 +157,7 @@ import {
   markClaimedEventPreCreateProvisioningMissed,
   markScheduledEventPreCreateProvisioningMissed,
   supersedeEventWeatherDelivery,
+  skipEventWeatherDelivery,
   supersedeEventAnnouncementDelivery,
   updateEventCloseAt,
   hasActiveEventPollReplacement,
@@ -1250,6 +1252,25 @@ export async function recoverEventWeatherForecastJobs(context: PluginRuntimeCont
         eventUpdatedAt: delivery.eventUpdatedAt,
         kind: delivery.kind,
         reason: 'event_version_changed'
+      });
+      continue;
+    }
+    const config = parseEventsConfig(await context.configFor(record.scopeId));
+    const profile = config.eventProfiles.find((candidate) => candidate.id === record.profileId);
+    const skipReason = eventWeatherForecastRecoverySkipReason({ event: record, profile, delivery, now });
+    if (skipReason) {
+      skipEventWeatherDelivery(db, {
+        eventId: record.id,
+        eventUpdatedAt: record.updatedAt,
+        kind: delivery.kind,
+        scheduleKind: delivery.scheduleKind,
+        scheduledAt: delivery.scheduledAt,
+        reason: skipReason
+      });
+      appendEventLog(db, {
+        eventId: record.id,
+        action: 'events.weather_forecast.skipped',
+        metadata: { deliveryKind: delivery.kind, reason: skipReason }
       });
       continue;
     }
@@ -3073,7 +3094,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       subgroupChatId,
       subgroupTitle
     });
-    const weatherForecastAction = eventWeatherForecastJobAction({
+    const weatherForecastActions = eventWeatherForecastJobActions({
       event: closedEvent,
       profile: calendarProfile
     });
@@ -3113,7 +3134,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       );
     }
     return [
-      ...(weatherForecastAction ? [weatherForecastAction] : []),
+      ...weatherForecastActions,
       ...plannedAnnouncementActions,
       closeCleanupAction(closedEvent),
       ...(calendarFailureAudit ? [calendarFailureAudit] : []),

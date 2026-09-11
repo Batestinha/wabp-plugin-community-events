@@ -13,7 +13,8 @@ export function eventDateTemplateTokens(date: Date, timezone: string, locale = '
   }).formatToParts(date);
   const value = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
   return {
-    weekday: value('weekday'),
+    // Intl's "short" weekdays can still be whole words (notably in pt-PT).
+    weekday: Array.from(value('weekday').normalize('NFC')).slice(0, 3).join(''),
     dd: value('day'),
     mm: value('month'),
     yy: value('year'),

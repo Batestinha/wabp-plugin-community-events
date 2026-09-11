@@ -220,6 +220,7 @@ export const eventLocationConfigSchema = z.discriminatedUnion('source', [
 
 export const eventWeatherConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  // Retained for stored-profile compatibility; enabled weather uses the shared cadence.
   sendOnPollClose: z.boolean().default(true),
   sendDaily: z.boolean().default(false),
   sendAtLocalTime: localTimeSchema.default('07:00'),
@@ -374,13 +375,6 @@ const eventProfileObjectSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: `location.questionKey must reference a text or choice question`,
       path: ['location', 'questionKey']
-    });
-  }
-  if (profile.weather.enabled && !profile.weather.sendOnPollClose && !profile.weather.sendDaily) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `weather requires at least one send trigger`,
-      path: ['weather']
     });
   }
   const templateTokens = new Set([

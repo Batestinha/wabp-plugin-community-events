@@ -94,7 +94,7 @@ import {
   eventProvisioningRecoveryRunAt,
   isBaileysEventPreCreateProviderUnavailableFailure
 } from './provisioningRecovery';
-import { eventWeatherForecastJobRequest } from './weather';
+import { eventWeatherForecastJobRequests } from './weather';
 import {
   GEOCODER_GEOCODE_METHOD,
   GEOCODER_SERVICE_ID,
@@ -1302,7 +1302,7 @@ async function completeEventUpdate(input: {
       profile: input.draft.profile,
       answers: input.answers,
       timezone: input.draft.timezone,
-      locale: input.draft.locale,
+      locale: (await input.context.i18n.resolveScopeLocale(input.draft.scopeId)).locale,
       creatorDisplayName: event.actorLabel || event.actorWid,
       eventLocation: input.eventLocation
     });
@@ -2384,7 +2384,7 @@ async function updateEventLifecycle(input: {
     !completionRequested &&
     liveSubgroupChatId
   ) {
-    const weatherRequest = eventWeatherForecastJobRequest({
+    const weatherRequests = eventWeatherForecastJobRequests({
       event: {
         ...input.event,
         updatedAt,
@@ -2404,7 +2404,7 @@ async function updateEventLifecycle(input: {
       },
       profile: input.profile
     });
-    if (weatherRequest) {
+    for (const weatherRequest of weatherRequests) {
       try {
         await input.runtime.enqueuePluginJob(weatherRequest);
       } catch (error) {
@@ -3664,7 +3664,7 @@ async function publishConfirmedEvent(input: {
       profile: input.profile,
       answers: input.answers,
       timezone: input.draft.timezone,
-      locale: input.draft.locale,
+      locale: (await input.context.i18n.resolveScopeLocale(input.draft.scopeId)).locale,
       creatorDisplayName: input.draft.actorLabel || input.draft.actorWid,
       eventLocation: input.eventLocation
     });

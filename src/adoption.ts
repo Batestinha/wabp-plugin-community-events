@@ -21,7 +21,7 @@ import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS } from './manifest';
 import {
   EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND,
-  eventWeatherForecastJobRequest
+  eventWeatherForecastJobRequests
 } from './weather';
 import {
   appendEventLog,
@@ -250,7 +250,7 @@ export async function adoptEventLifecycle(input: {
       profile,
       answers,
       timezone: config.timezone,
-      locale: adoption.locale ?? 'en',
+      locale: (await input.context.i18n.resolveScopeLocale(adoption.scopeId)).locale,
       creatorDisplayName: adoption.actorLabel || adoption.actorWid,
       ...(adoption.eventLocation ? { eventLocation: adoption.eventLocation } : {})
     });
@@ -434,8 +434,7 @@ export async function adoptEventLifecycle(input: {
     dedupeKey: `${EVENTS_JOBS.complete}:${event.id}:${event.lifecycleCompleteAt}`
   });
   if (origin !== 'adopted_poll') {
-    const weatherRequest = eventWeatherForecastJobRequest({ event, profile, now });
-    if (weatherRequest) {
+    for (const weatherRequest of eventWeatherForecastJobRequests({ event, profile, now })) {
       await runtime.enqueuePluginJob(weatherRequest);
     }
   }
@@ -571,9 +570,8 @@ async function reconcileAdoptedGroupLifecycle(input: {
       : existingWeather
         ? 'already_pending'
       : 'not_scheduled';
-  if (!existingWeather) {
-    const request = eventWeatherForecastJobRequest({ event, profile: input.profile, now: new Date() });
-    if (request) {
+  for (const request of eventWeatherForecastJobRequests({ event, profile: input.profile, now: new Date() })) {
+    if (!getEventWeatherDelivery(input.db, event.id, request.payload.deliveryKind, event.updatedAt)) {
       await input.runtime.enqueuePluginJob({
         ...request,
         dedupeKey: `${request.dedupeKey}:lifecycle-recovery:${event.updatedAt}`

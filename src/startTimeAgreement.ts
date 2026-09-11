@@ -128,7 +128,7 @@ export async function handleEventStartTimeAgreementJob(
       return blockAgreement(context, db, event, agreement, now, 'creator_identity_unavailable');
     }
     const config = parseEventsConfig(await context.configFor(event.scopeId, event.actorIdentityId));
-    const locale = await context.i18n.resolveIdentityLocale(event.actorIdentityId, event.scopeId);
+    const locale = await context.i18n.resolveScopeLocale(event.scopeId);
     const t = await context.i18n.translatorForIdentity(event.actorIdentityId, event.scopeId);
     const profile = localizeDefaultEventProfiles(config.eventProfiles, t)
       .find((candidate) => candidate.id === event.profileId);

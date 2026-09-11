@@ -10,11 +10,13 @@ import type {
   WeatherQueryOutput
 } from '../weather/serviceApi';
 import {
+  WEATHER_MAX_DAY_OFFSET,
   WEATHER_QUERY_METHOD,
   WEATHER_SERVICE_ID
 } from '../weather/serviceApi';
 import { renderMarineForecast } from '../weather/marineForecast';
 import { eventDateAndTimeToUtc } from './datetime';
+import { eventDateTemplateTokens } from './templateDates';
 import { renderEventTemplate } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
@@ -38,6 +40,8 @@ import {
 
 export const EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND = 'forecast.poll-close';
 export const EVENT_WEATHER_FORECAST_DAILY_KIND_PREFIX = 'forecast.daily';
+// Open-Meteo counts today as the first of its 16 forecast days.
+export const EVENT_WEATHER_FORECAST_LEAD_DAYS = [WEATHER_MAX_DAY_OFFSET, 12, 7, 2, 1, 0] as const;
 
 type PluginEnqueueJobAction = Extract<PluginAction, { type: 'plugin.enqueueJob' }>;
 type WeatherForecastDay = WeatherForecastOutput['days'][number];
@@ -156,19 +160,22 @@ export function eventWeatherForecastSchedules(input: {
   const { event, profile } = input;
   const now = input.now ?? new Date();
   const schedules: EventWeatherForecastSchedule[] = [];
-  if (profile.weather.sendOnPollClose) {
-    const scheduledAt = eventWeatherPollCloseScheduledAt(event);
-    if (scheduledAt && weatherForecastScheduleAllowed(event, scheduledAt, now)) {
-      schedules.push({
-        deliveryKind: EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND,
-        scheduleKind: 'poll-close',
-        scheduledAt
-      });
-    }
+  const today = localDateKey(now, event.timezone);
+  const initial = eventWeatherPollCloseScheduledAt(event);
+  const initialDate = initial && localDateKey(initial, event.timezone);
+  if (initial && initialDate && today && initialDate >= today
+      && weatherForecastScheduleAllowed(event, initial, now)) {
+    schedules.push({
+      deliveryKind: EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND,
+      scheduleKind: 'poll-close',
+      scheduledAt: initial
+    });
   }
-  if (profile.weather.sendDaily) {
-    const scheduledAt = eventWeatherNextDailyForecastScheduledAt(event, profile, now);
-    if (scheduledAt && weatherForecastScheduleAllowed(event, scheduledAt, now)) {
+  for (const scheduledAt of eventWeatherCalendarForecastDates(event, profile)) {
+    const date = localDateKey(scheduledAt, event.timezone);
+    // An immediate creation-time forecast replaces that day's scheduled update.
+    if (date && today && date >= today && date !== initialDate
+        && weatherForecastScheduleAllowed(event, scheduledAt, now)) {
       schedules.push({
         deliveryKind: eventWeatherDailyForecastKind(scheduledAt, event),
         scheduleKind: 'daily',
@@ -176,17 +183,14 @@ export function eventWeatherForecastSchedules(input: {
       });
     }
   }
-  return schedules;
+  return schedules.sort((left, right) => left.scheduledAt.getTime() - right.scheduledAt.getTime());
 }
 
 export function eventWeatherForecastScheduledAt(
   event: StoredEventRecord,
   profile: EventProfile
 ): Date | undefined {
-  if (profile.weather.sendOnPollClose) {
-    return eventWeatherPollCloseScheduledAt(event);
-  }
-  return eventWeatherNextDailyForecastScheduledAt(event, profile, new Date());
+  return eventWeatherForecastSchedules({ event, profile })[0]?.scheduledAt;
 }
 
 function eventWeatherForecastJobRequestForSchedule(
@@ -276,7 +280,10 @@ export async function handleEventWeatherForecastJob(
   const schedule = eventWeatherForecastScheduleForJob(job.payload, event, profile);
   if (!schedule) {
     await markWeatherSkipped(context, db, event, payloadDeliveryKind, 'invalid_schedule');
-    return [audit('events.weather_forecast.skipped', { eventId, reason: 'invalid_schedule' })];
+    return [
+      audit('events.weather_forecast.skipped', { eventId, reason: 'invalid_schedule' }),
+      ...eventWeatherForecastJobActions({ event, profile })
+    ];
   }
   if (hasSentEventWeatherDeliveryForKind(db, event.id, schedule.deliveryKind)) {
     await markWeatherSkipped(
@@ -299,6 +306,13 @@ export async function handleEventWeatherForecastJob(
   }
 
   const now = new Date();
+  if (localDateKey(schedule.scheduledAt, event.timezone)! < localDateKey(now, event.timezone)!) {
+    await markWeatherSkipped(context, db, event, schedule.deliveryKind, 'forecast_date_passed', schedule.scheduledAt, schedule.scheduleKind);
+    return [
+      audit('events.weather_forecast.skipped', { eventId, reason: 'forecast_date_passed' }),
+      ...nextDailyWeatherForecastActions(event, profile, schedule, now)
+    ];
+  }
   const existing = getEventWeatherDelivery(
     db,
     event.id,
@@ -423,19 +437,18 @@ async function prepareWeatherDeliveryIntent(
     throw new WeatherDeliveryFenceError(postQueryFenceReason);
   }
   const report = result.report;
-  const forecastDay = selectForecastDay(report, event, schedule);
-  if (!forecastDay) {
+  const forecastDays = selectEventWeatherForecastDays(report, event, now);
+  if (forecastDays.length === 0) {
     throw new Error('event_day_forecast_unavailable');
   }
-  const eventActorIdentityId = requireWeatherEventActorIdentityId(event);
-  const t = await context.i18n.translatorForIdentity(eventActorIdentityId, event.scopeId);
-  const resolvedLocale = await context.i18n.resolveIdentityLocale(eventActorIdentityId, event.scopeId);
+  const t = await context.i18n.translatorForScope(event.scopeId);
+  const resolvedLocale = await context.i18n.resolveScopeLocale(event.scopeId);
   const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
-  const messages = renderEventWeatherForecast({
+  const messages = renderEventWeatherForecastDays({
     event,
     profile: localizedProfile,
     report,
-    forecastDay,
+    forecastDays,
     t,
     locale: resolvedLocale.locale
   });
@@ -500,7 +513,7 @@ async function prepareWeatherDeliveryIntent(
       subgroupChatId: event.subgroupChatId,
       provider: report.provider,
       fetchedAt: report.fetchedAt,
-      forecastDate: forecastDay.date,
+      forecastDates: forecastDays.map((day) => day.date),
       location: report.location
     }
   });
@@ -516,7 +529,7 @@ async function prepareWeatherDeliveryIntent(
       deliveryKind: schedule.deliveryKind,
       scheduleKind: schedule.scheduleKind,
       scheduledAt: schedule.scheduledAt.toISOString(),
-      forecastDate: forecastDay.date,
+      forecastDates: forecastDays.map((day) => day.date),
       location: report.location
     }
   });
@@ -782,6 +795,41 @@ function terminateFencedWeatherDelivery(
   })];
 }
 
+export function renderEventWeatherForecastDays(input: {
+  event: StoredEventRecord;
+  profile: EventProfile;
+  report: WeatherForecastOutput;
+  forecastDays: WeatherForecastDay[];
+  t: TranslateFn;
+  locale: string;
+}): { meteorologicalText: string; marineText?: string | undefined } {
+  const rendered = input.forecastDays.map((forecastDay) => renderEventWeatherForecast({
+    ...input,
+    forecastDay
+  }));
+  const marineText = rendered.map((day) => day.marineText).filter(Boolean).join('\n\n');
+  return {
+    meteorologicalText: rendered.map((day) => day.meteorologicalText).filter(Boolean).join('\n\n'),
+    ...(marineText ? { marineText } : {})
+  };
+}
+
+export function eventWeatherForecastRecoverySkipReason(input: {
+  event: StoredEventRecord;
+  profile: EventProfile | undefined;
+  delivery: StoredEventWeatherDelivery;
+  now: Date;
+}): string | undefined {
+  if (!input.profile?.weather.enabled) return 'profile_weather_disabled';
+  const schedule = eventWeatherForecastScheduleForJob({
+    deliveryKind: input.delivery.kind,
+    scheduleKind: input.delivery.scheduleKind,
+    scheduledAt: input.delivery.scheduledAt
+  }, input.event, input.profile);
+  if (!schedule) return 'forecast_schedule_changed';
+  return weatherRuntimeSkipReason(input.event, schedule.scheduledAt, input.now);
+}
+
 export function renderEventWeatherForecast(input: {
   event: StoredEventRecord;
   profile: EventProfile;
@@ -794,6 +842,9 @@ export function renderEventWeatherForecast(input: {
   marineText?: string | undefined;
 } {
   const summary = weatherSummary(input.forecastDay, input.t, input.locale);
+  const forecastDate = parseLocalDate(input.forecastDay.date);
+  const forecastNoon = forecastDate && eventDateAndTimeToUtc(forecastDate, { hour: 12, minute: 0 }, input.event.timezone);
+  const forecastDateTokens = forecastNoon ? eventDateTemplateTokens(forecastNoon, input.event.timezone, input.locale) : {};
   const meteorologicalText = renderEventTemplate({
     template: input.profile.weather.template,
     profile: input.profile,
@@ -805,6 +856,8 @@ export function renderEventWeatherForecast(input: {
     locale: input.locale,
     creatorDisplayName: input.event.actorLabel || input.event.actorWid,
     extraTokens: {
+      // Existing weather templates use these date tokens instead of weatherDate.
+      ...Object.fromEntries(['weekday', 'dd', 'mm', 'yy', 'yyyy'].map((key) => [key, forecastDateTokens[key]])),
       eventId: input.event.id,
       groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       subgroupChatId: input.event.subgroupChatId,
@@ -847,16 +900,13 @@ function weatherForecastServiceInput(event: StoredEventRecord, now: Date): Plugi
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
     input: {
-      selection: {
-        startDay: 0,
-        endDay: forecastDaysForEvent(event, now) - 1
-      },
+      selection: eventWeatherForecastDaySelection(event, now),
       includeMarine: true,
       location: {
         label: event.eventLocation.displayLabel,
         latitude: event.eventLocation.latitude,
         longitude: event.eventLocation.longitude,
-        timezone: event.eventLocation.timezone
+        timezone: event.timezone
       }
     }
   };
@@ -870,15 +920,18 @@ function requireWeatherEventActorIdentityId(event: StoredEventRecord): string {
   return actorIdentityId;
 }
 
-function selectForecastDay(
+export function selectEventWeatherForecastDays(
   report: WeatherForecastOutput,
   event: StoredEventRecord,
-  schedule: EventWeatherForecastSchedule
-): WeatherForecastDay | undefined {
-  const forecastDate = schedule.scheduleKind === 'daily'
-    ? localDateKey(schedule.scheduledAt, event.timezone)
-    : event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone);
-  return report.days.find((day) => day.date === forecastDate);
+  now: Date
+): WeatherForecastDay[] {
+  const occupied = eventOccupiedLocalDateRange(event);
+  const today = localDateKey(now, event.timezone);
+  if (!occupied || !today) return [];
+  const start = datePartsKey(occupied.start) > today ? datePartsKey(occupied.start) : today;
+  const end = datePartsKey(occupied.end);
+  return report.days.filter((day) => day.date >= start && day.date <= end)
+    .sort((left, right) => left.date.localeCompare(right.date));
 }
 
 function weatherSummary(day: WeatherForecastDay, t: TranslateFn, locale: string): string {
@@ -933,7 +986,7 @@ function formatMetric(metric?: WeatherMetricValue | undefined, locale?: string |
   return metric.unit ? `${value} ${metric.unit}` : value;
 }
 
-function eventWeatherForecastScheduleForJob(
+export function eventWeatherForecastScheduleForJob(
   payload: unknown,
   event: StoredEventRecord,
   profile: EventProfile
@@ -945,19 +998,19 @@ function eventWeatherForecastScheduleForJob(
     return undefined;
   }
   if (scheduleKind === 'poll-close') {
-    if (deliveryKind !== EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND || !profile.weather.sendOnPollClose) {
+    if (deliveryKind !== EVENT_WEATHER_FORECAST_POLL_CLOSE_KIND) {
       return undefined;
     }
     const scheduledAt = eventWeatherPollCloseScheduledAt(event);
     return scheduledAt ? { deliveryKind, scheduleKind, scheduledAt } : undefined;
   }
-  if (!profile.weather.sendDaily || !deliveryKind.startsWith(`${EVENT_WEATHER_FORECAST_DAILY_KIND_PREFIX}.`)) {
-    return undefined;
-  }
-  const expectedKind = eventWeatherDailyForecastKind(payloadScheduledAt, event);
-  return deliveryKind === expectedKind
-    ? { deliveryKind, scheduleKind, scheduledAt: payloadScheduledAt }
-    : undefined;
+  const initial = eventWeatherPollCloseScheduledAt(event);
+  const initialDate = initial && localDateKey(initial, event.timezone);
+  const scheduledAt = eventWeatherCalendarForecastDates(event, profile).find((candidate) =>
+    eventWeatherDailyForecastKind(candidate, event) === deliveryKind
+    && localDateKey(candidate, event.timezone) !== initialDate
+  );
+  return scheduledAt ? { deliveryKind, scheduleKind, scheduledAt } : undefined;
 }
 
 function nextDailyWeatherForecastActions(
@@ -966,70 +1019,44 @@ function nextDailyWeatherForecastActions(
   completedSchedule: EventWeatherForecastSchedule,
   now: Date
 ): PluginEnqueueJobAction[] {
-  if (!profile.weather.sendDaily) {
-    return [];
-  }
-  const searchFrom = completedSchedule.scheduleKind === 'daily'
-    ? new Date(Math.max(now.getTime(), completedSchedule.scheduledAt.getTime() + 60_000))
-    : now;
-  const scheduledAt = eventWeatherNextDailyForecastScheduledAt(event, profile, searchFrom, false);
-  if (!scheduledAt || !weatherForecastScheduleAllowed(event, scheduledAt, now)) {
-    return [];
-  }
-  const schedule: EventWeatherForecastSchedule = {
-    deliveryKind: eventWeatherDailyForecastKind(scheduledAt, event),
-    scheduleKind: 'daily',
-    scheduledAt
-  };
-  if (schedule.deliveryKind === completedSchedule.deliveryKind) {
-    return [];
-  }
-  const request = eventWeatherForecastJobRequestForSchedule(event, schedule, now);
-  return [{
-    type: 'plugin.enqueueJob',
-    pluginId: EVENTS_PLUGIN_ID,
-    ...request,
-    runAt: request.runAt ?? scheduledAt
-  }];
+  return eventWeatherForecastJobActions({ event, profile, now }).filter((action) =>
+    jobPayloadDeliveryKind(action.payload) !== completedSchedule.deliveryKind
+    && (action.runAt ?? now).getTime() > completedSchedule.scheduledAt.getTime()
+  );
 }
 
 function eventWeatherPollCloseScheduledAt(event: StoredEventRecord): Date | undefined {
-  const scheduledAt = new Date(event.closeAt);
-  return Number.isFinite(scheduledAt.getTime()) ? scheduledAt : undefined;
+  const scheduledAt = new Date(event.closedAt ?? event.closeAt);
+  const occupied = eventOccupiedLocalDateRange(event);
+  const date = parseLocalDate(localDateKey(scheduledAt, event.timezone));
+  if (!occupied || !date || datePartsKey(date) > datePartsKey(occupied.end)) return undefined;
+  return dateDiffDays(date, occupied.start) <= WEATHER_MAX_DAY_OFFSET ? scheduledAt : undefined;
 }
 
-function eventWeatherNextDailyForecastScheduledAt(
+function eventWeatherCalendarForecastDates(
   event: StoredEventRecord,
-  profile: EventProfile,
-  now: Date,
-  allowCurrentDayCatchUp = true
-): Date | undefined {
+  profile: EventProfile
+): Date[] {
   const occupied = eventOccupiedLocalDateRange(event);
-  const eventStartDate = occupied?.start;
-  const eventEndDate = occupied?.end;
-  const nowDate = parseLocalDate(localDateKey(now, event.timezone));
   const time = parseLocalTime(profile.weather.sendAtLocalTime);
-  if (!eventStartDate || !eventEndDate || !nowDate || !time) {
-    return undefined;
+  if (!occupied || !time) return [];
+  const dates = EVENT_WEATHER_FORECAST_LEAD_DAYS.map((lead) => addLocalDays(occupied.start, -lead));
+  for (let day = addLocalDays(occupied.start, 1); datePartsKey(day) <= datePartsKey(occupied.end); day = addLocalDays(day, 1)) {
+    dates.push(day);
   }
-  let candidateDate = datePartsKey(nowDate) < datePartsKey(eventStartDate) ? eventStartDate : nowDate;
-  let scheduledAt = eventDateAndTimeToUtc(candidateDate, time, event.timezone);
-  if (!scheduledAt) {
-    return undefined;
-  }
-  if (scheduledAt.getTime() <= now.getTime()) {
-    const isCurrentOccupiedDay = datePartsKey(candidateDate) === datePartsKey(nowDate)
-      && datePartsKey(candidateDate) >= datePartsKey(eventStartDate)
-      && datePartsKey(candidateDate) <= datePartsKey(eventEndDate);
-    if (!allowCurrentDayCatchUp || !isCurrentOccupiedDay) {
-      candidateDate = addLocalDays(candidateDate, 1);
-      scheduledAt = eventDateAndTimeToUtc(candidateDate, time, event.timezone);
-      if (!scheduledAt) {
-        return undefined;
-      }
+  const endsAt = eventWeatherEndsAt(event);
+  return dates.flatMap((date) => {
+    let scheduledAt = eventDateAndTimeToUtc(date, time, event.timezone);
+    // Early events still get an event-day forecast before they end.
+    if (scheduledAt && scheduledAt.getTime() >= endsAt.getTime()) {
+      scheduledAt = eventDateAndTimeToUtc(date, { hour: 0, minute: 0 }, event.timezone);
     }
-  }
-  return datePartsKey(candidateDate) <= datePartsKey(eventEndDate) ? scheduledAt : undefined;
+    return scheduledAt ? [scheduledAt] : [];
+  });
+}
+
+function eventWeatherEndsAt(event: StoredEventRecord): Date {
+  return new Date(!event.localTime && event.spanKind === 'day_trip' ? event.lifecycleCompleteAt : event.endsAt);
 }
 
 function eventOccupiedLocalDateRange(event: StoredEventRecord): {
@@ -1054,7 +1081,7 @@ function eventOccupiedLocalDateRange(event: StoredEventRecord): {
 }
 
 function weatherForecastScheduleAllowed(event: StoredEventRecord, scheduledAt: Date, now: Date): boolean {
-  const endsAt = new Date(event.endsAt);
+  const endsAt = eventWeatherEndsAt(event);
   if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() <= now.getTime()) {
     return false;
   }
@@ -1076,14 +1103,16 @@ function eventWeatherDailyForecastKind(scheduledAt: Date, event: StoredEventReco
   return `${EVENT_WEATHER_FORECAST_DAILY_KIND_PREFIX}.${dateKey}`;
 }
 
-function forecastDaysForEvent(event: StoredEventRecord, now: Date): number {
-  const eventDate = parseLocalDate(event.localDate ?? localDateKey(new Date(event.startsAtUtc || event.startsAt), event.timezone));
+export function eventWeatherForecastDaySelection(event: StoredEventRecord, now: Date): {
+  startDay: number; endDay: number;
+} {
+  const occupied = eventOccupiedLocalDateRange(event);
   const today = parseLocalDate(localDateKey(now, event.timezone));
-  if (!eventDate || !today) {
-    return 1;
-  }
-  const days = dateDiffDays(today, eventDate) + 1;
-  return Math.min(16, Math.max(1, days));
+  if (!occupied || !today) throw new Error('invalid_event_forecast_dates');
+  const startDay = Math.max(0, dateDiffDays(today, occupied.start));
+  const endDay = Math.min(WEATHER_MAX_DAY_OFFSET, dateDiffDays(today, occupied.end));
+  if (startDay > endDay) throw new Error('event_outside_forecast_window');
+  return { startDay, endDay };
 }
 
 function weatherRuntimeSkipReason(event: StoredEventRecord, scheduledAt: Date, now: Date): string | undefined {
@@ -1096,7 +1125,10 @@ function weatherRuntimeSkipReason(event: StoredEventRecord, scheduledAt: Date, n
   if (!event.subgroupChatId) {
     return 'no_event_group';
   }
-  const endsAt = new Date(event.endsAt);
+  if (localDateKey(scheduledAt, event.timezone)! < localDateKey(now, event.timezone)!) {
+    return 'forecast_date_passed';
+  }
+  const endsAt = eventWeatherEndsAt(event);
   if (Number.isFinite(endsAt.getTime()) && endsAt.getTime() <= now.getTime()) {
     return 'event_ended';
   }

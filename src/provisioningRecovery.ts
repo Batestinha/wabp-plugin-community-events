@@ -35,7 +35,7 @@ import { eventCleanupJobRequest } from './cleanupScheduling';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { sendEventCalendarHint } from './calendarHint';
-import { eventWeatherForecastJobRequest } from './weather';
+import { eventWeatherForecastJobRequests } from './weather';
 import {
   eventCreatorMembershipPauseKindForFailure,
   notifyEventCreatorMembershipPaused
@@ -1031,12 +1031,12 @@ export async function finalizeUnplannedEventLifecycle(input: {
     });
   }
 
-  const weatherRequest = eventWeatherForecastJobRequest({
+  const weatherRequests = eventWeatherForecastJobRequests({
     event,
     profile: input.profile,
     now: input.now
   });
-  if (weatherRequest) {
+  for (const weatherRequest of weatherRequests) {
     try {
       assertUnplannedEventFinalizationFence(db, event, input.expectedEventUpdatedAt);
       await input.runtime.enqueuePluginJob(weatherRequest);
@@ -2031,12 +2031,12 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
   } catch (error) {
     failures.push(`cleanup job: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const weatherRequest = eventWeatherForecastJobRequest({
+  const weatherRequests = eventWeatherForecastJobRequests({
     event,
     profile: input.profile,
     now: input.now
   });
-  if (weatherRequest) {
+  for (const weatherRequest of weatherRequests) {
     try {
       await enqueuePluginJob(input.context.queue, {
         pluginId: EVENTS_PLUGIN_ID,

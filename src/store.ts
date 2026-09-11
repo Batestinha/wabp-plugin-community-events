@@ -1727,11 +1727,10 @@ export function bindEventPollAssistantAttendanceLifecycle(db: PluginDatabase, in
       if (!chatId) {
         throw new Error(`Event ${input.eventId} has no announcement group for its attendance poll.`);
       }
-      recordEventAnnouncementMessage(db, {
+      recordEventAttendancePollMessage(db, {
         eventId: updated.id,
         scopeId: updated.scopeId,
-        kind: 'poll',
-        deliveryKey: `attendance:${input.generation}`,
+        generation: input.generation,
         chatId,
         messageId: input.pollWaMessageId,
         createdAt: boundAt
@@ -1899,11 +1898,10 @@ export function persistEventPollAssistantAttendanceSnapshot(db: PluginDatabase, 
     if (!chatId) {
       throw new Error(`Event ${input.eventId} has no announcement group for its attendance poll.`);
     }
-    recordEventAnnouncementMessage(db, {
+    recordEventAttendancePollMessage(db, {
       eventId: updated.id,
       scopeId: updated.scopeId,
-      kind: 'poll',
-      deliveryKey: `attendance:${input.generation}`,
+      generation: input.generation,
       chatId,
       messageId: input.snapshot.pollWaMessageId,
       createdAt: persistedAt
@@ -5313,6 +5311,36 @@ export function updateEventCalendarStatus(db: PluginDatabase, input: {
     input.updatedAt,
     input.eventId
   );
+}
+
+function recordEventAttendancePollMessage(db: PluginDatabase, input: {
+  eventId: string;
+  scopeId: string;
+  generation: number;
+  chatId: string;
+  messageId: string;
+  createdAt: string;
+}): void {
+  // Edited polls are already tracked under the replacement operation's delivery
+  // key. Reuse that exact artifact when binding or finalizing attendance so its
+  // identity and deletion history survive the close.
+  const existing = db.get<{ scope_id: string; chat_id: string }>(
+    `SELECT scope_id, chat_id FROM event_announcement_messages
+      WHERE event_id = ? AND kind = 'poll' AND message_id = ?`,
+    input.eventId,
+    input.messageId.trim()
+  );
+  if (existing) {
+    if (existing.scope_id !== input.scopeId || existing.chat_id !== input.chatId) {
+      throw new Error(`Event ${input.eventId} received conflicting attendance poll artifact references.`);
+    }
+    return;
+  }
+  recordEventAnnouncementMessage(db, {
+    ...input,
+    kind: 'poll',
+    deliveryKey: `attendance:${input.generation}`
+  });
 }
 
 export function recordEventAnnouncementMessage(db: PluginDatabase, input: {

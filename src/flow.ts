@@ -785,7 +785,7 @@ function eventFlowAnswersFromData(
     startsAt,
     endsAt,
     spanKind: selectedSpanKind,
-    pollPhase: selectedSpanKind === 'multi_day' && eventPollPhase(data, profile) === 'unplanned'
+    pollPhase: eventPollPhase(data, profile) === 'unplanned'
       ? 'unplanned'
       : 'poll',
     localDate: formatEventDateParts(startDate),
@@ -803,7 +803,7 @@ function firstCreationStepId(profiles: EventProfile[], data: Record<string, unkn
   const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
   const spanKind = eventSpanKind(data, profile);
   if (!spanKind) return EVENT_CREATION_SPAN_STEP_ID;
-  if (spanKind === 'multi_day' && !eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
+  if (!eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
   if (!profile) return EVENT_PROFILE_STEP_ID;
   const question = profile.questions.find((candidate) => (
     questionAppliesToSpan(profile, candidate, spanKind)
@@ -850,8 +850,8 @@ function firstMissingSpanStepId(profile: EventProfile, data: Record<string, unkn
   if (spanKind !== 'day_trip' && spanKind !== 'multi_day') {
     return spanStepId(profile);
   }
+  if (askPollPhase && !eventPollPhase(data, profile)) return pollPhaseStepId(profile);
   if (spanKind === 'multi_day') {
-    if (askPollPhase && !eventPollPhase(data, profile)) return pollPhaseStepId(profile);
     if (!isEventDateAnswer(data[endDateStepId(profile)])) return endDateStepId(profile);
     const endTime = data[endTimeStepId(profile)];
     if (endTime !== null && !isEventTimeAnswer(endTime)) return endTimeStepId(profile);
@@ -1372,7 +1372,7 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
       ? 'official.community-events.span.dayTrip'
       : 'official.community-events.span.multiDay')
   });
-  return answers.spanKind === 'multi_day' && eventPollPhase(state.data, profile)
+  return eventPollPhase(state.data, profile)
     ? `${summary}\n${t(answers.pollPhase === 'unplanned'
       ? 'official.community-events.flow.pollPhase.unplanned'
       : 'official.community-events.flow.pollPhase.poll')}`

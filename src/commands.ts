@@ -3669,7 +3669,7 @@ async function publishConfirmedEvent(input: {
       eventLocation: input.eventLocation
     });
     const now = new Date();
-    creationMode = (input.answers.spanKind === 'multi_day' && input.answers.pollPhase === 'unplanned')
+    creationMode = input.answers.pollPhase === 'unplanned'
       || materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
     if (creationMode === 'unplanned') {
       const result = await createUnplannedEventLifecycle({

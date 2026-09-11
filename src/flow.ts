@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { FlowDefinition, FlowState, FlowStep } from '../../../adminBot/flows/flowTypes';
+import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '../../../adminBot/flows/flowTypes';
 import type { FlowSessionSnapshot } from '../../../adminBot/flows/flowEngine';
 import type { TranslateFn } from '../../../platform/i18n';
 import {
@@ -206,6 +206,7 @@ function buildEventFlowDefinition(input: {
     for (const [index, question] of visibleQuestions.entries()) {
       const nextQuestion = visibleQuestions[index + 1];
       const stepId = questionStepId(profile, question);
+      const currentValue = input.askPrefilledQuestions ? undefined : input.prefill?.answers[question.key];
       const nextStepId = nextQuestion
         ? questionStepId(profile, nextQuestion)
         : input.askPrefilledQuestions
@@ -216,13 +217,13 @@ function buildEventFlowDefinition(input: {
         steps[stepId] = {
           id: stepId,
           kind: 'choice',
-          prompt: initialQuestionPrompt(input.t, profile, question, initialData, input.prefill?.answers[question.key]),
+          prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue),
           promptForState: (state) => safeQuestionPromptForState(
             input.t,
             profile,
             question,
             state.data,
-            input.prefill?.answers[question.key]
+            currentValue
           ),
           options: initialOptions,
           optionsForState: (state) => safeEventQuestionChoiceOptions(profile, question, state.data),
@@ -239,13 +240,13 @@ function buildEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
-        prompt: initialQuestionPrompt(input.t, profile, question, initialData, input.prefill?.answers[question.key]),
+        prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue),
         promptForState: (state) => safeQuestionPromptForState(
           input.t,
           profile,
           question,
           state.data,
-          input.prefill?.answers[question.key]
+          currentValue
         ),
         nextStepId,
         ...(durationFirst ? {
@@ -384,6 +385,25 @@ function buildEventFlowDefinition(input: {
     };
   }
 
+  if (input.askPrefilledQuestions && initialProfile) {
+    for (const step of Object.values(steps)) {
+      if (step.kind === 'choice') step.backOptionPosition = 'last';
+    }
+    const keepAnswer = (stepId: string, value: unknown, label?: string, optional = false) => {
+      steps[stepId] = withSavedEventAnswer(steps[stepId]!, input.t, value, label, optional);
+    };
+    keepAnswer(EVENT_PROFILE_STEP_ID, initialProfile.id, initialProfile.label);
+    const savedSpan = eventSpanKind(initialData, initialProfile) ?? input.prefill?.spanKind;
+    keepAnswer(EVENT_CREATION_SPAN_STEP_ID, savedSpan);
+    keepAnswer(spanStepId(initialProfile), savedSpan);
+    for (const question of initialProfile.questions) {
+      const stepId = questionStepId(initialProfile, question);
+      keepAnswer(stepId, initialData[stepId], input.prefill?.answers[question.key], !question.required);
+    }
+    keepAnswer(endDateStepId(initialProfile), initialData[endDateStepId(initialProfile)], input.prefill?.endLocalDate);
+    keepAnswer(endTimeStepId(initialProfile), initialData[endTimeStepId(initialProfile)], input.prefill?.endLocalTime, true);
+  }
+
   return {
     flowType,
     t: input.t,
@@ -399,6 +419,55 @@ function buildEventFlowDefinition(input: {
       ? false
       : input.t(input.completeMessageKey ?? 'official.community-events.flow.complete'),
     steps
+  };
+}
+
+function withSavedEventAnswer(
+  step: FlowStep,
+  t: TranslateFn,
+  savedValue: unknown,
+  savedLabel?: string,
+  optional = false
+): FlowStep {
+  // Capture the persisted answer, not a replacement entered earlier in this edit.
+  // Normalize dates so keeping "tomorrow" cannot move an already scheduled event.
+  const value = ((isEventDateAnswer(savedValue) || isEventTimeAnswer(savedValue)
+    ? savedValue.normalized
+    : singleChoiceValue(savedValue)) ?? savedLabel)?.trim() || undefined;
+  if (!value && !optional) return step;
+  const current = step.options?.find((option) => option.value === value)?.label
+    ?? value ?? t('official.community-events.flow.unset');
+  const promptKey = step.kind === 'choice'
+    ? 'official.community-events.flow.editChoicePrompt'
+    : 'official.community-events.flow.editTextPrompt';
+  const prompt = (base: string) => t(promptKey, { prompt: base, current });
+  const shared = {
+    ...step,
+    prompt: prompt(step.prompt),
+    promptForState: (state: FlowState) => prompt(step.promptForState?.(state) ?? step.prompt)
+  };
+  if (step.kind === 'choice') {
+    const options = (choices: FlowOption[]): FlowOption[] => [
+      { label: current, value: value ?? null },
+      ...choices.filter((choice) => choice.value !== value)
+    ];
+    return {
+      ...shared,
+      minSelections: 1,
+      options: options(step.options ?? []),
+      optionsForState: (state) => options(step.optionsForState?.(state) ?? step.options ?? [])
+    };
+  }
+  return {
+    ...shared,
+    resolveInput: (input) => {
+      if (input.input !== '1') return step.resolveInput?.(input);
+      if (!value) {
+        return step.resolveSkippedInput?.(input) ?? { status: 'use-value', value: null };
+      }
+      // Reuse the original validators, including end-time validation against edited dates.
+      return step.resolveInput?.({ ...input, input: value }) ?? { status: 'use-value', value };
+    }
   };
 }
 

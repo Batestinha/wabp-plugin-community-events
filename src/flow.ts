@@ -134,6 +134,10 @@ function buildEventFlowDefinition(input: {
   now?: (() => Date) | undefined;
 }, flowType: string): FlowDefinition {
   const askPollPhase = isEventCreationFlowType(flowType);
+  const durationFirst = askPollPhase || input.askPrefilledQuestions === true;
+  const nextQuestionStepId = (state: FlowState) => input.askPrefilledQuestions
+    ? nextReviewQuestionStepId(input.profiles, state)
+    : firstCreationStepId(input.profiles, state.data);
   const timezone = input.timezone ?? 'UTC';
   const locale = input.locale ?? 'en';
   const initialData = input.initialData ?? eventInitialFlowData(input.profiles, input.prefill, {
@@ -154,8 +158,8 @@ function buildEventFlowDefinition(input: {
       options: input.profiles.map((profile) => ({ label: profile.label, value: profile.id })),
       minSelections: 1,
       maxSelections: 1,
-      ...(askPollPhase ? {
-        nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+      ...(durationFirst ? {
+        nextStepIdForState: nextQuestionStepId
       } : {}),
       nextStepIdByValue: Object.fromEntries(input.profiles.map((profile) => [
         profile.id,
@@ -164,7 +168,7 @@ function buildEventFlowDefinition(input: {
     }
   };
 
-  if (askPollPhase) {
+  if (durationFirst) {
     steps[EVENT_CREATION_SPAN_STEP_ID] = {
       id: EVENT_CREATION_SPAN_STEP_ID,
       kind: 'choice',
@@ -175,8 +179,10 @@ function buildEventFlowDefinition(input: {
       ],
       minSelections: 1,
       maxSelections: 1,
-      nextStepIdForState: (state) => firstCreationStepId(input.profiles, state.data)
+      nextStepIdForState: nextQuestionStepId
     };
+  }
+  if (askPollPhase) {
     steps[EVENT_CREATION_POLL_PHASE_STEP_ID] = {
       id: EVENT_CREATION_POLL_PHASE_STEP_ID,
       kind: 'choice',
@@ -224,8 +230,8 @@ function buildEventFlowDefinition(input: {
           maxSelections: 1,
           skipOnSymbolInput: !question.required,
           nextStepId,
-          ...(askPollPhase ? {
-            nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+          ...(durationFirst ? {
+            nextStepIdForState: nextQuestionStepId
           } : {})
         };
         continue;
@@ -242,8 +248,8 @@ function buildEventFlowDefinition(input: {
           input.prefill?.answers[question.key]
         ),
         nextStepId,
-        ...(askPollPhase ? {
-          nextStepIdForState: (state: FlowState) => firstCreationStepId(input.profiles, state.data)
+        ...(durationFirst ? {
+          nextStepIdForState: nextQuestionStepId
         } : {}),
         skipOnSymbolInput: !question.required,
         ...(question.type === EVENT_DATE_QUESTION_TYPE
@@ -381,10 +387,9 @@ function buildEventFlowDefinition(input: {
   return {
     flowType,
     t: input.t,
-    initialStepId: askPollPhase ? firstCreationStepId(input.profiles, initialData) : initialProfile
-      ? input.askPrefilledQuestions
-        ? firstQuestionStepId(initialProfile)
-        : firstMissingQuestionStepId(initialProfile, initialData)
+    initialStepId: input.askPrefilledQuestions ? EVENT_CREATION_SPAN_STEP_ID
+      : askPollPhase ? firstCreationStepId(input.profiles, initialData) : initialProfile
+        ? firstMissingQuestionStepId(initialProfile, initialData)
           ?? firstMissingSpanStepId(initialProfile, initialData, askPollPhase)
           ?? confirmStepId(initialProfile)
       : EVENT_PROFILE_STEP_ID,
@@ -722,11 +727,27 @@ function firstCreationStepId(profiles: EventProfile[], data: Record<string, unkn
   if (spanKind === 'multi_day' && !eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
   if (!profile) return EVENT_PROFILE_STEP_ID;
   const question = profile.questions.find((candidate) => (
-    !(spanKind === 'multi_day' && candidate.key === profile.startsAtTimeQuestionKey)
+    questionAppliesToSpan(profile, candidate, spanKind)
     && !questionComplete(profile, candidate, data)
   ));
   if (question) return questionStepId(profile, question);
   return firstMissingSpanStepId(profile, data) ?? confirmStepId(profile);
+}
+
+function nextReviewQuestionStepId(profiles: EventProfile[], state: FlowState): string {
+  const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(state.data[EVENT_PROFILE_STEP_ID]));
+  if (!profile) return EVENT_PROFILE_STEP_ID;
+  const spanKind = eventSpanKind(state.data, profile);
+  // Review every applicable question, even when the stored event has an answer.
+  const currentQuestionIndex = profile.questions.findIndex((question) => questionStepId(profile, question) === state.currentStepId);
+  const nextQuestion = profile.questions.slice(currentQuestionIndex + 1)
+    .find((question) => questionAppliesToSpan(profile, question, spanKind));
+  if (nextQuestion) return questionStepId(profile, nextQuestion);
+  return spanKind === 'multi_day' ? endDateStepId(profile) : confirmStepId(profile);
+}
+
+function questionAppliesToSpan(profile: EventProfile, question: EventQuestion, spanKind: EventSpanKind | undefined): boolean {
+  return !(spanKind === 'multi_day' && question.key === profile.startsAtTimeQuestionKey);
 }
 
 function singleChoiceValue(value: unknown): string | undefined {

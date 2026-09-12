@@ -1,5 +1,5 @@
-import type { PluginManifest } from '../../../platform/pluginRuntime/manifest';
-import { POLL_HISTORY_OWNED_DATA_RESOURCE } from '../../../platform/pluginRuntime/pluginOwnedData';
+import type { PluginManifest } from '../../../../packages/plugin-sdk/src/manifest';
+import { POLL_HISTORY_OWNED_DATA_RESOURCE } from '../../../../packages/plugin-sdk/src/owned-data';
 import { eventsConfigSchema } from './config';
 import { eventsMessages } from './messages';
 import { EVENT_WORKFLOW_SERVICE_ID, eventWorkflowActions } from './workflowActionApi';

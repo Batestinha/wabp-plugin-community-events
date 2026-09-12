@@ -1,19 +1,19 @@
-import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
+import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
 import { createHash, randomUUID } from 'node:crypto';
-import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
+import type { PluginPollVote } from './runtime';
 import type {
   CreatedGroupParticipantResult,
   MessageDeletionResult,
   PersistedRequiredCreatorReference
-} from '../../../platform/transport/transportTypes';
-import { equivalentWhatsAppMessageIds } from '../../../platform/transport/messageIds';
-import { comparePollVoteRevisions } from '../../../platform/transport/pollVoteOrdering';
-import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+} from '../../../../packages/plugin-sdk/src/transport';
+import { equivalentWhatsAppMessageIds } from '../../../../packages/plugin-sdk/src/message-ids';
+import { comparePollVoteRevisions } from '../../../../packages/plugin-sdk/src/poll-ordering';
+import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../../packages/plugin-sdk/src/database';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import type {
   PollAssistantLifecycleEnsureInput,
   PollAssistantLifecycleSnapshot
-} from '../poll-assistant/lifecycleServiceApi';
+} from './contracts/poll-assistant/lifecycleServiceApi';
 import { EVENTS_DATABASE, EVENTS_PLUGIN_ID } from './manifest';
 import type { EventSpanKind } from './span';
 import { inferredEventSpanKind } from './span';

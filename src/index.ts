@@ -1,5 +1,5 @@
 import { eventsDatabase, getEventTimezoneForGroup } from './store';
-import type { BotPlugin } from '../../../platform/pluginRuntime/types';
+import type { BotPlugin } from './runtime';
 import { registerEventsCancellations, registerEventsCommands } from './commands';
 import { createEventsHooks } from './hooks';
 import { migrateEventIdentityData } from './identityMigration';

@@ -1,20 +1,20 @@
-import type { TranslateFn } from '../../../platform/i18n';
-import type { PluginServiceCallInput } from '../../../platform/pluginRuntime/pluginServices';
-import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { PluginJobEvent } from '../../../platform/pluginRuntime/types';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import type { TranslateFn } from './runtime';
+import type { PluginServiceCallInput } from '../../../../packages/plugin-sdk/src/services';
+import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
+import type { PluginRuntimeContext } from './runtime';
+import type { PluginJobEvent } from './runtime';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
 import type {
   WeatherForecastOutput,
   WeatherMetricValue,
   WeatherQueryOutput
-} from '../weather/serviceApi';
+} from './contracts/weather/serviceApi';
 import {
   WEATHER_MAX_DAY_OFFSET,
   WEATHER_QUERY_METHOD,
   WEATHER_SERVICE_ID
-} from '../weather/serviceApi';
-import { renderMarineForecast } from '../weather/marineForecast';
+} from './contracts/weather/serviceApi';
+import { renderMarineForecast } from './contracts/weather/marineForecast';
 import { eventDateAndTimeToUtc } from './datetime';
 import { eventDateTemplateTokens } from './templateDates';
 import { renderEventTemplate } from './flow';
@@ -1269,7 +1269,7 @@ async function deferWeatherDeliveryAfterFailure(
     }
   });
   try {
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.weatherForecast,
       scopeId: event.scopeId,

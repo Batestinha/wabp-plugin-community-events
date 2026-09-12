@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import type { AppConfig } from '../../../platform/config/runtimeConfig';
+import type { AppConfig } from './deploymentConfig';
 
 export interface EventJsonLogEntry {
   action: string;

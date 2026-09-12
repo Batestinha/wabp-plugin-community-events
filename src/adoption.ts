@@ -1,10 +1,10 @@
-import type { PluginOperationContext, PluginPollVote } from '../../../platform/pluginRuntime/types';
-import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
+import type { PluginOperationContext, PluginPollVote } from './runtime';
+import { resolvePluginPollVotes } from '../../../../packages/plugin-sdk/src/poll-vote-identity';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
-} from '../../../platform/transport/pollVoteReadback';
-import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from '../shared';
+} from '../../../../packages/plugin-sdk/src/poll-readback';
+import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from './runtime';
 import {
   persistedEventAnnouncementDisposition,
   sendClaimedEventAnnouncement

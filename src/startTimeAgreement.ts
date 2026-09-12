@@ -1,8 +1,8 @@
-import type { TranslateFn } from '../../../platform/i18n';
-import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { PluginJobEvent } from '../../../platform/pluginRuntime/types';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import type { TranslateFn } from './runtime';
+import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
+import type { PluginRuntimeContext } from './runtime';
+import type { PluginJobEvent } from './runtime';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
 import {
   POLL_ASSISTANT_AUTOMATION_SERVICE_ID,
   POLL_ASSISTANT_CANCEL_POLL_METHOD,
@@ -12,8 +12,8 @@ import {
   type PollAssistantEnsurePollInput,
   type PollAssistantEnsurePollOutput,
   type PollAssistantResolvePollOutput
-} from '../poll-assistant/serviceApi';
-import { POLL_ASSISTANT_SCHEMA_VERSION } from '../poll-assistant/domain';
+} from './contracts/poll-assistant/serviceApi';
+import { POLL_ASSISTANT_SCHEMA_VERSION } from './contracts/poll-assistant/domain';
 import { localizeDefaultEventProfiles, parseEventsConfig, type EventProfile } from './config';
 import { eventDateAndTimeToUtc, type EventDateParts } from './datetime';
 import { materializeEventLifecycle } from './materialize';
@@ -65,7 +65,7 @@ export async function recoverEventStartTimeAgreementJobs(
     if (!event) {
       continue;
     }
-    await enqueuePluginJob(context.queue, agreementJobRequest(event, agreement, now, 'recovery'));
+    await enqueuePluginJob(context, agreementJobRequest(event, agreement, now, 'recovery'));
   }
   return agreements.length;
 }

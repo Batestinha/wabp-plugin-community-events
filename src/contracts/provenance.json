@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "contracts": [
+    {
+      "id": "community-subgroups/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/community-subgroups/serviceApi.ts",
+      "upstreamPath": "upstream/community-subgroups/serviceApi.ts.source",
+      "upstreamSha256": "229105f8d0cb5cc3ddd065e7c82b4b83dd35b35dc0e32c38fe67c242585190c2",
+      "vendoredPath": "community-subgroups/serviceApi.ts",
+      "vendoredSha256": "229105f8d0cb5cc3ddd065e7c82b4b83dd35b35dc0e32c38fe67c242585190c2",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "doas/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/doas/serviceApi.ts",
+      "upstreamPath": "upstream/doas/serviceApi.ts.source",
+      "upstreamSha256": "50f40776b81ebbeed7b93d31a9fe8b43158d1c2748f044f31c1d64949b2a9d3f",
+      "vendoredPath": "doas/serviceApi.ts",
+      "vendoredSha256": "50f40776b81ebbeed7b93d31a9fe8b43158d1c2748f044f31c1d64949b2a9d3f",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "geocoder/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/geocoder/serviceApi.ts",
+      "upstreamPath": "upstream/geocoder/serviceApi.ts.source",
+      "upstreamSha256": "32a6e419a31989eeeb92ebc632e16d9b3f20a57904f7c3f9c664b9a77d85ef73",
+      "vendoredPath": "geocoder/serviceApi.ts",
+      "vendoredSha256": "8ebfdf1cc4e973e0e8589fc521d671e17ac69ddaae32c7d012b82f7f93a76bae",
+      "patches": [
+        {
+          "operation": "replace-import",
+          "before": "'../../../../packages/plugin-sdk/src/clock'",
+          "after": "'../../../../../../packages/plugin-sdk/src/clock'"
+        }
+      ],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "poll-assistant/domain.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/poll-assistant/domain.ts",
+      "upstreamPath": "upstream/poll-assistant/domain.ts.source",
+      "upstreamSha256": "8e4cfd01e9aec0917e8a39a5a746e79f6d40f91fadf97154a8bb468f00372056",
+      "vendoredPath": "poll-assistant/domain.ts",
+      "vendoredSha256": "9b70428404ca52afed6fae7cb57ef70ec03f373cf6d5d50710946edac9ea8b84",
+      "patches": [
+        {
+          "operation": "replace-import",
+          "before": "'../../../../packages/plugin-sdk/src/poll-contract'",
+          "after": "'../../../../../../packages/plugin-sdk/src/poll-contract'"
+        }
+      ],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "poll-assistant/lifecycleServiceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/poll-assistant/lifecycleServiceApi.ts",
+      "upstreamPath": "upstream/poll-assistant/lifecycleServiceApi.ts.source",
+      "upstreamSha256": "17287264884aa31d020f0661fc7c50ebea3a5a5eea04a5b46cedb9bbbc830e9c",
+      "vendoredPath": "poll-assistant/lifecycleServiceApi.ts",
+      "vendoredSha256": "17287264884aa31d020f0661fc7c50ebea3a5a5eea04a5b46cedb9bbbc830e9c",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "poll-assistant/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/poll-assistant/serviceApi.ts",
+      "upstreamPath": "upstream/poll-assistant/serviceApi.ts.source",
+      "upstreamSha256": "8a17e02692cf13937db73af6ac0bde73135bfbc787de34b790b8f6d1cdb6c551",
+      "vendoredPath": "poll-assistant/serviceApi.ts",
+      "vendoredSha256": "8a17e02692cf13937db73af6ac0bde73135bfbc787de34b790b8f6d1cdb6c551",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "poll-assistant/workingHours.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/poll-assistant/workingHours.ts",
+      "upstreamPath": "upstream/poll-assistant/workingHours.ts.source",
+      "upstreamSha256": "678e320fa8f958aa8d3818fbf97c9eb0afab2bcc4a831fb2e2591200d0821353",
+      "vendoredPath": "poll-assistant/workingHours.ts",
+      "vendoredSha256": "678e320fa8f958aa8d3818fbf97c9eb0afab2bcc4a831fb2e2591200d0821353",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "weather/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/weather/serviceApi.ts",
+      "upstreamPath": "upstream/weather/serviceApi.ts.source",
+      "upstreamSha256": "67a73b979fce9453b23bfd1c79eaecdec30b7a28e9747d10b6629d4c0c117941",
+      "vendoredPath": "weather/serviceApi.ts",
+      "vendoredSha256": "67a73b979fce9453b23bfd1c79eaecdec30b7a28e9747d10b6629d4c0c117941",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "weather/config.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/weather/config.ts",
+      "upstreamPath": "upstream/weather/config.ts.source",
+      "upstreamSha256": "45c37336b4f84da3c5bf5945cf46767d18af649eadbd8be424586efa9c2caa1a",
+      "vendoredPath": "weather/config.ts",
+      "vendoredSha256": "45c37336b4f84da3c5bf5945cf46767d18af649eadbd8be424586efa9c2caa1a",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "connection-configuration-helper"
+    },
+    {
+      "id": "weather/marineForecast.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/weather/marineForecast.ts",
+      "upstreamPath": "upstream/weather/marineForecast.ts.source",
+      "upstreamSha256": "6387272b272b8eb00ee230a579f1387b14f331f19e20723d88ba3fd727e77f83",
+      "vendoredPath": "weather/marineForecast.ts",
+      "vendoredSha256": "bbf348964aec4c4ab162a49bccb03a4be4e2204b49e0fb2e5727a93ea169ad65",
+      "patches": [
+        {
+          "operation": "replace-import",
+          "before": "'../../../../packages/plugin-sdk/src/i18n'",
+          "after": "'../../../../../../packages/plugin-sdk/src/i18n'"
+        }
+      ],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "presentation-helper"
+    },
+    {
+      "id": "workspace-connector/config.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/workspace-connector/config.ts",
+      "upstreamPath": "upstream/workspace-connector/config.ts.source",
+      "upstreamSha256": "312b8b48f1d2d1b8eb92606fe967a869ee26326fc179180c1ba3bcf50735bf52",
+      "vendoredPath": "workspace-connector/config.ts",
+      "vendoredSha256": "312b8b48f1d2d1b8eb92606fe967a869ee26326fc179180c1ba3bcf50735bf52",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "connection-configuration-helper"
+    },
+    {
+      "id": "workspace-connector/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/workspace-connector/serviceApi.ts",
+      "upstreamPath": "upstream/workspace-connector/serviceApi.ts.source",
+      "upstreamSha256": "6fc6a7e205cd1ca31ed66ecd9071a68c98309c5cf829eba618619b4049cf01a2",
+      "vendoredPath": "workspace-connector/serviceApi.ts",
+      "vendoredSha256": "6fc6a7e205cd1ca31ed66ecd9071a68c98309c5cf829eba618619b4049cf01a2",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "workspace-connector/contracts/workspace-connector-v0.3.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "src/plugins/official/workspace-connector/contracts/workspace-connector-v0.3.ts",
+      "upstreamPath": "upstream/workspace-connector/contracts/workspace-connector-v0.3.ts.source",
+      "upstreamSha256": "1ba03538c077aef198de4052be5294790811c7cf7f53a5d928e0a12a84bf0774",
+      "vendoredPath": "workspace-connector/contracts/workspace-connector-v0.3.ts",
+      "vendoredSha256": "1ba03538c077aef198de4052be5294790811c7cf7f53a5d928e0a12a84bf0774",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "service-contract"
+    },
+    {
+      "id": "workspace-protocol.ts",
+      "repository": "https://github.com/Batestinha/wabp",
+      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
+      "path": "packages/workspace-connector-contracts/src/index.ts",
+      "upstreamPath": "upstream/workspace-protocol.ts.source",
+      "upstreamSha256": "1ba03538c077aef198de4052be5294790811c7cf7f53a5d928e0a12a84bf0774",
+      "vendoredPath": "workspace-protocol.ts",
+      "vendoredSha256": "1ba03538c077aef198de4052be5294790811c7cf7f53a5d928e0a12a84bf0774",
+      "patches": [],
+      "license": "MIT",
+      "licenseFile": "LICENSE.wabp",
+      "artifactKind": "protocol-contract"
+    }
+  ]
+}

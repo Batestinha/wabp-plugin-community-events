@@ -1,7 +1,7 @@
-import type { CommunityGroupSuggestion } from '../../../platform/transport/transportTypes';
-import type { PluginJobEvent } from '../../../platform/pluginRuntime/types';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import type { CommunityGroupSuggestion } from '../../../../packages/plugin-sdk/src/transport';
+import type { PluginJobEvent } from './runtime';
+import type { PluginRuntimeContext } from './runtime';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
 import { parseEventsConfig } from './config';
 import {
   EventCreationFlowStarter,
@@ -381,7 +381,7 @@ async function enqueueSuggestionReconcileJob(
   reason: string
 ): Promise<void> {
   const bucket = Math.floor(runAt.getTime() / EVENT_SUGGESTION_RECONCILE_INTERVAL_MS);
-  await enqueuePluginJob(context.queue, {
+  await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.suggestionReconcile,
     scopeId,

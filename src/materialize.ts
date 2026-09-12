@@ -1,4 +1,4 @@
-import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
+import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
 import type { EventFlowAnswers } from './flow';
 import {
   calendarDescription,
@@ -16,7 +16,7 @@ import type { StoredEventLocation, StoredEventPollOption, StoredEventResponseCla
 import type { EventSpanKind } from './span';
 import { eventDurationMinutes, validEventSpanDuration } from './span';
 import { eventLifecycleCompleteAt } from './datetime';
-import { validatePollContent } from '../../../platform/transport/pollContract';
+import { validatePollContent } from '../../../../packages/plugin-sdk/src/poll-contract';
 import {
   EventConditionalTextConfigurationError,
   renderEventConditionalText

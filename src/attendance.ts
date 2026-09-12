@@ -1,5 +1,5 @@
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+import type { PluginRuntimeContext } from './runtime';
+import type { CreatedGroupParticipantResult } from '../../../../packages/plugin-sdk/src/transport';
 import type { StoredEventRecord } from './store';
 
 export interface EventVoteSelection {

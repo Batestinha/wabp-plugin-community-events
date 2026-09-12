@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { AppConfig } from '../../../platform/config/runtimeConfig';
-import { OidcClientCredentialsTokenProvider } from '../../../platform/identity/clientCredentialsTokenProvider';
+import type { AppConfig } from './deploymentConfig';
+import { OidcClientCredentialsTokenProvider } from '../../../../packages/plugin-sdk/src/client-credentials';
 import type { EventsConfig } from './config';
 
 const DEFAULT_PUBLICATION_TIMEOUT_MS = 15_000;

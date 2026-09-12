@@ -1,5 +1,5 @@
-import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
-import type { GeocoderPlace } from '../geocoder/serviceApi';
+import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
+import type { GeocoderPlace } from './contracts/geocoder/serviceApi';
 import type { EventProfile } from './config';
 import type { StoredEventLocation } from './store';
 

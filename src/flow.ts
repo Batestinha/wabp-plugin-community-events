@@ -1,8 +1,8 @@
-import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
+import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
 import { randomUUID } from 'node:crypto';
-import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '../../../adminBot/flows/flowTypes';
-import type { FlowSessionSnapshot } from '../../../adminBot/flows/flowEngine';
-import type { TranslateFn } from '../../../platform/i18n';
+import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '../../../../packages/plugin-sdk/src/flow-types';
+import type { FlowSessionSnapshot } from './runtime';
+import type { TranslateFn } from './runtime';
 import {
   EVENT_CHOICE_QUESTION_TYPE,
   EVENT_DATE_QUESTION_TYPE,
@@ -23,7 +23,8 @@ import {
   isEventDateAnswer,
   isEventTimeAnswer,
   parseEventDateInput,
-  parseEventTimeInput
+  parseEventTimeInput,
+  type EventDateReference
 } from './datetime';
 import { eventSpanTemplateValues, formatEventTemplateDate } from './templateDates';
 import type { EventSpanKind } from './span';
@@ -56,6 +57,8 @@ export interface EventFlowAnswers {
   localTime?: string | undefined;
   endLocalDate?: string | undefined;
   endLocalTime?: string | undefined;
+  startDateReference?: (EventDateReference & { answerKey: string }) | undefined;
+  endDateReference?: EventDateReference | undefined;
 }
 
 export interface EventFlowPrefill {
@@ -734,6 +737,7 @@ function eventFlowAnswersFromData(
   const answers: Record<string, string> = {};
   let startDate: ReturnType<typeof eventDatePartsFromRaw>;
   let startTime: ReturnType<typeof eventTimePartsFromRaw>;
+  let startDateReference: EventDateReference | undefined;
   for (const question of profile.questions) {
     const raw = data[questionStepId(profile, question)];
     if (selectedSpanKind === 'multi_day' && question.key === profile.startsAtTimeQuestionKey
@@ -747,6 +751,7 @@ function eventFlowAnswersFromData(
     }
     if (question.key === profile.startsAtDateQuestionKey) {
       startDate = eventDatePartsFromRaw(raw);
+      startDateReference = isEventDateAnswer(raw) ? raw.reference : undefined;
     }
     if (question.key === profile.startsAtTimeQuestionKey) {
       startTime = eventTimePartsFromRaw(raw);
@@ -764,10 +769,13 @@ function eventFlowAnswersFromData(
   let endsAt: Date;
   let endLocalDate: string | undefined;
   let endLocalTime: string | undefined;
+  let endDateReference: EventDateReference | undefined;
   if (selectedSpanKind === 'day_trip') {
     endsAt = new Date(startsAt.getTime() + profile.calendar.durationMinutes * 60_000);
   } else {
-    const endDate = eventDatePartsFromRaw(data[endDateStepId(profile)]);
+    const rawEndDate = data[endDateStepId(profile)];
+    const endDate = eventDatePartsFromRaw(rawEndDate);
+    endDateReference = isEventDateAnswer(rawEndDate) ? rawEndDate.reference : undefined;
     const rawEndTime = data[endTimeStepId(profile)];
     const endTime = eventTimePartsFromRaw(rawEndTime)
       ?? (rawEndTime === null ? DEFAULT_MULTI_DAY_END_TIME : undefined);
@@ -798,6 +806,8 @@ function eventFlowAnswersFromData(
       ? 'unplanned'
       : 'poll',
     localDate: formatEventDateParts(startDate),
+    ...(startDateReference ? { startDateReference: { ...startDateReference, answerKey: profile.startsAtDateQuestionKey } } : {}),
+    ...(endDateReference ? { endDateReference } : {}),
     ...(explicitStartTime ? { localTime: formatEventTimeParts(explicitStartTime) } : {}),
     ...(endLocalDate ? { endLocalDate } : {}),
     ...(endLocalTime ? { endLocalTime } : {})

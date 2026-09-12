@@ -1,4 +1,4 @@
-import type { MessageCatalog } from '../../../platform/i18n';
+import type { MessageCatalog } from './runtime';
 
 export const eventsMessages: MessageCatalog = {
   'official.community-events.workflow.edit.title': 'Edit an event',

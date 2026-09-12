@@ -1,4 +1,4 @@
-import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
 import {
   claimEventAnnouncementDelivery,
   completeEventAnnouncementDelivery,

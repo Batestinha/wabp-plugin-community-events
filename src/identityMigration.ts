@@ -1,8 +1,8 @@
 import type {
   PluginDatabase,
   PluginDatabaseRow
-} from '../../../platform/pluginRuntime/runtime/pluginDatabase';
-import type { PluginLifecycleContext } from '../../../platform/pluginRuntime/types';
+} from '../../../../packages/plugin-sdk/src/database';
+import type { PluginLifecycleContext } from './runtime';
 import { eventsDatabase } from './store';
 
 interface EventActorIdentityRow extends PluginDatabaseRow {

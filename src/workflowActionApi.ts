@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { WorkflowActionDeclaration } from '../../../platform/workflows/contracts';
+import type { WorkflowActionDeclaration } from '../../../../packages/plugin-sdk/src/workflows';
 
 export const EVENT_WORKFLOW_SERVICE_ID = 'official.community-events.workflow.v1';
 export const eventActionLocationSchema = z.object({

@@ -1,6 +1,6 @@
-import { scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
+import { scopeTimezoneSchema } from '../../../../packages/plugin-sdk/src/clock';
 import { z } from 'zod';
-import type { TranslateFn } from '../../../platform/i18n';
+import type { TranslateFn } from './runtime';
 import { eventsMessages } from './messages';
 import { MAX_DAY_TRIP_DURATION_MINUTES, MIN_DAY_TRIP_DURATION_MINUTES } from './span';
 import { validateEventConditionalText, validateEventTemplateText } from './template';

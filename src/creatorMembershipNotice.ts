@@ -1,8 +1,8 @@
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import type { PluginRuntimeContext } from './runtime';
 import {
   isManagedCommunitySubgroupProvisioningError
-} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
+} from '../../../../packages/plugin-sdk/src/community-errors';
+import type { CreatedGroupParticipantResult } from '../../../../packages/plugin-sdk/src/transport';
 import type { StoredEventRecord } from './store';
 
 export type EventCreatorMembershipPauseKind =

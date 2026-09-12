@@ -1,16 +1,16 @@
 import { createHash } from 'node:crypto';
-import type { AppConfig } from '../../../platform/config/runtimeConfig';
-import { workspaceConnectorCanonicalJson } from '../../../../packages/workspace-connector-contracts/src';
+import type { AppConfig } from './deploymentConfig';
+import { workspaceConnectorCanonicalJson } from './contracts/workspace-protocol';
 import {
   isPluginServiceNotInvokedError,
   type PluginServiceCaller
-} from '../../../platform/pluginRuntime/pluginServices';
+} from '../../../../packages/plugin-sdk/src/services';
 import {
   WORKSPACE_CONNECTOR_PROJECTION_REPLACE_METHOD,
   WORKSPACE_CONNECTOR_PROJECTION_SERVICE_ID,
   type WorkspaceConnectorProjectionServiceInput
-} from '../workspace-connector/serviceApi';
-import { workspaceConnectorConnection } from '../workspace-connector/config';
+} from './contracts/workspace-connector/serviceApi';
+import { workspaceConnectorConnection } from './contracts/workspace-connector/config';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import type { EventCalendarResource, EventsConfig } from './config';
 import { calendarEventLocalDate, calendarEventSummary } from './ics';

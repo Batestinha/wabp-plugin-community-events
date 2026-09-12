@@ -1,20 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { PluginOperationContext } from '../../../platform/pluginRuntime/types';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
-import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
-import { isPluginServiceNotInvokedError } from '../../../platform/pluginRuntime/pluginServices';
+import type { PluginOperationContext } from './runtime';
+import type { PluginRuntimeContext } from './runtime';
+import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
+import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
+import { isPluginServiceNotInvokedError } from '../../../../packages/plugin-sdk/src/services';
 import {
   isDefinitelyNotSentTransportError,
   isTransportProviderUnavailableError
-} from '../../../platform/transport/transportErrors';
+} from '../../../../packages/plugin-sdk/src/transport-errors';
 import {
   DOAS_POLL_PUBLISH_METHOD,
   DOAS_POLL_RECONCILE_METHOD,
   DOAS_POLL_SERVICE_ID,
   type DoasPollPublishOutput,
   type DoasPollReconcileOutput
-} from '../doas/serviceApi';
+} from './contracts/doas/serviceApi';
 import { deleteEventArtifacts } from './eventArtifactDeletion';
 import {
   cancelEventAttendanceLifecycle,

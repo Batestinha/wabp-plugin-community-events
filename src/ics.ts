@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { renameSync } from 'node:fs';
 import { chown, lstat, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { AppConfig } from '../../../platform/config/runtimeConfig';
+import type { AppConfig } from './deploymentConfig';
 import type { EventCalendarResource, EventsConfig } from './config';
 import { renderEventTemplate } from './flow';
 import type { StoredEventRecord } from './store';

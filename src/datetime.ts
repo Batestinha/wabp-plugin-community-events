@@ -1,8 +1,8 @@
-import { chronoParserForLocale } from '../../../platform/naturalDate/chronoLocale';
+import { chronoParserForLocale } from '../../../../packages/plugin-sdk/src/chrono-locale';
 import {
   parseLocalizedDateTimeInput,
   type LocalizedDateParts
-} from '../../../platform/naturalDate/localizedDateTime';
+} from '../../../../packages/plugin-sdk/src/localized-date-time';
 import type { EventSpanKind } from './span';
 import { eventDateTemplateTokens, formatEventDateTime } from './templateDates';
 export { eventDateTemplateTokens, formatEventDateTime } from './templateDates';
@@ -49,6 +49,7 @@ export type EventDateParseResult =
       raw: string;
       date: EventDateParts;
       normalized: string;
+      reference?: EventDateReference | undefined;
     }
   | {
       status: 'invalid';
@@ -81,6 +82,15 @@ export interface EventDateAnswer {
   month: number;
   day: number;
   normalized: string;
+  reference?: EventDateReference | undefined;
+}
+
+/** Retain the original reference instant until the location has been disambiguated. */
+export interface EventDateReference {
+  raw: string;
+  referenceAt: string;
+  locale: string;
+  timezone: string;
 }
 
 export interface EventTimeAnswer {
@@ -106,13 +116,17 @@ export function parseEventDateTime(input: string, options: EventDateTimeParseOpt
 }
 
 export function parseEventDateInput(input: string, options: EventDateTimeParseOptions): EventDateParseResult {
-  const result = parseEventDateTimeInput(input, options);
+  const now = options.now ?? new Date();
+  const result = parseEventDateTimeInput(input, { ...options, now });
   if (result.status === 'missing_time') {
     return {
       status: 'ok',
       raw: result.raw,
       date: result.date,
-      normalized: formatEventDateParts(result.date)
+      normalized: formatEventDateParts(result.date),
+      ...(!STRICT_LOCAL_DATE.test(input.trim()) ? { reference: {
+        raw: input, referenceAt: now.toISOString(), locale: options.locale, timezone: options.timezone
+      } } : {})
     };
   }
   if (result.status === 'ok') {
@@ -245,7 +259,8 @@ export function eventDateAnswer(result: Extract<EventDateParseResult, { status: 
     year: result.date.year,
     month: result.date.month,
     day: result.date.day,
-    normalized: result.normalized
+    normalized: result.normalized,
+    ...(result.reference ? { reference: result.reference } : {})
   };
 }
 

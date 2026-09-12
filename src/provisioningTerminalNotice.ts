@@ -1,4 +1,4 @@
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import type { PluginRuntimeContext } from './runtime';
 import { appendEventLog, eventsDatabase, type StoredEventRecord } from './store';
 
 export type EventPreCreateTerminalNoticeKind = 'attempts_exhausted' | 'cleanup_expired';

@@ -1,26 +1,26 @@
 import { randomUUID } from 'node:crypto';
-import type { PluginAction } from '../../../platform/pluginRuntime/runtime/pluginActionTypes';
+import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
 import type {
   PluginGroupDismantledEvent,
   PluginJobEvent,
   PluginParticipantChangeEvent,
   PluginPollVotePluginEvent,
   PluginRuntimeHooks
-} from '../../../platform/pluginRuntime/types';
+} from './runtime';
 import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
-} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
+} from '../../../../packages/plugin-sdk/src/community-errors';
 import {
   IncompletePollVoteReadbackError,
   requirePollVotesThroughCutoff
-} from '../../../platform/transport/pollVoteReadback';
-import type { CreatedGroupParticipantResult } from '../../../platform/transport/transportTypes';
-import type { OfficialPluginCommandRuntime } from '../shared';
-import type { PluginGroupDismantleResult, PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { resolvePluginPollVotes } from '../../../platform/pluginRuntime/runtime/pluginPollVoteIdentity';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+} from '../../../../packages/plugin-sdk/src/poll-readback';
+import type { CreatedGroupParticipantResult } from '../../../../packages/plugin-sdk/src/transport';
+import type { OfficialPluginCommandRuntime } from './runtime';
+import type { PluginGroupDismantleResult, PluginRuntimeContext } from './runtime';
+import { resolvePluginPollVotes } from '../../../../packages/plugin-sdk/src/poll-vote-identity';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
@@ -583,7 +583,7 @@ export async function recoverUnplannedEventFinalizationJobs(
     if (!Number.isFinite(runAt.getTime())) {
       continue;
     }
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.unplannedFinalization,
       scopeId: finalization.scopeId,
@@ -616,7 +616,7 @@ export async function recoverEventProvisioningJobs(
       // Repair the deadline job independently of whether provisioning itself
       // is scheduled, claimed, or durably halted. This is what makes a lost
       // initial Redis enqueue recoverable without reopening provisioning.
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         ...eventCleanupJobRequest(record)
       });
@@ -675,7 +675,7 @@ export async function recoverEventProvisioningJobs(
         continue;
       }
       if (cleanupTransfer.status === 'deferred') {
-        await enqueuePluginJob(context.queue, {
+        await enqueuePluginJob(context, {
           pluginId: EVENTS_PLUGIN_ID,
           jobName: EVENTS_JOBS.cleanup,
           scopeId: record.scopeId,
@@ -718,7 +718,7 @@ export async function recoverEventProvisioningJobs(
             })
           : [];
         for (const retry of receiptReleaseRetries) {
-          await enqueuePluginJob(context.queue, {
+          await enqueuePluginJob(context, {
             pluginId: EVENTS_PLUGIN_ID,
             jobName: EVENTS_JOBS.pollReplacement,
             scopeId: retry.scopeId,
@@ -775,7 +775,7 @@ export async function recoverEventProvisioningJobs(
     if (!Number.isFinite(runAt.getTime())) {
       continue;
     }
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
       scopeId: record.scopeId,
@@ -852,7 +852,7 @@ export async function recoverEventCloseJobs(context: PluginRuntimeContext, optio
       await markStartupEventMissed(context, db, record, config, closeAt, now);
       continue;
     }
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.close,
       scopeId: record.scopeId,
@@ -879,7 +879,7 @@ export async function recoverEventAttendanceLifecycleJobs(
 ): Promise<number> {
   let enqueued = 0;
   for (const event of listEventPollAssistantAttendanceRecoveries(eventsDatabase(context.databases))) {
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.attendanceLifecycle,
       scopeId: event.scopeId,
@@ -935,7 +935,7 @@ export async function recoverEventPollReplacementJobs(
           ? closeAt
           : persistedNextAttemptAt
       : persistedNextAttemptAt;
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.pollReplacement,
       scopeId: replacement.scopeId,
@@ -1033,7 +1033,7 @@ export async function recoverEventCleanupJobs(context: PluginRuntimeContext): Pr
     const activeClaim = getEventCleanupClaim(db, record.id);
     const claimExpiresAt = activeClaim ? new Date(activeClaim.leaseExpiresAt) : undefined;
     const runAt = latestFiniteDate(cleanupAt, claimExpiresAt, now);
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.cleanup,
       scopeId: record.scopeId,
@@ -1056,7 +1056,7 @@ export async function recoverEventCompletionJobs(
   const records = listPendingCompletionEvents(eventsDatabase(context.databases));
   for (const record of records) {
     const endsAt = new Date(record.lifecycleCompleteAt);
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.complete,
       scopeId: record.scopeId,
@@ -1085,7 +1085,7 @@ export async function recoverEventCancellationArtifactJobs(
       .map((artifact) => artifact.deletionNextAttemptAt ? new Date(artifact.deletionNextAttemptAt) : undefined)
       .filter((date): date is Date => Boolean(date && Number.isFinite(date.getTime())))
       .sort((left, right) => left.getTime() - right.getTime())[0];
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.cancellationCleanup,
       scopeId: event.scopeId,
@@ -1104,7 +1104,7 @@ export async function recoverEventEditRepairJobs(context: PluginRuntimeContext):
   const repairs = listPendingEventEditRepairs(db);
   let enqueued = 0;
   for (const repair of repairs) {
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.editRepair,
       scopeId: repair.scopeId,
@@ -1224,7 +1224,7 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
     const runAt = delivery.status === 'sending' && leaseExpiresAt && leaseExpiresAt > now
       ? leaseExpiresAt
       : now;
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       ...eventAnnouncementDeliveryJobRequest(event, delivery, 0, runAt),
       dedupeKey: `${EVENTS_JOBS.announcementDelivery}:${delivery.eventId}:${delivery.kind}:${delivery.deliveryKey}:startup:${delivery.updatedAt}`
@@ -1275,7 +1275,7 @@ export async function recoverEventWeatherForecastJobs(context: PluginRuntimeCont
       continue;
     }
     const request = eventWeatherForecastRecoveryJobRequest({ event: record, delivery, now });
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: request.jobName,
       scopeId: request.scopeId,
@@ -1299,7 +1299,7 @@ export async function recoverEventWeatherForecastJobs(context: PluginRuntimeCont
       ) {
         continue;
       }
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         jobName: request.jobName,
         scopeId: request.scopeId,
@@ -2327,7 +2327,7 @@ async function handleGroupDismantled(
         action: 'events.cleaned.external_deferred',
         metadata: { retryAt: retryAt.toISOString() }
       });
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         jobName: EVENTS_JOBS.cleanup,
         scopeId: current.scopeId,
@@ -2355,7 +2355,7 @@ async function handleGroupDismantled(
   const receiptReleaseEnqueueFailures: Array<{ operationId: string; reason: string }> = [];
   for (const retry of receiptReleaseRetries) {
     try {
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         jobName: EVENTS_JOBS.pollReplacement,
         scopeId: retry.scopeId,
@@ -2898,7 +2898,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
     if (!checkpointedEvent || checkpointedEvent.subgroupChatId !== subgroupChatId) {
       throw new Error(`Event ${record.id} lost its exact claimed subgroup candidate ${subgroupChatId}.`);
     }
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       ...eventCleanupJobRequest(checkpointedEvent)
     });
@@ -3001,7 +3001,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       config,
       event: linkReadyEvent
     });
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       ...eventCleanupJobRequest(linkReadyEvent)
     });
@@ -3538,7 +3538,7 @@ async function closeEvent(context: PluginRuntimeContext, job: PluginJobEvent): P
       if (checkpointPersisted) {
         const checkpointedEvent = getEvent(db, record.id);
         if (checkpointedEvent?.subgroupChatId === created.chatId) {
-          await enqueuePluginJob(context.queue, {
+          await enqueuePluginJob(context, {
             pluginId: EVENTS_PLUGIN_ID,
             ...eventCleanupJobRequest(checkpointedEvent)
           });
@@ -3791,7 +3791,7 @@ async function finalizeUnplannedEventJob(
     ...(context.databases ? { databases: context.databases } : {}),
     ...(context.services ? { services: context.services } : {}),
     enqueuePluginJob: (request) => enqueuePluginJob(
-      context.queue,
+      context,
       { pluginId: EVENTS_PLUGIN_ID, ...request }
     )
   };
@@ -3957,7 +3957,7 @@ async function recoverFailedEventProvisioning(
   if (payload.subgroupChatId) {
     const cleanupTransfer = transferKnownChildProvisioningToCleanup(db, record, claimedAt);
     if (cleanupTransfer.status === 'expired') {
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         ...eventCleanupJobRequest(cleanupTransfer.event)
       });
@@ -3970,7 +3970,7 @@ async function recoverFailedEventProvisioning(
       })];
     }
     if (cleanupTransfer.status === 'deferred') {
-      await enqueuePluginJob(context.queue, {
+      await enqueuePluginJob(context, {
         pluginId: EVENTS_PLUGIN_ID,
         jobName: EVENTS_JOBS.cleanup,
         scopeId: record.scopeId,
@@ -4623,7 +4623,7 @@ async function enqueuePendingUnplannedEventFinalization(
   const runAt = persistedRunAt && Number.isFinite(persistedRunAt.getTime())
     ? persistedRunAt
     : new Date();
-  await enqueuePluginJob(context.queue, {
+  await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.unplannedFinalization,
     scopeId: record.scopeId,
@@ -4709,7 +4709,7 @@ async function enqueueAndRearmClaimedEventProvisioningRecoveryCursor(
   ) {
     return undefined;
   }
-  await enqueuePluginJob(context.queue, {
+  await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.provisioningRecovery,
     scopeId: advancedRecord.scopeId,
@@ -4743,7 +4743,7 @@ async function enqueuePersistedEventProvisioningRecovery(
   if (!Number.isFinite(runAt.getTime())) {
     throw new Error(`Event ${record.id} has an invalid persisted provisioning retry time.`);
   }
-  await enqueuePluginJob(context.queue, {
+  await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.provisioningRecovery,
     scopeId: record.scopeId,
@@ -5905,7 +5905,7 @@ async function markStartupEventMissed(
       })
     : [];
   for (const retry of receiptReleaseRetries) {
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.pollReplacement,
       scopeId: retry.scopeId,

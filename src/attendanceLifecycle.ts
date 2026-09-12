@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import type { PluginOperationContext } from '../../../platform/pluginRuntime/types';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { POLL_ASSISTANT_SCHEMA_VERSION } from '../poll-assistant/domain';
+import type { PluginOperationContext } from './runtime';
+import type { PluginRuntimeContext } from './runtime';
+import { POLL_ASSISTANT_SCHEMA_VERSION } from './contracts/poll-assistant/domain';
 import {
   POLL_ASSISTANT_LIFECYCLE_CANCEL_METHOD,
   POLL_ASSISTANT_LIFECYCLE_ENSURE_METHOD,
@@ -20,7 +20,7 @@ import {
   type PollAssistantLifecycleInspectOutput,
   type PollAssistantLifecycleCancelOutput,
   type PollAssistantLifecycleSnapshot
-} from '../poll-assistant/lifecycleServiceApi';
+} from './contracts/poll-assistant/lifecycleServiceApi';
 import type { EventVoteSelection } from './attendance';
 import { EVENTS_PLUGIN_ID } from './manifest';
 import type {

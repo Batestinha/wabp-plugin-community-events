@@ -1,9 +1,9 @@
-import type { PluginServiceCaller } from '../../../platform/pluginRuntime/pluginServices';
+import type { PluginServiceCaller } from '../../../../packages/plugin-sdk/src/services';
 import type {
   CreatedGroupParticipantResult,
   PersistedRequiredCreatorReference,
   RequiredCreatorBinding
-} from '../../../platform/transport/transportTypes';
+} from '../../../../packages/plugin-sdk/src/transport';
 import {
   COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
   COMMUNITY_SUBGROUPS_COMPLETE_METHOD,
@@ -14,12 +14,12 @@ import {
   type CommunitySubgroupCompleteOutput,
   type CommunitySubgroupConfigureOutput,
   type CommunitySubgroupReconcileCreatorOutput,
-} from '../community-subgroups/serviceApi';
+} from './contracts/community-subgroups/serviceApi';
 
 export interface EventSubgroupContext {
   services?: PluginServiceCaller | undefined;
-  communityGroupWidForScope?(scopeId: string): Promise<string | undefined>;
-  ensureChatArchivePolicyForScope?(scopeId: string): Promise<unknown>;
+  communityGroupWidForScope?: ((scopeId: string) => Promise<string | undefined>) | undefined;
+  ensureChatArchivePolicyForScope?: ((scopeId: string) => Promise<unknown>) | undefined;
 }
 
 export async function createEventCommunitySubgroupCandidate(input: {

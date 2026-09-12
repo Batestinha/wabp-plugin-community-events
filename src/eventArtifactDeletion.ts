@@ -1,5 +1,5 @@
-import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
-import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
+import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
+import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
 import {
   listEventAnnouncementMessages,
   markEventAnnouncementMessageDeleted,

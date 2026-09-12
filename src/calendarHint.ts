@@ -1,7 +1,7 @@
-import type { AppConfig } from '../../../platform/config/runtimeConfig';
-import type { PluginDatabase } from '../../../platform/pluginRuntime/runtime/pluginDatabase';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { OfficialPluginCommandRuntime } from '../shared';
+import type { AppConfig } from './deploymentConfig';
+import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
+import type { PluginRuntimeContext } from './runtime';
+import type { OfficialPluginCommandRuntime } from './runtime';
 import {
   eventAnnouncementTransportIdempotencyKey,
   persistedEventAnnouncementDisposition,

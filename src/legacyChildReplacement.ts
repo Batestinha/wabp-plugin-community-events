@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import type { PluginGroupDismantleResult } from '../../../platform/pluginRuntime/types';
-import type { CommunitySubgroupLinkProbe } from '../../../platform/transport/transportTypes';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import type { PluginRuntimeContext } from './runtime';
+import type { PluginGroupDismantleResult } from './runtime';
+import type { CommunitySubgroupLinkProbe } from '../../../../packages/plugin-sdk/src/transport';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
   EVENT_CLEANUP_CLAIM_LEASE_MS,
@@ -383,7 +383,7 @@ async function enqueueReplacementRecovery(
     return false;
   }
   try {
-    await enqueuePluginJob(context.queue, {
+    await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
       scopeId: event.scopeId,

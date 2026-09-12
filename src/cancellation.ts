@@ -1,4 +1,4 @@
-import type { PluginOperationContext, PluginGroupDismantleResult } from '../../../platform/pluginRuntime/types';
+import type { PluginOperationContext, PluginGroupDismantleResult } from './runtime';
 import { parseEventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { appendScopeEventJsonLog } from './log';
@@ -20,8 +20,8 @@ import {
   type EventCleanupClaim,
   type StoredEventRecord
 } from './store';
-import type { OfficialPluginCommandRuntime } from '../shared';
-import type { MessageDeletionResult } from '../../../platform/transport/transportTypes';
+import type { OfficialPluginCommandRuntime } from './runtime';
+import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
 import type { EventArtifactDeletionResult } from './eventArtifactDeletion';
 import { EVENTS_JOBS } from './manifest';
 import { releaseEligibleEventPollReplacementReceipts } from './pollReplacement';

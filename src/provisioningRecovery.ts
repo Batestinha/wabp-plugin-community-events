@@ -1,23 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
 import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
-} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+} from '../../../../packages/plugin-sdk/src/community-errors';
+import type { PluginRuntimeContext } from './runtime';
 import type {
   CreatedGroupParticipantResult,
   ManagedCommunitySubgroup,
   OutboundSendResult,
   RequiredCreatorBinding
-} from '../../../platform/transport/transportTypes';
+} from '../../../../packages/plugin-sdk/src/transport';
 import {
   isTransportCommunitySubgroupPreCreateError,
   isTransportProviderUnavailableError,
   type TransportCommunityLinkRecoveryDisposition
-} from '../../../platform/transport/transportErrors';
-import type { OfficialPluginCommandRuntime } from '../shared';
+} from '../../../../packages/plugin-sdk/src/transport-errors';
+import type { OfficialPluginCommandRuntime } from './runtime';
 import { voterWidsForResponseBehavior } from './attendance';
 import { eventAttendanceVotesFromSnapshot } from './attendanceLifecycle';
 import { parseEventsConfig, type EventProfile } from './config';
@@ -298,7 +298,7 @@ export async function enqueueEventPreCreateProvisioningRecovery(input: {
   }
 
   try {
-    await enqueuePluginJob(input.context.queue, {
+    await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
       scopeId: event.scopeId,
@@ -682,7 +682,7 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
 
   let enqueued = true;
   try {
-    await enqueuePluginJob(input.context.queue, {
+    await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
       scopeId: event.scopeId,
@@ -810,7 +810,7 @@ export async function retryEventProvisioningCreation(input: {
       if (checkpointed) {
         const checkpointedEvent = getEvent(db, event.id);
         if (checkpointedEvent?.subgroupChatId === error.created.chatId) {
-          await enqueuePluginJob(input.context.queue, {
+          await enqueuePluginJob(input.context, {
             pluginId: EVENTS_PLUGIN_ID,
             ...eventCleanupJobRequest(checkpointedEvent)
           });
@@ -854,7 +854,7 @@ export async function retryEventProvisioningCreation(input: {
       `Event ${event.id} lost newly checkpointed subgroup ${created.chatId} before cleanup was scheduled.`
     );
   }
-  await enqueuePluginJob(input.context.queue, {
+  await enqueuePluginJob(input.context, {
     pluginId: EVENTS_PLUGIN_ID,
     ...eventCleanupJobRequest(checkpointedEvent)
   });
@@ -1706,7 +1706,7 @@ export async function resumeEventProvisioning(
       config,
       event: linkReadyEvent
     });
-    await enqueuePluginJob(input.context.queue, {
+    await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       ...eventCleanupJobRequest(linkReadyEvent)
     });
@@ -1859,7 +1859,7 @@ export async function resumeEventProvisioning(
       runtime: {
         config: input.context.config,
         ...(input.context.databases ? { databases: input.context.databases } : {}),
-        enqueuePluginJob: (job) => enqueuePluginJob(input.context.queue, {
+        enqueuePluginJob: (job) => enqueuePluginJob(input.context, {
           pluginId: EVENTS_PLUGIN_ID,
           ...job
         })
@@ -2018,7 +2018,7 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
     }
   }
   try {
-    await enqueuePluginJob(input.context.queue, {
+    await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.cleanup,
       scopeId: event.scopeId,
@@ -2038,7 +2038,7 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
   });
   for (const weatherRequest of weatherRequests) {
     try {
-      await enqueuePluginJob(input.context.queue, {
+      await enqueuePluginJob(input.context, {
         pluginId: EVENTS_PLUGIN_ID,
         ...weatherRequest
       });

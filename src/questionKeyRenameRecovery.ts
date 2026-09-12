@@ -1,5 +1,5 @@
-import { enqueuePluginJob } from '../../../platform/jobs/queue';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
+import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import type { PluginRuntimeContext } from './runtime';
 import { parseEventsConfig } from './config';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
@@ -140,7 +140,7 @@ async function scheduleQuestionKeyRenameRecovery(
   const normalizedRunAt = Number.isFinite(runAt.getTime()) && runAt.getTime() > minimumRunAt.getTime()
     ? runAt
     : minimumRunAt;
-  await enqueuePluginJob(context.queue, {
+  await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.questionKeyRenameRecovery,
     scopeId: rename.scopeId,

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   PluginDatabase,
   PluginDatabaseRow
-} from '../../../platform/pluginRuntime/runtime/pluginDatabase';
+} from '../../../../packages/plugin-sdk/src/database';
 
 export const EVENT_SUGGESTION_CONVERSION_LEASE_MS = 2 * 60 * 1000;
 

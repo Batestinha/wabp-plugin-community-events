@@ -1,27 +1,26 @@
-import { scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
+import { scopeTimezoneSchema } from '../../../../packages/plugin-sdk/src/clock';
 import { eventAnswersInTimezone } from './locationTimezone';
 import { createHash, randomUUID } from 'node:crypto';
-import type { WorkflowActionResult } from '../../../platform/workflows/contracts';
-import { PollSelectionRule } from '@prisma/client';
-import type { FlowDefinition, FlowState } from '../../../adminBot/flows/flowTypes';
-import type { CommandMetadata, CommandTargetSpec } from '../../../adminBot/router/commandMetadata';
-import type { CommandContext } from '../../../adminBot/router/commandRouter';
-import type { PluginCancellationRegistration, PluginCommandContext, PluginOperationContext } from '../../../platform/pluginRuntime/types';
-import type { PluginRuntimeContext } from '../../../platform/pluginRuntime/runtime/pluginRuntimeContext';
-import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../platform/jobs/queue';
-import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '../../../platform/transport/pollContract';
+import type { WorkflowActionResult } from '../../../../packages/plugin-sdk/src/workflows';
+import type { FlowDefinition, FlowState } from '../../../../packages/plugin-sdk/src/flow-types';
+import type { CommandMetadata, CommandTargetSpec } from '../../../../packages/plugin-sdk/src/command-metadata';
+import type { CommandContext } from '../../../../packages/plugin-sdk/src/commands';
+import type { PluginCancellationRegistration, PluginCommandContext, PluginOperationContext } from './runtime';
+import type { PluginRuntimeContext } from './runtime';
+import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '../../../../packages/plugin-sdk/src/poll-contract';
 import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError
-} from '../../../platform/pluginRuntime/runtime/pluginCommunityOperations';
+} from '../../../../packages/plugin-sdk/src/community-errors';
 import type {
   OutboundSendResult,
   MessageDeletionResult,
   PrivateDeliveryFallback,
   SendTextOptions
-} from '../../../platform/transport/transportTypes';
-import { requireIdentityAddress } from '../../../platform/identity/messageActor';
-import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from '../shared';
+} from '../../../../packages/plugin-sdk/src/transport';
+import { requireIdentityAddress } from '../../../../packages/plugin-sdk/src/message-actor';
+import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from './runtime';
 import { cancelEventLifecycle } from './cancellation';
 import {
   eventAnnouncementTransportIdempotencyKey,
@@ -105,7 +104,7 @@ import {
   GEOCODER_SERVICE_ID,
   type GeocodeOutput,
   type GeocoderPlace
-} from '../geocoder/serviceApi';
+} from './contracts/geocoder/serviceApi';
 import {
   appendEventLog,
   beginEventPollReplacement,
@@ -766,7 +765,7 @@ async function promptEventEditSelection(input: {
       },
       recipientWids: [input.pending.responseChatId],
       eligibleVoterIdentityIds: [input.pending.actorIdentityId],
-      selectionRule: PollSelectionRule.SINGLE,
+      selectionRule: 'SINGLE',
       minSelections: 1,
       maxSelections: 1,
       ...(input.pending.privateDeliveryFallback
@@ -3466,7 +3465,7 @@ async function promptEventLocationConfirmation(input: {
       },
       recipientWids: [input.pending.responseChatId],
       eligibleVoterIdentityIds: [requirePendingEventActorIdentityId(input.pending)],
-      selectionRule: PollSelectionRule.SINGLE,
+      selectionRule: 'SINGLE',
       minSelections: 1,
       maxSelections: 1,
       ...(input.pending.draft.privateDeliveryFallback
@@ -5046,7 +5045,7 @@ function requireEventFlowRuntime(context: EventFlowCompletionContext): OfficialP
     ...(context.sendAssistantStatusText
       ? { sendAssistantStatusText: context.sendAssistantStatusText }
       : {}),
-    enqueuePluginJob: (input) => enqueueRuntimePluginJob(context.queue, {
+    enqueuePluginJob: (input) => enqueueRuntimePluginJob(context, {
       pluginId: context.pluginId!,
       ...input
     })

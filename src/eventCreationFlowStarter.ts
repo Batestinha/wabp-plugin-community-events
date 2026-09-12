@@ -55,7 +55,6 @@ export interface EventDraft {
 }
 
 const eventFlowPrefillSchema = z.object({
-  timezone: scopeTimezoneSchema.optional(),
   profileId: z.string().trim().min(1).optional(),
   answers: z.record(z.string()),
   spanKind: z.enum(['day_trip', 'multi_day']).optional(),
@@ -365,7 +364,7 @@ export class EventCreationFlowStarter {
     prefill: EventFlowPrefill;
   }): Promise<EventCreationStartResult> {
     const startedAt = new Date();
-    const timezone = input.prefill.timezone ?? input.prepared.timezone;
+    const timezone = input.prepared.timezone;
     const initialData = eventInitialFlowData(input.prepared.profiles, input.prefill, {
       timezone,
       locale: input.prepared.locale,
@@ -527,7 +526,6 @@ export function eventDraftKey(scopeId: string, flowSessionId: string): string {
 export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]): EventFlowPrefill {
   const answers: Record<string, string> = {};
   let profileId: string | undefined;
-  let timezone: string | undefined;
   let spanKind: EventFlowPrefill['spanKind'];
   let endLocalDate: string | undefined;
   let endLocalTime: string | undefined;
@@ -546,11 +544,6 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
     const next = inlineValue ?? args[index + 1];
     const consumedNext = inlineValue === undefined && next !== undefined && !next.startsWith('--');
 
-    if (flag === 'timezone') {
-      timezone = scopeTimezoneSchema.parse(next);
-      if (consumedNext) index += 1;
-      continue;
-    }
     if (flag === 'profile') {
       if (next && !next.startsWith('--')) {
         profileId = next.trim();
@@ -606,7 +599,6 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
     : undefined;
   return {
     ...(validProfileId ? { profileId: validProfileId } : {}),
-    ...(timezone ? { timezone } : {}),
     answers,
     ...(spanKind ? { spanKind } : {}),
     ...(endLocalDate ? { endLocalDate } : {}),

@@ -1,4 +1,4 @@
-import { canonicalTimezone, scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
+import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
 import { randomUUID } from 'node:crypto';
 import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '../../../adminBot/flows/flowTypes';
 import type { FlowSessionSnapshot } from '../../../adminBot/flows/flowEngine';
@@ -35,7 +35,6 @@ import {
 } from './template';
 
 export const EVENT_PROFILE_STEP_ID = 'profile';
-export const EVENT_TIMEZONE_STEP_ID = 'event-timezone';
 export const EVENT_CREATION_SPAN_STEP_ID = 'event-span';
 export const EVENT_CREATION_POLL_PHASE_STEP_ID = 'event-poll-phase';
 export const EVENT_SPAN_STEP_ID_PREFIX = 'span-';
@@ -60,7 +59,6 @@ export interface EventFlowAnswers {
 }
 
 export interface EventFlowPrefill {
-  timezone?: string | undefined;
   profileId?: string | undefined;
   answers: Record<string, string>;
   spanKind?: EventSpanKind | undefined;
@@ -80,7 +78,6 @@ export function createEventFlowDefinition(input: {
   initialData?: Record<string, unknown> | undefined;
   askPrefilledQuestions?: boolean | undefined;
   flowTypePrefix?: string | undefined;
-  askTimezone?: boolean | undefined;
   flowInstanceId?: string | undefined;
   confirmMessageKey?: string | undefined;
   pastCompletionConfirmMessageKey?: string | undefined;
@@ -90,7 +87,7 @@ export function createEventFlowDefinition(input: {
 }): FlowDefinition {
   const flowType = input.flowTypePrefix
     ? `${input.flowTypePrefix}.${input.flowInstanceId?.trim() || randomUUID()}`
-    : `${EVENT_CREATION_FLOW_TYPE_PREFIX}${input.askTimezone ? 'v2.' : ''}${randomUUID()}`;
+    : `${EVENT_CREATION_FLOW_TYPE_PREFIX}${randomUUID()}`;
   return buildEventFlowDefinition(input, flowType);
 }
 
@@ -138,8 +135,7 @@ function buildEventFlowDefinition(input: {
   now?: (() => Date) | undefined;
 }, flowType: string): FlowDefinition {
   const askPollPhase = isEventCreationFlowType(flowType);
-  const askTimezone = flowType.startsWith(`${EVENT_CREATION_FLOW_TYPE_PREFIX}v2.`);
-  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data, askTimezone);
+  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data);
   const durationFirst = askPollPhase || input.askPrefilledQuestions === true;
   const nextQuestionStepId = (state: FlowState) => input.askPrefilledQuestions
     ? nextReviewQuestionStepId(input.profiles, state)
@@ -147,8 +143,7 @@ function buildEventFlowDefinition(input: {
   const timezone = canonicalTimezone(input.timezone ?? 'UTC');
   const timezoneForData = (data: Record<string, unknown>) => {
     const selected = input.profiles.find((profile) => profile.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
-    const fallback = askTimezone && selected?.location.source === 'fixed' ? selected.location.timezone : timezone;
-    return eventFlowTimezone(data, fallback);
+    return canonicalTimezone(askPollPhase && selected?.location.source === 'fixed' ? selected.location.timezone : timezone);
   };
   const timezoneForState = (state: FlowState) => timezoneForData(state.data);
   const locale = input.locale ?? 'en';
@@ -179,25 +174,6 @@ function buildEventFlowDefinition(input: {
       ]))
     }
   };
-
-  if (askTimezone) {
-    const defaultTimezone = (state: FlowState) => timezoneForData({ ...state.data, [EVENT_TIMEZONE_STEP_ID]: undefined });
-    steps[EVENT_TIMEZONE_STEP_ID] = {
-      id: EVENT_TIMEZONE_STEP_ID,
-      kind: 'text',
-      prompt: input.t('official.community-events.flow.timezone', { timezone }),
-      promptForState: (state) => input.t('official.community-events.flow.timezone', { timezone: defaultTimezone(state) }),
-      skipOnSymbolInput: true,
-      resolveSkippedInput: ({ state }) => ({ status: 'use-value', value: defaultTimezone(state) }),
-      resolveInput: ({ input: value, state }) => {
-        if (value.trim() === '=') return { status: 'use-value', value: defaultTimezone(state) };
-        const parsed = scopeTimezoneSchema.safeParse(value);
-        return parsed.success ? { status: 'use-value', value: parsed.data }
-          : { status: 'error', reply: input.t('official.community-events.flow.timezoneInvalid') };
-      },
-      nextStepIdForState: (state) => creationStepId(state.data)
-    };
-  }
 
   if (durationFirst) {
     steps[EVENT_CREATION_SPAN_STEP_ID] = {
@@ -524,15 +500,14 @@ export function eventInitialFlowData(
 ): Record<string, unknown> {
   const profileId = prefill?.profileId ?? (profiles.length === 1 ? profiles[0]?.id : undefined);
   if (!profileId) {
-    return prefill?.timezone ? { [EVENT_TIMEZONE_STEP_ID]: canonicalTimezone(prefill.timezone) } : {};
+    return {};
   }
   const profile = profiles.find((candidate) => candidate.id === profileId);
   if (!profile) {
     return {};
   }
   const data: Record<string, unknown> = {
-    [EVENT_PROFILE_STEP_ID]: profile.id,
-    ...(prefill?.timezone ? { [EVENT_TIMEZONE_STEP_ID]: canonicalTimezone(prefill.timezone) } : {})
+    [EVENT_PROFILE_STEP_ID]: profile.id
   };
   for (const question of profile.questions) {
     const value = prefill?.answers[question.key]?.trim();
@@ -598,7 +573,7 @@ export function eventFlowAnswers(
   timezone: string,
   locale = 'en'
 ): EventFlowAnswers | undefined {
-  return eventFlowAnswersFromData(snapshot.state.data, profile, eventFlowTimezone(snapshot.state.data, timezone), locale);
+  return eventFlowAnswersFromData(snapshot.state.data, profile, isEventCreationFlowType(snapshot.flowType ?? '') && profile.location.source === 'fixed' ? profile.location.timezone : timezone, locale);
 }
 
 export function eventFlowAnswersFromRaw(input: {
@@ -829,23 +804,16 @@ function eventFlowAnswersFromData(
   };
 }
 
-/** A stored event or draft owns its explicit timezone; scope changes never rewrite it. */
-export function eventFlowTimezone(data: Record<string, unknown>, fallback: string): string {
-  const value = data[EVENT_TIMEZONE_STEP_ID];
-  return canonicalTimezone(typeof value === 'string' ? value : fallback);
-}
-
 function firstQuestionStepId(profile: EventProfile): string {
   return questionStepId(profile, profile.questions[0]!);
 }
 
-function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>, requireTimezone = false): string {
+function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>): string {
   const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
   const spanKind = eventSpanKind(data, profile);
   if (!spanKind) return EVENT_CREATION_SPAN_STEP_ID;
   if (!eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
   if (!profile) return EVENT_PROFILE_STEP_ID;
-  if (requireTimezone && !scopeTimezoneSchema.safeParse(data[EVENT_TIMEZONE_STEP_ID]).success) return EVENT_TIMEZONE_STEP_ID;
   const question = profile.questions.find((candidate) => (
     questionAppliesToSpan(profile, candidate, spanKind)
     && !questionComplete(profile, candidate, data)

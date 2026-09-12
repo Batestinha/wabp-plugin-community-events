@@ -1,3 +1,5 @@
+import { scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
+import { eventAnswersInTimezone } from './locationTimezone';
 import { createHash, randomUUID } from 'node:crypto';
 import type { WorkflowActionResult } from '../../../platform/workflows/contracts';
 import { PollSelectionRule } from '@prisma/client';
@@ -37,7 +39,6 @@ import {
   createEventFlowDefinition,
   eventConfirmPurpose,
   eventFlowAnswers,
-  eventFlowTimezone,
   eventFlowConfirmed,
   eventFlowPastCompletionConfirmed,
   eventInitialFlowData,
@@ -99,6 +100,8 @@ import {
 import { eventWeatherForecastJobRequests } from './weather';
 import {
   GEOCODER_GEOCODE_METHOD,
+  GEOCODER_TIMEZONE_METHOD,
+  geocoderTimezoneOutputSchema,
   GEOCODER_SERVICE_ID,
   type GeocodeOutput,
   type GeocoderPlace
@@ -3041,7 +3044,6 @@ export function registerEventFlowCompletionHandlers(
 
       let answers: EventFlowAnswers | undefined;
       try {
-        draft.timezone = eventFlowTimezone(snapshot.state.data, draft.timezone);
         answers = eventFlowAnswers(snapshot, profile, draft.timezone, draft.locale);
       } catch (error) {
         if (!(error instanceof EventConditionalTextConfigurationError)) throw error;
@@ -3376,10 +3378,26 @@ function registerEventLocationSelectionHandler(context: PluginOperationContext):
       );
       return true;
     }
+    let locationTimezone: string;
+    try {
+      const inferred = candidate.timezone ?? geocoderTimezoneOutputSchema.parse(await context.services?.call({
+        serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_TIMEZONE_METHOD,
+        scopeId: pending.draft.scopeId, actorIdentityId: pending.draft.actorIdentityId,
+        input: candidate.point
+      })).timezone;
+      locationTimezone = scopeTimezoneSchema.parse(inferred);
+    } catch (error) {
+      await recordEventLocationFailure(context, {
+        phase: 'geocode', scopeId: pending.draft.scopeId, actorWid: pending.draft.actorWid,
+        profileId: profile.id, query: pending.searchQuery, error
+      });
+      await activeTransport.sendText(pending.responseChatId, t('official.community-events.location.timezoneUnavailable'));
+      return true;
+    }
     const eventLocation = geocodedEventLocation({
       query: pending.searchQuery,
       displayLabel: displayPlace,
-      timezone: pending.draft.timezone,
+      timezone: locationTimezone,
       provider: pending.provider,
       place: candidate
     });
@@ -3665,6 +3683,10 @@ async function publishConfirmedEvent(input: {
       );
       return;
     }
+    input = { ...input,
+      draft: { ...input.draft, timezone: scopeTimezoneSchema.parse(input.eventLocation.timezone) },
+      answers: eventAnswersInTimezone(input.answers, input.eventLocation.timezone)
+    };
     db = eventsDatabase(input.runtime.databases);
     const eventDb = db;
     const materialized = materializeEventLifecycle({

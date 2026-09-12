@@ -1,3 +1,4 @@
+import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
 import type { GeocoderPlace } from '../geocoder/serviceApi';
 import type { EventProfile } from './config';
 import type { StoredEventLocation } from './store';
@@ -42,7 +43,7 @@ export function geocodedEventLocation(input: {
     resolvedLabel: input.place.label,
     latitude: input.place.point.latitude,
     longitude: input.place.point.longitude,
-    timezone: input.timezone,
+    timezone: canonicalTimezone(input.place.timezone ?? input.timezone),
     query: input.query,
     provider: input.provider,
     ...(input.place.providerRef ? { providerRef: input.place.providerRef } : {})

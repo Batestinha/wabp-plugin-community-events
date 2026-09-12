@@ -4,7 +4,7 @@ import { workspaceConnectorCanonicalJson } from './contracts/workspace-protocol'
 import {
   isPluginServiceNotInvokedError,
   type PluginServiceCaller
-} from '../../../../packages/plugin-sdk/src/services';
+} from '@wabs/plugin-sdk/services';
 import {
   WORKSPACE_CONNECTOR_PROJECTION_REPLACE_METHOD,
   WORKSPACE_CONNECTOR_PROJECTION_SERVICE_ID,

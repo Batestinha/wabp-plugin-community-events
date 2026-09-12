@@ -1,0 +1,1016 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "official.community-events",
+  "name": "Community Events",
+  "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
+  "kind": "managed_group",
+  "version": "0.15.0",
+  "coreApiRange": "^0.3.0",
+  "entrypoint": "dist/index.js",
+  "messageNamespace": "official.community-events",
+  "descriptionKey": "official.community-events.description",
+  "commands": [
+    "/event",
+    "/event new",
+    "/event edit",
+    "/event list",
+    "/event poll",
+    "/event status",
+    "/event cancel"
+  ],
+  "help": {
+    "featureId": "events",
+    "titleKey": "official.community-events.help.feature.title",
+    "summaryKey": "official.community-events.help.feature.summary",
+    "order": 20,
+    "aliases": [
+      "event",
+      "calendar",
+      "activities"
+    ],
+    "topics": [
+      {
+        "topicId": "overview-events",
+        "titleKey": "official.community-events.help.feature.title",
+        "summaryKey": "official.community-events.help.feature.summary",
+        "order": 5,
+        "commands": [
+          "/event"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.overview.example"
+        ],
+        "keywords": [
+          "event",
+          "help",
+          "usage"
+        ]
+      },
+      {
+        "topicId": "create-events",
+        "titleKey": "official.community-events.help.create.title",
+        "summaryKey": "official.community-events.help.create.summary",
+        "order": 10,
+        "commands": [
+          "/event new"
+        ],
+        "instructionKeys": [
+          "official.community-events.help.create.instruction"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.create.example"
+        ],
+        "keywords": [
+          "create",
+          "poll",
+          "activity",
+          "calendar"
+        ]
+      },
+      {
+        "topicId": "edit-events",
+        "titleKey": "official.community-events.help.edit.title",
+        "summaryKey": "official.community-events.help.edit.summary",
+        "order": 20,
+        "commands": [
+          "/event edit"
+        ],
+        "instructionKeys": [
+          "official.community-events.help.edit.instruction"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.edit.example"
+        ],
+        "keywords": [
+          "edit",
+          "update",
+          "rename",
+          "date"
+        ]
+      },
+      {
+        "topicId": "list-events",
+        "titleKey": "official.community-events.help.list.title",
+        "summaryKey": "official.community-events.help.list.summary",
+        "order": 30,
+        "commands": [
+          "/event list"
+        ],
+        "instructionKeys": [
+          "official.community-events.help.list.instruction"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.list.example"
+        ],
+        "keywords": [
+          "list",
+          "future",
+          "upcoming"
+        ]
+      },
+      {
+        "topicId": "inspect-events",
+        "titleKey": "official.community-events.help.inspect.title",
+        "summaryKey": "official.community-events.help.inspect.summary",
+        "order": 40,
+        "commands": [
+          "/event status"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.status.example"
+        ],
+        "keywords": [
+          "status",
+          "configuration"
+        ]
+      },
+      {
+        "topicId": "close-event-polls",
+        "titleKey": "official.community-events.help.pollClose.title",
+        "summaryKey": "official.community-events.help.pollClose",
+        "order": 45,
+        "commands": [
+          "/event poll"
+        ],
+        "instructionKeys": [
+          "official.community-events.help.pollClose.instruction"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.pollClose.example"
+        ],
+        "keywords": [
+          "poll",
+          "close",
+          "early",
+          "creator"
+        ]
+      },
+      {
+        "topicId": "cancel-events",
+        "titleKey": "official.community-events.help.cancel.title",
+        "summaryKey": "official.community-events.help.cancel.summary",
+        "order": 50,
+        "commands": [
+          "/event cancel"
+        ],
+        "instructionKeys": [
+          "official.community-events.help.cancel.instruction"
+        ],
+        "exampleKeys": [
+          "official.community-events.help.cancel.example"
+        ],
+        "keywords": [
+          "cancel",
+          "remove",
+          "stop"
+        ]
+      }
+    ]
+  },
+  "eventSubscriptions": [
+    "message",
+    "participant.change",
+    "poll.vote",
+    "plugin.job",
+    "group.dismantled"
+  ],
+  "services": [
+    {
+      "serviceId": "official.community-events.workflow.v1",
+      "description": "Prepare, apply and inspect requester-authorized event changes through the event lifecycle.",
+      "methods": [
+        {
+          "name": "editDescribe",
+          "access": "read"
+        },
+        {
+          "name": "editPrepare",
+          "access": "read"
+        },
+        {
+          "name": "editExecute",
+          "access": "mutation",
+          "timeoutMs": 120000
+        },
+        {
+          "name": "editInspect",
+          "access": "read"
+        },
+        {
+          "name": "cancelDescribe",
+          "access": "read"
+        },
+        {
+          "name": "cancelPrepare",
+          "access": "read"
+        },
+        {
+          "name": "cancelExecute",
+          "access": "mutation",
+          "timeoutMs": 120000
+        },
+        {
+          "name": "cancelInspect",
+          "access": "read"
+        }
+      ]
+    },
+    {
+      "serviceId": "official.community-events.album-source.v1",
+      "description": "List and resolve scoped community events as immutable album metadata sources.",
+      "methods": [
+        {
+          "name": "listCandidates",
+          "access": "read"
+        },
+        {
+          "name": "resolve",
+          "access": "read"
+        }
+      ]
+    },
+    {
+      "serviceId": "official.community-events.subgroup-ownership.v1",
+      "description": "Resolve whether a managed subgroup is owned by an event lifecycle.",
+      "methods": [
+        {
+          "name": "resolve",
+          "access": "read",
+          "availability": "installed"
+        }
+      ]
+    }
+  ],
+  "requiredPermissions": [
+    "events.configure",
+    "events.manage",
+    "events.create.climbing"
+  ],
+  "requiredBotCapabilities": [],
+  "dangerousActions": [
+    "message.delete"
+  ],
+  "backgroundJobs": [
+    "event.close",
+    "event.complete",
+    "event.provisioningRecovery",
+    "event.unplannedFinalization",
+    "event.cleanup",
+    "event.cancellationCleanup",
+    "event.announcementDelivery",
+    "event.editRepair",
+    "event.pollReplacement",
+    "event.attendanceLifecycle",
+    "event.weatherForecast",
+    "event.startTimeAgreement",
+    "event.questionKeyRenameRecovery",
+    "event.suggestionReconcile"
+  ],
+  "cancellation": {
+    "workflows": [
+      {
+        "id": "event-create",
+        "description": "Guided event setup before an event poll is published.",
+        "mode": "core-flow",
+        "scope": "actor-chat",
+        "commands": [
+          "/event new"
+        ],
+        "cancellableStates": [
+          "active"
+        ],
+        "terminalStates": [
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "effects": [
+          "discard-event-draft"
+        ]
+      },
+      {
+        "id": "event-edit",
+        "description": "Guided structured update of an existing event lifecycle.",
+        "mode": "core-flow",
+        "scope": "actor-chat",
+        "commands": [
+          "/event edit"
+        ],
+        "cancellableStates": [
+          "active"
+        ],
+        "terminalStates": [
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "effects": [
+          "discard-event-update-draft"
+        ]
+      },
+      {
+        "id": "event-cancel-confirmation",
+        "description": "Guided confirmation before cancelling a published event lifecycle.",
+        "mode": "core-flow",
+        "scope": "actor-chat",
+        "commands": [
+          "/event cancel"
+        ],
+        "cancellableStates": [
+          "active"
+        ],
+        "terminalStates": [
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "effects": [
+          "discard-event-cancellation-draft"
+        ]
+      },
+      {
+        "id": "event-location-selection",
+        "description": "Pending event location confirmation after event setup and before publication.",
+        "mode": "plugin-handler",
+        "scope": "actor-chat",
+        "commands": [
+          "/event new",
+          "/event edit"
+        ],
+        "cancellableStates": [
+          "active"
+        ],
+        "terminalStates": [
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "effects": [
+          "discard-pending-location-selection"
+        ]
+      },
+      {
+        "id": "event-edit-selection",
+        "description": "Pending interactive event selection before an event update or creator poll close.",
+        "mode": "plugin-handler",
+        "scope": "actor-chat",
+        "commands": [
+          "/event edit",
+          "/event poll"
+        ],
+        "cancellableStates": [
+          "active"
+        ],
+        "terminalStates": [
+          "completed",
+          "cancelled",
+          "expired"
+        ],
+        "effects": [
+          "discard-pending-event-edit-selection"
+        ]
+      },
+      {
+        "id": "published-event-lifecycle",
+        "description": "Published event lifecycles must be cancelled with the explicit event cancellation workflow.",
+        "mode": "not-cancellable",
+        "scope": "scope",
+        "commands": [
+          "/event cancel"
+        ],
+        "notCancellableReason": "Published event cancellation can affect polls, calendars, and managed event groups, so it requires explicit event selection and confirmation."
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "pluginId": "official.doas",
+      "versionRange": ">=0.3.0"
+    },
+    {
+      "pluginId": "official.community-subgroups",
+      "versionRange": ">=0.1.0"
+    },
+    {
+      "pluginId": "official.geocoder",
+      "versionRange": "^0.2.0"
+    },
+    {
+      "pluginId": "official.poll-assistant",
+      "versionRange": ">=0.3.0"
+    },
+    {
+      "pluginId": "official.weather",
+      "versionRange": ">=0.4.0",
+      "optional": true
+    },
+    {
+      "pluginId": "official.workspace-connector",
+      "versionRange": ">=0.1.0",
+      "optional": true
+    }
+  ],
+  "databases": [
+    {
+      "name": "events",
+      "engine": "sqlite",
+      "scope": "account",
+      "migrations": "migrations/events"
+    }
+  ],
+  "ownedData": [
+    {
+      "resource": "transport.poll-history"
+    }
+  ],
+  "dataVersion": "18",
+  "assistant": {
+    "summary": "Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.",
+    "useCases": [
+      "Create day-trip or multi-day event polls from configured profiles, or create event subgroups directly when the creator skips the poll or its close time has already passed.",
+      "Cancel active event lifecycles by creator or event manager.",
+      "Close polls before the event, gather attendees, and create event subgroups.",
+      "Export one calendar file per scope.",
+      "When weather is enabled, send forecasts 15, 12, 7, 2 and 1 days before the event, on the event day and daily during multi-day events. Send immediately for groups created within the forecast window; each update covers the remaining event days available.",
+      "For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community."
+    ],
+    "prerequisites": [
+      "official.doas must be enabled for the target scope.",
+      "official.community-subgroups must be installed so event subgroups use the shared creation policy.",
+      "official.geocoder must be enabled for event profiles whose location comes from a question.",
+      "official.poll-assistant 0.3.0 or newer must be enabled in the target scope for new and replacement attendance polls.",
+      "The bot must be an admin of the announcement and community groups.",
+      "The caller needs the configured profile-specific events.create.* permission to create events.",
+      "The event creator or an events.manage actor can cancel active events.",
+      "Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent."
+    ],
+    "workflows": [
+      {
+        "intent": "event_create",
+        "description": "Start a guided event creation flow.",
+        "commands": [
+          "/event new"
+        ]
+      },
+      {
+        "intent": "event_edit",
+        "description": "Update an event by ID, title, or current event subgroup.",
+        "commands": [
+          "/event edit"
+        ]
+      },
+      {
+        "intent": "event_list",
+        "description": "List future active events in chronological order.",
+        "commands": [
+          "/event list"
+        ]
+      },
+      {
+        "intent": "event_status",
+        "description": "Inspect event plugin status for the current scope.",
+        "commands": [
+          "/event status"
+        ]
+      },
+      {
+        "intent": "event_cancel",
+        "description": "Cancel an active event lifecycle.",
+        "commands": [
+          "/event cancel"
+        ]
+      }
+    ]
+  },
+  "operatorConsole": {
+    "configPaths": [
+      "enabled",
+      "timezone",
+      "subgroupSuggestionConversion.policy",
+      "subgroupSuggestionConversion.preFlowNotice.enabled",
+      "subgroupSuggestionConversion.preFlowNotice.template",
+      "eventProfiles",
+      "calendars",
+      "adoption",
+      "cleanup.retryDelaysMinutes",
+      "cleanup.lastFailureMessage",
+      "cleanup.lastFailureAt"
+    ],
+    "controls": [
+      {
+        "id": "plugin.official.community-events.enabled",
+        "path": "enabled",
+        "label": "Enabled",
+        "description": "Enable guided event creation in this scope.",
+        "section": "Community Events",
+        "order": 10,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle",
+          "helpText": "Enable guided event creation in this scope."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.timezone",
+        "path": "timezone",
+        "label": "Timezone",
+        "description": "IANA timezone used when combining event date and time answers.",
+        "section": "Community Events",
+        "order": 20,
+        "schema": {
+          "type": "string",
+          "format": "timezone"
+        },
+        "ui": {
+          "widget": "select",
+          "helpText": "IANA timezone used when combining event date and time answers."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.policy",
+        "path": "subgroupSuggestionConversion.policy",
+        "label": "Subgroup suggestion conversion",
+        "description": "Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill.",
+        "section": "Community Events",
+        "order": 30,
+        "schema": {
+          "type": "enum",
+          "enum": [
+            {
+              "value": "off",
+              "label": "Off"
+            },
+            {
+              "value": "auto_convert",
+              "label": "Automatically convert"
+            }
+          ]
+        },
+        "ui": {
+          "widget": "segmented",
+          "options": [
+            {
+              "value": "off",
+              "label": "Off"
+            },
+            {
+              "value": "auto_convert",
+              "label": "Automatically convert"
+            }
+          ],
+          "helpText": "Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill."
+        },
+        "dangerous": true,
+        "confirmation": {
+          "required": true,
+          "message": "Automatically converting subgroup suggestions starts a fresh blank event-creation flow and then rejects the native WhatsApp suggestion. The suggested group title is discarded."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled",
+        "path": "subgroupSuggestionConversion.preFlowNotice.enabled",
+        "label": "Suggestion refusal notice",
+        "description": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt.",
+        "section": "Community Events",
+        "order": 40,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle",
+          "helpText": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template",
+        "path": "subgroupSuggestionConversion.preFlowNotice.template",
+        "label": "Suggestion refusal notice text",
+        "description": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.",
+        "section": "Community Events",
+        "order": 50,
+        "schema": {
+          "type": "string",
+          "max": 1000,
+          "required": true
+        },
+        "ui": {
+          "widget": "text",
+          "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.",
+          "multiline": true,
+          "templateDialect": "conditional-presence-v1",
+          "templateActivation": "when-used",
+          "templateVariables": [
+            {
+              "token": "creatorDisplayName",
+              "label": "Suggestion creator",
+              "sampleValue": "Diogo Batista"
+            }
+          ],
+          "templateConditionVariables": [
+            {
+              "token": "creatorDisplayName",
+              "label": "Suggestion creator",
+              "sampleValue": "Diogo Batista"
+            }
+          ],
+          "templateEmptyResult": "suppress",
+          "helpText": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.eventProfiles",
+        "path": "eventProfiles",
+        "label": "Event profiles",
+        "description": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.",
+        "section": "Community Events",
+        "order": 60,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "ui": {
+          "widget": "builder",
+          "builderId": "official.community-events.event-profiles.v1",
+          "builderEndpoints": {
+            "options": "/api/v1/plugins/official.community-events/profiles/:scopeId/options",
+            "renameQuestion": "/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename",
+            "calendarState": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId",
+            "publish": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish",
+            "rotateToken": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token"
+          },
+          "helpText": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.calendars",
+        "path": "calendars",
+        "label": "Event calendars",
+        "description": "Reusable calendar export resources managed by the event profile builder.",
+        "section": "Community Events",
+        "order": 65,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "ui": {
+          "widget": "builder",
+          "builderId": "official.community-events.event-profiles.v1",
+          "hideWhenBuilderMounted": true,
+          "helpText": "Reusable calendar export resources managed by the event profile builder."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.adoption",
+        "path": "adoption",
+        "label": "Adopt existing event",
+        "description": "Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management.",
+        "section": "Community Events",
+        "order": 70,
+        "schema": {
+          "type": "object",
+          "properties": {}
+        },
+        "ui": {
+          "widget": "builder",
+          "builderId": "official.community-events.adoption.v1",
+          "builderEndpoints": {
+            "options": "/api/v1/plugins/official.community-events/adoptions/:scopeId/options",
+            "adopt": "/api/v1/plugins/official.community-events/adoptions"
+          },
+          "hideWhenBuilderMounted": true,
+          "helpText": "Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.cleanup.retryDelaysMinutes",
+        "path": "cleanup.retryDelaysMinutes",
+        "label": "Cleanup retry delays",
+        "description": "Retry delays, in minutes, for subgroup transcript capture or deletion failures.",
+        "section": "Community Events",
+        "order": 80,
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "ui": {
+          "widget": "number",
+          "helpText": "Retry delays, in minutes, for subgroup transcript capture or deletion failures."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.cleanup.lastFailureMessage",
+        "path": "cleanup.lastFailureMessage",
+        "label": "Cleanup failure",
+        "description": "Most recent subgroup transcript capture or deletion failure.",
+        "section": "Community Events",
+        "order": 90,
+        "schema": {
+          "type": "string"
+        },
+        "ui": {
+          "widget": "text",
+          "helpText": "Most recent subgroup transcript capture or deletion failure."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      },
+      {
+        "id": "plugin.official.community-events.cleanup.lastFailureAt",
+        "path": "cleanup.lastFailureAt",
+        "label": "Cleanup failure time",
+        "description": "ISO timestamp for the most recent subgroup cleanup failure.",
+        "section": "Community Events",
+        "order": 100,
+        "schema": {
+          "type": "string"
+        },
+        "ui": {
+          "widget": "text",
+          "helpText": "ISO timestamp for the most recent subgroup cleanup failure."
+        },
+        "relatedCommandIds": [
+          "/event new",
+          "/event edit",
+          "/event status"
+        ]
+      }
+    ],
+    "internalConfigPaths": []
+  },
+  "workflowActions": [
+    {
+      "actionId": "official.community-events.edit",
+      "version": 1,
+      "titleKey": "official.community-events.workflow.edit.title",
+      "descriptionKey": "official.community-events.workflow.edit.description",
+      "sources": [
+        "assistant",
+        "poll_outcome"
+      ],
+      "serviceId": "official.community-events.workflow.v1",
+      "methods": {
+        "describe": "editDescribe",
+        "prepare": "editPrepare",
+        "execute": "editExecute",
+        "inspect": "editInspect"
+      },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "patch"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "title": "Event",
+            "format": "event-reference",
+            "x-workflow-target": true
+          },
+          "patch": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "answers": {
+                "type": "object",
+                "title": "Event fields",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "spanKind": {
+                "type": "string",
+                "enum": [
+                  "day_trip",
+                  "multi_day"
+                ]
+              },
+              "endLocalDate": {
+                "type": "string",
+                "format": "date"
+              },
+              "endLocalTime": {
+                "type": "string",
+                "format": "time"
+              },
+              "location": {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "question",
+                      "fixed"
+                    ]
+                  },
+                  "displayLabel": {
+                    "type": "string"
+                  },
+                  "resolvedLabel": {
+                    "type": "string"
+                  },
+                  "latitude": {
+                    "type": "number",
+                    "minimum": -90,
+                    "maximum": 90
+                  },
+                  "longitude": {
+                    "type": "number",
+                    "minimum": -180,
+                    "maximum": 180
+                  },
+                  "timezone": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "providerRef": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "displayLabel",
+                  "resolvedLabel",
+                  "latitude",
+                  "longitude",
+                  "timezone"
+                ]
+              }
+            }
+          },
+          "confirmPastCompletion": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previousUpdatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "appliedFields": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "eventId",
+          "updatedAt"
+        ]
+      },
+      "requiredPermissions": [],
+      "requiredBotCapabilities": []
+    },
+    {
+      "actionId": "official.community-events.cancel",
+      "version": 1,
+      "titleKey": "official.community-events.workflow.cancel.title",
+      "descriptionKey": "official.community-events.workflow.cancel.description",
+      "sources": [
+        "assistant",
+        "poll_outcome"
+      ],
+      "serviceId": "official.community-events.workflow.v1",
+      "methods": {
+        "describe": "cancelDescribe",
+        "prepare": "cancelPrepare",
+        "execute": "cancelExecute",
+        "inspect": "cancelInspect"
+      },
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "eventId"
+        ],
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "title": "Event",
+            "format": "event-reference",
+            "x-workflow-target": true
+          },
+          "calendarDisposition": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "hidden"
+            ],
+            "default": "cancelled"
+          },
+          "deleteAnnouncementMessages": {
+            "type": "boolean",
+            "default": true
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "previousUpdatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "appliedFields": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "eventId",
+          "updatedAt"
+        ]
+      },
+      "requiredPermissions": [],
+      "requiredBotCapabilities": []
+    }
+  ],
+  "scopeClock": {
+    "timezoneConfigPaths": [
+      "timezone"
+    ],
+    "providesGroupTimezones": true
+  }
+}

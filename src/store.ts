@@ -1,14 +1,14 @@
-import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
+import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PluginPollVote } from './runtime';
 import type {
   CreatedGroupParticipantResult,
   MessageDeletionResult,
   PersistedRequiredCreatorReference
-} from '../../../../packages/plugin-sdk/src/transport';
-import { equivalentWhatsAppMessageIds } from '../../../../packages/plugin-sdk/src/message-ids';
-import { comparePollVoteRevisions } from '../../../../packages/plugin-sdk/src/poll-ordering';
-import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '../../../../packages/plugin-sdk/src/database';
+} from '@wabs/plugin-sdk/transport';
+import { equivalentWhatsAppMessageIds } from '@wabs/plugin-sdk/message-ids';
+import { comparePollVoteRevisions } from '@wabs/plugin-sdk/poll-ordering';
+import type { PluginDatabase, PluginDatabaseRow, PluginDatabaseRegistry } from '@wabs/plugin-sdk/database';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import type {
   PollAssistantLifecycleEnsureInput,

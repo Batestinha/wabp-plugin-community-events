@@ -1,6 +1,6 @@
-import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
+import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import { randomUUID } from 'node:crypto';
-import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '../../../../packages/plugin-sdk/src/flow-types';
+import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '@wabs/plugin-sdk/flow-types';
 import type { FlowSessionSnapshot } from './runtime';
 import type { TranslateFn } from './runtime';
 import {

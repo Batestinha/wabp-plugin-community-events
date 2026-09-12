@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AppConfig } from './deploymentConfig';
-import { OidcClientCredentialsTokenProvider } from '../../../../packages/plugin-sdk/src/client-credentials';
+import { OidcClientCredentialsTokenProvider } from '@wabs/plugin-sdk/client-credentials';
 import type { EventsConfig } from './config';
 
 const DEFAULT_PUBLICATION_TIMEOUT_MS = 15_000;

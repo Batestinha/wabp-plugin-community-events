@@ -1,5 +1,5 @@
 import type { AppConfig } from './deploymentConfig';
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
 import type { PluginRuntimeContext } from './runtime';
 import type { OfficialPluginCommandRuntime } from './runtime';
 import {

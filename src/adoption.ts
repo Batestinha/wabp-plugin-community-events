@@ -1,9 +1,9 @@
 import type { PluginOperationContext, PluginPollVote } from './runtime';
-import { resolvePluginPollVotes } from '../../../../packages/plugin-sdk/src/poll-vote-identity';
+import { resolvePluginPollVotes } from '@wabs/plugin-sdk/poll-vote-identity';
 import {
   IncompletePollVoteReadbackError,
   requireCompletePollVotes
-} from '../../../../packages/plugin-sdk/src/poll-readback';
+} from '@wabs/plugin-sdk/poll-readback';
 import { requireOfficialCommandRuntime, type OfficialPluginCommandRuntime } from './runtime';
 import {
   persistedEventAnnouncementDisposition,

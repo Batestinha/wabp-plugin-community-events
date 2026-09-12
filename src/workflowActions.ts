@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import type { PluginServiceRegistrationContext } from './runtime';
-import type { PluginServiceCallContext, PluginServiceRegistration } from '../../../../packages/plugin-sdk/src/services';
-import { pluginWorkflowOperationContext } from '../../../../packages/plugin-sdk/src/managed-group-plugin';
+import type { PluginServiceCallContext, PluginServiceRegistration } from '@wabs/plugin-sdk/services';
+import { pluginWorkflowOperationContext } from '@wabs/plugin-sdk/managed-group-plugin';
 import { bindWorkflowInput, canonicalJson, preparedActionSchema, workflowActionResultSchema, workflowBindingSchema, workflowDigest,
-  type PreparedAction, type WorkflowActionResult, type WorkflowBinding } from '../../../../packages/plugin-sdk/src/workflows';
+  type PreparedAction, type WorkflowActionResult, type WorkflowBinding } from '@wabs/plugin-sdk/workflows';
 import { requireOfficialCommandRuntime } from './runtime';
 import { applyEventUpdate, eventIsEditable, eventUpdateAllowed, eventUpdatePrefill, type EventUpdateDraft } from './commands';
 import { cancelEventLifecycle } from './cancellation';

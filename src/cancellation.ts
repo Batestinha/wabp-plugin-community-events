@@ -21,7 +21,7 @@ import {
   type StoredEventRecord
 } from './store';
 import type { OfficialPluginCommandRuntime } from './runtime';
-import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
+import type { MessageDeletionResult } from '@wabs/plugin-sdk/transport';
 import type { EventArtifactDeletionResult } from './eventArtifactDeletion';
 import { EVENTS_JOBS } from './manifest';
 import { releaseEligibleEventPollReplacementReceipts } from './pollReplacement';

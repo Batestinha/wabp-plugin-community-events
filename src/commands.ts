@@ -1,25 +1,25 @@
-import { scopeTimezoneSchema } from '../../../../packages/plugin-sdk/src/clock';
+import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { eventAnswersInTimezone } from './locationTimezone';
 import { createHash, randomUUID } from 'node:crypto';
-import type { WorkflowActionResult } from '../../../../packages/plugin-sdk/src/workflows';
-import type { FlowDefinition, FlowState } from '../../../../packages/plugin-sdk/src/flow-types';
-import type { CommandMetadata, CommandTargetSpec } from '../../../../packages/plugin-sdk/src/command-metadata';
-import type { CommandContext } from '../../../../packages/plugin-sdk/src/commands';
+import type { WorkflowActionResult } from '@wabs/plugin-sdk/workflows';
+import type { FlowDefinition, FlowState } from '@wabs/plugin-sdk/flow-types';
+import type { CommandMetadata, CommandTargetSpec } from '@wabs/plugin-sdk/command-metadata';
+import type { CommandContext } from '@wabs/plugin-sdk/commands';
 import type { PluginCancellationRegistration, PluginCommandContext, PluginOperationContext } from './runtime';
 import type { PluginRuntimeContext } from './runtime';
-import { enqueuePluginJob as enqueueRuntimePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
-import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '../../../../packages/plugin-sdk/src/poll-contract';
+import { enqueuePluginJob as enqueueRuntimePluginJob } from '@wabs/plugin-sdk/jobs';
+import { WHATSAPP_POLL_MAX_OPTION_CODEPOINTS } from '@wabs/plugin-sdk/poll-contract';
 import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError
-} from '../../../../packages/plugin-sdk/src/community-errors';
+} from '@wabs/plugin-sdk/community-errors';
 import type {
   OutboundSendResult,
   MessageDeletionResult,
   PrivateDeliveryFallback,
   SendTextOptions
-} from '../../../../packages/plugin-sdk/src/transport';
-import { requireIdentityAddress } from '../../../../packages/plugin-sdk/src/message-actor';
+} from '@wabs/plugin-sdk/transport';
+import { requireIdentityAddress } from '@wabs/plugin-sdk/message-actor';
 import { requireOfficialCommandRuntime, requireScopeId, type OfficialPluginCommandRuntime } from './runtime';
 import { cancelEventLifecycle } from './cancellation';
 import {

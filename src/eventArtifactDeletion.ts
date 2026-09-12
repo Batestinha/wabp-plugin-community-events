@@ -1,5 +1,5 @@
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
-import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
+import type { MessageDeletionResult } from '@wabs/plugin-sdk/transport';
 import {
   listEventAnnouncementMessages,
   markEventAnnouncementMessageDeleted,

@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PluginOperationContext } from './runtime';
 import type { PluginRuntimeContext } from './runtime';
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
-import type { MessageDeletionResult } from '../../../../packages/plugin-sdk/src/transport';
-import { isPluginServiceNotInvokedError } from '../../../../packages/plugin-sdk/src/services';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
+import type { MessageDeletionResult } from '@wabs/plugin-sdk/transport';
+import { isPluginServiceNotInvokedError } from '@wabs/plugin-sdk/services';
 import {
   isDefinitelyNotSentTransportError,
   isTransportProviderUnavailableError
-} from '../../../../packages/plugin-sdk/src/transport-errors';
+} from '@wabs/plugin-sdk/transport-errors';
 import {
   DOAS_POLL_PUBLISH_METHOD,
   DOAS_POLL_RECONCILE_METHOD,

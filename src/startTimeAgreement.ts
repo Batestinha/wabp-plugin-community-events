@@ -1,8 +1,8 @@
 import type { TranslateFn } from './runtime';
-import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
+import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type { PluginRuntimeContext } from './runtime';
 import type { PluginJobEvent } from './runtime';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import {
   POLL_ASSISTANT_AUTOMATION_SERVICE_ID,
   POLL_ASSISTANT_CANCEL_POLL_METHOD,

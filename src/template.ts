@@ -2,7 +2,7 @@ import {
   conditionalTemplateIsActive,
   renderConditionalTemplateIfActive,
   renameConditionalTemplateToken
-} from '../../../../packages/plugin-sdk/src/templates';
+} from '@wabs/plugin-sdk/templates';
 
 export {
   ConditionalTemplateSyntaxError as EventTemplateSyntaxError,
@@ -12,12 +12,12 @@ export {
   validateConditionalTemplate as validateEventTemplateText,
   validateConditionalTemplateIfActive as validateEventConditionalText,
   validateConditionalTemplateSyntax as validateEventTemplateSyntax
-} from '../../../../packages/plugin-sdk/src/templates';
+} from '@wabs/plugin-sdk/templates';
 
 export type {
   ConditionalTemplateNode as EventTemplateNode,
   ConditionalTemplateValidationIssue as EventTemplateValidationIssue
-} from '../../../../packages/plugin-sdk/src/templates';
+} from '@wabs/plugin-sdk/templates';
 
 export type EventConditionalTextFailureCode =
   | 'invalid-template'

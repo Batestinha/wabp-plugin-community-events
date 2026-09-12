@@ -1,4 +1,4 @@
-import { scopeTimezoneSchema } from '../../../../packages/plugin-sdk/src/clock';
+import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { z } from 'zod';
 import type {
   FlowEngine,
@@ -6,11 +6,11 @@ import type {
   FlowStartResult
 } from './runtime';
 import type { TranslateFn, I18nService } from './runtime';
-import type { StableIdentityAddressResolution } from '../../../../packages/plugin-sdk/src/identity';
-import type { PluginDataStore } from '../../../../packages/plugin-sdk/src/data-store';
+import type { StableIdentityAddressResolution } from '@wabs/plugin-sdk/identity';
+import type { PluginDataStore } from '@wabs/plugin-sdk/data-store';
 import type { PluginPermissionExplanation } from './runtime';
-import type { CurrentManagedGroupMembershipMode } from '../../../../packages/plugin-sdk/src/access-types';
-import type { PrivateDeliveryFallback } from '../../../../packages/plugin-sdk/src/transport';
+import type { CurrentManagedGroupMembershipMode } from '@wabs/plugin-sdk/access-types';
+import type { PrivateDeliveryFallback } from '@wabs/plugin-sdk/transport';
 import {
   eventProfilePermission,
   eventCalendarResourceSchema,

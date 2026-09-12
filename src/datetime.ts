@@ -1,8 +1,8 @@
-import { chronoParserForLocale } from '../../../../packages/plugin-sdk/src/chrono-locale';
+import { chronoParserForLocale } from '@wabs/plugin-sdk/chrono-locale';
 import {
   parseLocalizedDateTimeInput,
   type LocalizedDateParts
-} from '../../../../packages/plugin-sdk/src/localized-date-time';
+} from '@wabs/plugin-sdk/localized-date-time';
 import type { EventSpanKind } from './span';
 import { eventDateTemplateTokens, formatEventDateTime } from './templateDates';
 export { eventDateTemplateTokens, formatEventDateTime } from './templateDates';

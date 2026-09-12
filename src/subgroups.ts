@@ -1,9 +1,9 @@
-import type { PluginServiceCaller } from '../../../../packages/plugin-sdk/src/services';
+import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
 import type {
   CreatedGroupParticipantResult,
   PersistedRequiredCreatorReference,
   RequiredCreatorBinding
-} from '../../../../packages/plugin-sdk/src/transport';
+} from '@wabs/plugin-sdk/transport';
 import {
   COMMUNITY_SUBGROUPS_CANDIDATE_METHOD,
   COMMUNITY_SUBGROUPS_COMPLETE_METHOD,

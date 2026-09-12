@@ -1,0 +1,43 @@
+{
+  "name": "@wabs/plugin-community-events",
+  "version": "0.15.0",
+  "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "wa-plugin.json",
+    "locales",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "provenance.json",
+    "package-lock.json",
+    "contracts",
+    "migrations"
+  ],
+  "bundledDependencies": [
+    "@wabs/plugin-sdk",
+    "zod"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.cjs",
+    "release:archive": "npm run build && python scripts/package-release.py"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@wabs/plugin-sdk": "file:vendor/wabs-plugin-sdk-0.3.8-dde4f1da2595.tgz",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.20",
+    "typescript": "5.9.3"
+  }
+}

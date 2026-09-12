@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { PluginDatabase, PluginDatabaseRow } from '../../../../packages/plugin-sdk/src/database';
+import type { PluginDatabase, PluginDatabaseRow } from '@wabs/plugin-sdk/database';
 import type { EventProfile } from './config';
 
 export const EVENT_START_TIME_BANDS = ['morning', 'afternoon', 'evening'] as const;

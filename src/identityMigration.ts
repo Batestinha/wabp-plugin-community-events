@@ -1,7 +1,7 @@
 import type {
   PluginDatabase,
   PluginDatabaseRow
-} from '../../../../packages/plugin-sdk/src/database';
+} from '@wabs/plugin-sdk/database';
 import type { PluginLifecycleContext } from './runtime';
 import { eventsDatabase } from './store';
 

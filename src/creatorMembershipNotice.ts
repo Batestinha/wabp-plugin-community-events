@@ -1,8 +1,8 @@
 import type { PluginRuntimeContext } from './runtime';
 import {
   isManagedCommunitySubgroupProvisioningError
-} from '../../../../packages/plugin-sdk/src/community-errors';
-import type { CreatedGroupParticipantResult } from '../../../../packages/plugin-sdk/src/transport';
+} from '@wabs/plugin-sdk/community-errors';
+import type { CreatedGroupParticipantResult } from '@wabs/plugin-sdk/transport';
 import type { StoredEventRecord } from './store';
 
 export type EventCreatorMembershipPauseKind =

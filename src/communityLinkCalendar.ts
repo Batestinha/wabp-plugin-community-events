@@ -1,7 +1,7 @@
 import type { Logger } from './runtime';
 import type { AppConfig } from './deploymentConfig';
-import type { PluginDatabaseRegistry } from '../../../../packages/plugin-sdk/src/database';
-import type { PluginServiceCaller } from '../../../../packages/plugin-sdk/src/services';
+import type { PluginDatabaseRegistry } from '@wabs/plugin-sdk/database';
+import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
 import type { EventsConfig } from './config';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import {

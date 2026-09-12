@@ -1,4 +1,4 @@
-import { scopeTimezoneSchema } from '../../../../packages/plugin-sdk/src/clock';
+import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { z } from 'zod';
 import type { TranslateFn } from './runtime';
 import { eventsMessages } from './messages';

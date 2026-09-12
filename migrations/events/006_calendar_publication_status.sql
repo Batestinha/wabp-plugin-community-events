@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS event_calendar_publication_status (
+  scope_id TEXT NOT NULL,
+  calendar_id TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  generated_event_count INTEGER NOT NULL DEFAULT 0,
+  publication_enabled INTEGER NOT NULL DEFAULT 0,
+  attempted INTEGER NOT NULL DEFAULT 0,
+  ok INTEGER NOT NULL DEFAULT 0,
+  endpoint_url TEXT,
+  feed_id TEXT,
+  label TEXT,
+  download_url TEXT,
+  calendar_url TEXT,
+  target_updated_at TEXT,
+  last_success_at TEXT,
+  last_error_at TEXT,
+  last_error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope_id, calendar_id)
+);

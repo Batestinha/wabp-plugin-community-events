@@ -1,7 +1,7 @@
 import type { AppConfig } from './deploymentConfig';
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
-import type { PluginServiceCaller } from '../../../../packages/plugin-sdk/src/services';
-import type { OutboundSendResult, SendTextOptions } from '../../../../packages/plugin-sdk/src/transport';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
+import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
+import type { OutboundSendResult, SendTextOptions } from '@wabs/plugin-sdk/transport';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { sendEventCalendarHint } from './calendarHint';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';

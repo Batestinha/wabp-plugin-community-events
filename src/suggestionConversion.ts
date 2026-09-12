@@ -1,7 +1,7 @@
-import type { CommunityGroupSuggestion } from '../../../../packages/plugin-sdk/src/transport';
+import type { CommunityGroupSuggestion } from '@wabs/plugin-sdk/transport';
 import type { PluginJobEvent } from './runtime';
 import type { PluginRuntimeContext } from './runtime';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import { parseEventsConfig } from './config';
 import {
   EventCreationFlowStarter,

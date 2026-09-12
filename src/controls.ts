@@ -1,5 +1,5 @@
-import { defineControl } from '../../../../packages/plugin-sdk/src/controls';
-import type { ControlDescriptor, ControlSchemaMetadata, ControlUiHint } from '../../../../packages/plugin-sdk/src/controls-types';
+import { defineControl } from '@wabs/plugin-sdk/controls';
+import type { ControlDescriptor, ControlSchemaMetadata, ControlUiHint } from '@wabs/plugin-sdk/controls-types';
 import { DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE } from './config';
 
 function control(

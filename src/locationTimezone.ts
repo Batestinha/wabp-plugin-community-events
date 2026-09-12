@@ -1,4 +1,4 @@
-import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
+import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import { eventDateAndTimeToUtc, parseEventDateInput, type EventDateReference } from './datetime';
 import type { EventFlowAnswers } from './flow';
 

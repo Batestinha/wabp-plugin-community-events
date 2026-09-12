@@ -1,4 +1,4 @@
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
 import {
   claimEventAnnouncementDelivery,
   completeEventAnnouncementDelivery,

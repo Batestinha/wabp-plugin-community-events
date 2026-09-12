@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AppConfig } from './deploymentConfig';
-import type { PluginDatabase } from '../../../../packages/plugin-sdk/src/database';
-import type { PluginServiceCaller } from '../../../../packages/plugin-sdk/src/services';
+import type { PluginDatabase } from '@wabs/plugin-sdk/database';
+import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
 import {
   eventCalendarResourceSchema,
   type EventCalendarResource,

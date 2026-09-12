@@ -1,4 +1,4 @@
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import type { PluginRuntimeContext } from './runtime';
 import { parseEventsConfig } from './config';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';

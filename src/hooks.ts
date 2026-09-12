@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
+import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type {
   PluginGroupDismantledEvent,
   PluginJobEvent,
@@ -11,16 +11,16 @@ import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
-} from '../../../../packages/plugin-sdk/src/community-errors';
+} from '@wabs/plugin-sdk/community-errors';
 import {
   IncompletePollVoteReadbackError,
   requirePollVotesThroughCutoff
-} from '../../../../packages/plugin-sdk/src/poll-readback';
-import type { CreatedGroupParticipantResult } from '../../../../packages/plugin-sdk/src/transport';
+} from '@wabs/plugin-sdk/poll-readback';
+import type { CreatedGroupParticipantResult } from '@wabs/plugin-sdk/transport';
 import type { OfficialPluginCommandRuntime } from './runtime';
 import type { PluginGroupDismantleResult, PluginRuntimeContext } from './runtime';
-import { resolvePluginPollVotes } from '../../../../packages/plugin-sdk/src/poll-vote-identity';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { resolvePluginPollVotes } from '@wabs/plugin-sdk/poll-vote-identity';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';

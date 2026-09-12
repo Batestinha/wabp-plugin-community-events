@@ -1,9 +1,9 @@
 import type { TranslateFn } from './runtime';
-import type { PluginServiceCallInput } from '../../../../packages/plugin-sdk/src/services';
-import type { PluginAction } from '../../../../packages/plugin-sdk/src/actions';
+import type { PluginServiceCallInput } from '@wabs/plugin-sdk/services';
+import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type { PluginRuntimeContext } from './runtime';
 import type { PluginJobEvent } from './runtime';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import type {
   WeatherForecastOutput,
   WeatherMetricValue,

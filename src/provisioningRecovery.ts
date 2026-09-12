@@ -1,22 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import {
   isManagedCommunitySubgroupPreCreateError,
   isManagedCommunitySubgroupProvisioningError,
   type ManagedCommunitySubgroupProvisioningError
-} from '../../../../packages/plugin-sdk/src/community-errors';
+} from '@wabs/plugin-sdk/community-errors';
 import type { PluginRuntimeContext } from './runtime';
 import type {
   CreatedGroupParticipantResult,
   ManagedCommunitySubgroup,
   OutboundSendResult,
   RequiredCreatorBinding
-} from '../../../../packages/plugin-sdk/src/transport';
+} from '@wabs/plugin-sdk/transport';
 import {
   isTransportCommunitySubgroupPreCreateError,
   isTransportProviderUnavailableError,
   type TransportCommunityLinkRecoveryDisposition
-} from '../../../../packages/plugin-sdk/src/transport-errors';
+} from '@wabs/plugin-sdk/transport-errors';
 import type { OfficialPluginCommandRuntime } from './runtime';
 import { voterWidsForResponseBehavior } from './attendance';
 import { eventAttendanceVotesFromSnapshot } from './attendanceLifecycle';

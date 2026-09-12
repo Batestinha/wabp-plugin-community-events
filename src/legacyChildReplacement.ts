@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { enqueuePluginJob } from '../../../../packages/plugin-sdk/src/jobs';
+import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import type { PluginRuntimeContext } from './runtime';
 import type { PluginGroupDismantleResult } from './runtime';
-import type { CommunitySubgroupLinkProbe } from '../../../../packages/plugin-sdk/src/transport';
+import type { CommunitySubgroupLinkProbe } from '@wabs/plugin-sdk/transport';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import {
   EVENT_CLEANUP_CLAIM_LEASE_MS,

@@ -1,4 +1,4 @@
-import { canonicalTimezone } from '../../../../packages/plugin-sdk/src/clock';
+import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import type { GeocoderPlace } from './contracts/geocoder/serviceApi';
 import type { EventProfile } from './config';
 import type { StoredEventLocation } from './store';

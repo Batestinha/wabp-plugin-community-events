@@ -1,0 +1,1 @@
+ALTER TABLE event_calendar_publication_status DROP COLUMN download_url;

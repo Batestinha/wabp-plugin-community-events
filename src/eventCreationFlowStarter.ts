@@ -1,3 +1,4 @@
+import { scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
 import { z } from 'zod';
 import type {
   FlowEngine,
@@ -54,6 +55,7 @@ export interface EventDraft {
 }
 
 const eventFlowPrefillSchema = z.object({
+  timezone: scopeTimezoneSchema.optional(),
   profileId: z.string().trim().min(1).optional(),
   answers: z.record(z.string()),
   spanKind: z.enum(['day_trip', 'multi_day']).optional(),
@@ -101,7 +103,7 @@ export const eventDraftSchema = z.object({
   actorLabel: z.string().trim().min(1),
   privateDeliveryFallback: privateDeliveryFallbackSchema.optional(),
   defaultAnnouncementGroupWid: z.string().trim().min(1).optional(),
-  timezone: z.string().trim().min(1),
+  timezone: scopeTimezoneSchema,
   locale: z.string().trim().min(1),
   profiles: z.array(eventProfileSchema).min(1),
   calendars: z.array(eventCalendarResourceSchema).min(1),
@@ -363,8 +365,9 @@ export class EventCreationFlowStarter {
     prefill: EventFlowPrefill;
   }): Promise<EventCreationStartResult> {
     const startedAt = new Date();
+    const timezone = input.prefill.timezone ?? input.prepared.timezone;
     const initialData = eventInitialFlowData(input.prepared.profiles, input.prefill, {
-      timezone: input.prepared.timezone,
+      timezone,
       locale: input.prepared.locale,
       now: startedAt
     });
@@ -372,7 +375,7 @@ export class EventCreationFlowStarter {
       t: input.prepared.t,
       profiles: input.prepared.profiles,
       prefill: input.prefill,
-      timezone: input.prepared.timezone,
+      timezone,
       locale: input.prepared.locale,
       initialData,
       completeMessageKey: false
@@ -416,7 +419,7 @@ export class EventCreationFlowStarter {
           ...(input.prepared.defaultAnnouncementGroupWid
             ? { defaultAnnouncementGroupWid: input.prepared.defaultAnnouncementGroupWid }
             : {}),
-          timezone: input.prepared.timezone,
+          timezone,
           locale: input.prepared.locale,
           profiles: input.prepared.profiles,
           calendars: input.prepared.calendars,
@@ -524,6 +527,7 @@ export function eventDraftKey(scopeId: string, flowSessionId: string): string {
 export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]): EventFlowPrefill {
   const answers: Record<string, string> = {};
   let profileId: string | undefined;
+  let timezone: string | undefined;
   let spanKind: EventFlowPrefill['spanKind'];
   let endLocalDate: string | undefined;
   let endLocalTime: string | undefined;
@@ -542,6 +546,11 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
     const next = inlineValue ?? args[index + 1];
     const consumedNext = inlineValue === undefined && next !== undefined && !next.startsWith('--');
 
+    if (flag === 'timezone') {
+      timezone = scopeTimezoneSchema.parse(next);
+      if (consumedNext) index += 1;
+      continue;
+    }
     if (flag === 'profile') {
       if (next && !next.startsWith('--')) {
         profileId = next.trim();
@@ -597,6 +606,7 @@ export function parseEventPrefillArgs(args: string[], profiles: EventProfile[]):
     : undefined;
   return {
     ...(validProfileId ? { profileId: validProfileId } : {}),
+    ...(timezone ? { timezone } : {}),
     answers,
     ...(spanKind ? { spanKind } : {}),
     ...(endLocalDate ? { endLocalDate } : {}),

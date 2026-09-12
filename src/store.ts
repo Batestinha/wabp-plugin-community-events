@@ -1,3 +1,4 @@
+import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PluginPollVote } from '../../../platform/pluginRuntime/types';
 import type {
@@ -1214,6 +1215,7 @@ export function insertEvent(
   if (!actorIdentityId) {
     throw new Error('An authoritative actor identity id is required for new event records.');
   }
+  canonicalTimezone(event.timezone);
   const calendarId = event.calendarId?.trim() || null;
   const calendarOwnershipStatus = event.calendarOwnershipStatus;
   const endsAt = event.endsAt ?? new Date(
@@ -3018,6 +3020,20 @@ export function getActiveEventByPoll(db: PluginDatabase, pollWaMsgId: string): S
     pollWaMsgId
   );
   return row ? eventFromRow(row) : undefined;
+}
+
+/** Only a live, exact event-group binding may override the surrounding scope clock. */
+export function getEventTimezoneForGroup(db: PluginDatabase, scopeId: string, groupWid: string): { timezone: string; resourceId: string } | undefined {
+  const rows = db.all<{ id: string; timezone: string }>(
+    `SELECT id, timezone FROM event_records
+      WHERE scope_id = ? AND subgroup_chat_id = ?
+        AND event_status IN ('active', 'completed')
+        AND group_lifecycle_status IN ('poll_open', 'poll_closed', 'cleanup_failed')
+      ORDER BY id LIMIT 2`, scopeId, groupWid
+  );
+  if (rows.length > 1) throw new Error('Multiple live events claim this group timezone');
+  const event = rows[0];
+  return event ? { timezone: canonicalTimezone(event.timezone), resourceId: event.id } : undefined;
 }
 
 export function getLiveEventBySubgroup(db: PluginDatabase, subgroupChatId: string): StoredEventRecord | undefined {

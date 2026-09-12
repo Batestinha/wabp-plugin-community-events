@@ -1,3 +1,4 @@
+import { canonicalTimezone } from '../../../platform/governance/scopes/scopeClock';
 import type { EventFlowAnswers } from './flow';
 import {
   calendarDescription,
@@ -55,7 +56,8 @@ export function materializeEventLifecycle(input: {
   creatorDisplayName: string;
   eventLocation?: StoredEventLocation | undefined;
 }): MaterializedEventLifecycle {
-  const { profile, answers, timezone, locale, creatorDisplayName } = input;
+  const { profile, answers, locale, creatorDisplayName } = input;
+  const timezone = canonicalTimezone(input.timezone);
   const spanKind = answers.spanKind ?? 'day_trip';
   const endsAt = answers.endsAt ?? new Date(
     answers.startsAt.getTime() + profile.calendar.durationMinutes * 60_000

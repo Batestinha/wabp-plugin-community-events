@@ -1,3 +1,4 @@
+import { scopeTimezoneSchema } from '../../../platform/governance/scopes/scopeClock';
 import { z } from 'zod';
 import type { TranslateFn } from '../../../platform/i18n';
 import { eventsMessages } from './messages';
@@ -211,7 +212,7 @@ export const eventLocationConfigSchema = z.discriminatedUnion('source', [
     label: z.string().trim().min(1),
     latitude: z.number().min(-90).max(90),
     longitude: z.number().min(-180).max(180),
-    timezone: z.string().trim().min(1)
+    timezone: scopeTimezoneSchema
   }).strict()
 ]).default({
   source: 'question',

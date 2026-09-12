@@ -37,6 +37,7 @@ import {
   createEventFlowDefinition,
   eventConfirmPurpose,
   eventFlowAnswers,
+  eventFlowTimezone,
   eventFlowConfirmed,
   eventFlowPastCompletionConfirmed,
   eventInitialFlowData,
@@ -3040,6 +3041,7 @@ export function registerEventFlowCompletionHandlers(
 
       let answers: EventFlowAnswers | undefined;
       try {
+        draft.timezone = eventFlowTimezone(snapshot.state.data, draft.timezone);
         answers = eventFlowAnswers(snapshot, profile, draft.timezone, draft.locale);
       } catch (error) {
         if (!(error instanceof EventConditionalTextConfigurationError)) throw error;

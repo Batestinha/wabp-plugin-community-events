@@ -47,8 +47,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.14.1',
-  coreApiRange: '>=0.2.0',
+  version: '0.14.2',
+  coreApiRange: '^0.3.0',
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
   defaultMessages: eventsMessages,
@@ -262,6 +262,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
+  scopeClock: { timezoneConfigPaths: ['timezone'], providesGroupTimezones: true },
   databases: eventsDatabases,
   dataVersion: '18',
   assistant: {

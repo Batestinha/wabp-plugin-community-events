@@ -1,3 +1,4 @@
+import { eventsDatabase, getEventTimezoneForGroup } from './store';
 import type { BotPlugin } from '../../../platform/pluginRuntime/types';
 import { registerEventsCancellations, registerEventsCommands } from './commands';
 import { createEventsHooks } from './hooks';
@@ -8,6 +9,9 @@ import { registerEventWorkflowServices } from './workflowActions';
 
 export const eventsPlugin: BotPlugin = {
   manifest: eventsManifest,
+  resolveGroupTimezone({ databases, scopeId, groupWid }) {
+    return getEventTimezoneForGroup(eventsDatabase(databases), scopeId, groupWid);
+  },
   lifecycle: {
     migrateData: migrateEventIdentityData
   },

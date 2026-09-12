@@ -3765,7 +3765,7 @@ async function publishConfirmedEvent(input: {
               source: 'unplanned_immediate'
             }
           });
-          if ('logger' in input.context) {
+          if (input.context.logger) {
             input.context.logger.warn(
               {
                 error: noticeError,
@@ -4185,7 +4185,7 @@ async function recordEventPostCommitDeferred(input: {
       metadata: { reason }
     });
   }
-  if ('logger' in input.context) {
+  if (input.context.logger) {
     try {
       input.context.logger.warn(
         {

@@ -1306,6 +1306,10 @@ export async function applyEventUpdate(input: {
     return { status: 'blocked', reason: replyText, retryable: false };
   }
   try {
+    input = { ...input,
+      draft: { ...input.draft, timezone: scopeTimezoneSchema.parse(input.eventLocation.timezone) },
+      answers: eventAnswersInTimezone(input.answers, input.eventLocation.timezone)
+    };
     const materialized = materializeEventLifecycle({
       profile: input.draft.profile,
       answers: input.answers,
@@ -1418,9 +1422,9 @@ export async function applyEventUpdate(input: {
       input.t(doneMessageKey, {
         title: materialized.groupTitle,
         eventId: event.id,
-        startsAt: formatEventDateTime(materialized.startsAt, event.timezone, input.draft.locale),
-        endsAt: formatEventDateTime(materialized.endsAt, event.timezone, input.draft.locale),
-        cleanupAt: formatEventDateTime(outcome.cleanupAt, event.timezone, input.draft.locale)
+        startsAt: formatEventDateTime(materialized.startsAt, materialized.timezone, input.draft.locale),
+        endsAt: formatEventDateTime(materialized.endsAt, materialized.timezone, input.draft.locale),
+        cleanupAt: formatEventDateTime(outcome.cleanupAt, materialized.timezone, input.draft.locale)
       })
     );
     return outcome.repairPending
@@ -1474,7 +1478,7 @@ async function replaceOpenEventPollLifecycle(input: {
   cleanupAt: Date;
   replacementStatus: 'completed' | 'pending' | 'aborted';
 }> {
-  const timezone = input.event.timezone || input.config.timezone;
+  const timezone = input.materialized.timezone;
   const cleanupAt = input.materialized.cleanupAt;
   if (!eventStructuredDataChanged(input.event, {
     materialized: input.materialized,
@@ -1980,7 +1984,7 @@ async function convertOpenPollEditToUnplannedLifecycle(input: {
     endsAt: input.materialized.endsAt.toISOString(),
     lifecycleCompleteAt: input.materialized.lifecycleCompleteAt.toISOString(),
     spanKind: input.materialized.spanKind,
-    timezone: input.event.timezone || input.config.timezone,
+    timezone: input.materialized.timezone,
     localDate: input.materialized.localDate,
     ...(input.materialized.localTime ? { localTime: input.materialized.localTime } : {}),
     ...(input.materialized.place ? { place: input.materialized.place } : {}),
@@ -2198,7 +2202,7 @@ async function updateEventLifecycle(input: {
     input.pastCompletionConfirmed &&
     input.materialized.lifecycleCompleteAt.getTime() <= input.now.getTime();
   const cleanupAt = input.materialized.cleanupAt;
-  const timezone = input.event.timezone || input.config.timezone;
+  const timezone = input.materialized.timezone;
   const changed = completionRequested || eventStructuredDataChanged(input.event, {
     materialized: input.materialized,
     cleanupAt,

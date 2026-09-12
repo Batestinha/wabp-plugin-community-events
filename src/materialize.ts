@@ -23,6 +23,7 @@ import {
 } from './template';
 
 export interface MaterializedEventLifecycle {
+  timezone: string;
   pollQuestion: string;
   groupTitle: string;
   pollOptions: StoredEventPollOption[];
@@ -143,6 +144,7 @@ export function materializeEventLifecycle(input: {
     spanKind
   );
   return {
+    timezone,
     pollQuestion,
     groupTitle,
     pollOptions,

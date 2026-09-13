@@ -1,3 +1,5 @@
+import { eventOperatorActionDeclarations } from './operatorActions';
+import { eventConsoleOperationDeclarations } from './consoleOperationDeclarations';
 import type { PluginManifest } from '@wabs/plugin-sdk/manifest';
 import { POLL_HISTORY_OWNED_DATA_RESOURCE } from '@wabs/plugin-sdk/owned-data';
 import { eventsConfigSchema } from './config';
@@ -47,8 +49,13 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.15.0',
-  coreApiRange: '^0.3.0',
+  version: '0.15.1',
+  coreApiRange: '^0.3.4',
+  consoleOperations: eventConsoleOperationDeclarations,
+  configuration: {
+    changedActionId: 'official.community-events.recoverJobs',
+    permissionDeclarations: [{ arrayPath: 'eventProfiles', prefix: 'events.create.', valuePaths: ['permissionSuffix', 'id'] }]
+  },
   messageNamespace: 'official.community-events',
   descriptionKey: 'official.community-events.description',
   defaultMessages: eventsMessages,
@@ -138,6 +145,7 @@ export const eventsManifest: PluginManifest = {
       }
     ]
   },
+  externalActions: eventOperatorActionDeclarations,
   eventSubscriptions: ['message', 'participant.change', 'poll.vote', 'plugin.job', 'group.dismantled'],
   services: [
     {

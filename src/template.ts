@@ -1,6 +1,7 @@
 import {
   conditionalTemplateIsActive,
-  renderConditionalTemplateIfActive,
+  renderCheckedConditionalText,
+  ConditionalTextConfigurationError,
   renameConditionalTemplateToken
 } from '@wabs/plugin-sdk/templates';
 
@@ -43,20 +44,12 @@ export function renderEventConditionalText(input: {
   field: string;
   maxLength?: number | undefined;
 }): string | undefined {
-  let rendered: string;
-  try {
-    rendered = renderConditionalTemplateIfActive(input.source, input.allowedTokens, input.values);
-  } catch {
-    throw new EventConditionalTextConfigurationError(input.field, 'invalid-template');
+  try { return renderCheckedConditionalText(input); } catch (error) {
+    if (error instanceof ConditionalTextConfigurationError) {
+      throw new EventConditionalTextConfigurationError(error.field, error.code);
+    }
+    throw error;
   }
-  if (!rendered.trim()) {
-    if (input.emptyResult === 'suppress') return undefined;
-    throw new EventConditionalTextConfigurationError(input.field, 'rendered-empty');
-  }
-  if (input.maxLength !== undefined && [...rendered].length > input.maxLength) {
-    throw new EventConditionalTextConfigurationError(input.field, 'rendered-too-long');
-  }
-  return rendered;
 }
 
 export function renameEventConditionalTextToken(

@@ -1,3 +1,4 @@
+import { startRecoverySweep } from './recoverySweep';
 import { randomUUID } from 'node:crypto';
 import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type {
@@ -282,18 +283,23 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
       registerEventFlowCompletionHandlers(context, flowType, profiles, t);
     });
   }
+  let initialRecovery: Promise<unknown> | undefined;
+  const stopRecovery: Array<() => Promise<void>> = [];
   if (options.recoverJobs !== false) {
-    void recoverEventJobs(context).catch((error) => {
+    initialRecovery = recoverEventJobs(context).catch((error) => {
       context.logger.error({ error }, 'official.community-events job recovery failed');
     });
   }
   if (options.recoverCalendarPublications === true) {
-    startEventCalendarPublicationRecovery(context);
+    stopRecovery.push(startEventCalendarPublicationRecovery(context));
   }
   if (options.recoverJobHandoffs === true) {
-    startEventQueueHandoffRecovery(context);
+    stopRecovery.push(startEventQueueHandoffRecovery(context));
   }
   return {
+    async onShutdown() {
+      await Promise.all([initialRecovery, ...stopRecovery.map(stop => stop())]);
+    },
     async onMessage(event) {
       if (event.message.type !== 'message_deleted' || !event.message.replyTo?.messageId) {
         return [];
@@ -380,48 +386,24 @@ export function wakeStartTimeAgreementForParticipant(
   ];
 }
 
-function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): void {
-  let running = false;
-  const sweep = async (): Promise<void> => {
-    if (running) {
-      return;
-    }
-    running = true;
-    try {
+function startEventCalendarPublicationRecovery(context: PluginRuntimeContext): () => Promise<void> {
+  return startRecoverySweep({
+    intervalMs: EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS,
+    immediate: true,
+    run: async () => {
       await recoverDirtyEventCalendarPublications(context);
       await recoverReadyEventCalendarHintDeliveryJobs(context);
-    } catch (error) {
-      context.logger.error({ error }, 'official.community-events calendar publication recovery failed');
-    } finally {
-      running = false;
-    }
-  };
-  void sweep();
-  const timer = setInterval(() => {
-    void sweep();
-  }, EVENT_CALENDAR_PUBLICATION_RECOVERY_SWEEP_MS);
-  timer.unref();
+    },
+    onError: error => context.logger.error({ error }, 'official.community-events calendar publication recovery failed')
+  });
 }
 
-function startEventQueueHandoffRecovery(context: PluginRuntimeContext): void {
-  let running = false;
-  const sweep = async (): Promise<void> => {
-    if (running) {
-      return;
-    }
-    running = true;
-    try {
-      await recoverEventQueueHandoffs(context);
-    } catch (error) {
-      context.logger.error({ error }, 'official.community-events queue handoff recovery failed');
-    } finally {
-      running = false;
-    }
-  };
-  const timer = setInterval(() => {
-    void sweep();
-  }, EVENT_QUEUE_HANDOFF_RECOVERY_SWEEP_MS);
-  timer.unref();
+function startEventQueueHandoffRecovery(context: PluginRuntimeContext): () => Promise<void> {
+  return startRecoverySweep({
+    intervalMs: EVENT_QUEUE_HANDOFF_RECOVERY_SWEEP_MS,
+    run: async () => { await recoverEventQueueHandoffs(context); },
+    onError: error => context.logger.error({ error }, 'official.community-events queue handoff recovery failed')
+  });
 }
 
 export async function recoverEventQueueHandoffs(

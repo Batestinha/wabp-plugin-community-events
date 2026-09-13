@@ -78,7 +78,14 @@ export function scopeCalendarEvents(
 }
 
 export function scopeCalendarPath(appConfig: AppConfig, calendar: EventCalendarResource, scopeId: string): string {
-  const root = calendarExportRoot(appConfig);
+  return resolveScopeCalendarPath(calendarExportRoot(appConfig), calendar, scopeId);
+}
+
+export function scopeCalendarPathInPluginDirectory(pluginDirectory: string, calendar: EventCalendarResource, scopeId: string): string {
+  return resolveScopeCalendarPath(path.resolve(pluginDirectory, CALENDAR_EXPORT_ROOT), calendar, scopeId);
+}
+
+function resolveScopeCalendarPath(root: string, calendar: EventCalendarResource, scopeId: string): string {
   const directory = safeRelativeDirectory(calendar.directory);
   const resolved = path.resolve(root, directory, sanitizePathSegment(scopeId), `${sanitizePathSegment(calendar.id)}.ics`);
   if (!resolved.startsWith(`${root}${path.sep}`) && resolved !== root) {

@@ -4,8 +4,8 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.15.0",
-  "coreApiRange": "^0.3.0",
+  "version": "0.15.1",
+  "coreApiRange": "^0.3.4",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -498,8 +498,9 @@
     ],
     "controls": [
       {
-        "id": "plugin.official.community-events.enabled",
+        "pluginId": "official.community-events",
         "path": "enabled",
+        "id": "plugin.official.community-events.enabled",
         "label": "Enabled",
         "description": "Enable guided event creation in this scope.",
         "section": "Community Events",
@@ -508,18 +509,25 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle",
-          "helpText": "Enable guided event creation in this scope."
+          "helpText": "Enable guided event creation in this scope.",
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.timezone",
+        "pluginId": "official.community-events",
         "path": "timezone",
+        "id": "plugin.official.community-events.timezone",
         "label": "Timezone",
         "description": "IANA timezone used when combining event date and time answers.",
         "section": "Community Events",
@@ -529,18 +537,25 @@
           "format": "timezone"
         },
         "ui": {
-          "widget": "select",
-          "helpText": "IANA timezone used when combining event date and time answers."
+          "helpText": "IANA timezone used when combining event date and time answers.",
+          "widget": "select"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.subgroupSuggestionConversion.policy",
+        "pluginId": "official.community-events",
         "path": "subgroupSuggestionConversion.policy",
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.policy",
         "label": "Subgroup suggestion conversion",
         "description": "Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill.",
         "section": "Community Events",
@@ -559,6 +574,7 @@
           ]
         },
         "ui": {
+          "helpText": "Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill.",
           "widget": "segmented",
           "options": [
             {
@@ -569,23 +585,28 @@
               "value": "auto_convert",
               "label": "Automatically convert"
             }
-          ],
-          "helpText": "Choose whether eligible WhatsApp community subgroup suggestions are ignored or automatically converted into fresh blank event-creation flows. Suggested group titles are discarded and never used as event prefill."
+          ]
         },
         "dangerous": true,
         "confirmation": {
           "required": true,
           "message": "Automatically converting subgroup suggestions starts a fresh blank event-creation flow and then rejects the native WhatsApp suggestion. The suggested group title is discarded."
         },
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
+        },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled",
+        "pluginId": "official.community-events",
         "path": "subgroupSuggestionConversion.preFlowNotice.enabled",
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled",
         "label": "Suggestion refusal notice",
         "description": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt.",
         "section": "Community Events",
@@ -594,31 +615,39 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle",
-          "helpText": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt."
+          "helpText": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt.",
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template",
+        "pluginId": "official.community-events",
         "path": "subgroupSuggestionConversion.preFlowNotice.template",
+        "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template",
         "label": "Suggestion refusal notice text",
         "description": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.",
         "section": "Community Events",
         "order": 50,
         "schema": {
           "type": "string",
-          "max": 1000,
-          "required": true
+          "required": true,
+          "max": 1000
         },
         "ui": {
+          "helpText": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.",
           "widget": "text",
-          "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.",
           "multiline": true,
+          "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.",
           "templateDialect": "conditional-presence-v1",
           "templateActivation": "when-used",
           "templateVariables": [
@@ -635,18 +664,24 @@
               "sampleValue": "Diogo Batista"
             }
           ],
-          "templateEmptyResult": "suppress",
-          "helpText": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables."
+          "templateEmptyResult": "suppress"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.eventProfiles",
+        "pluginId": "official.community-events",
         "path": "eventProfiles",
+        "id": "plugin.official.community-events.eventProfiles",
         "label": "Event profiles",
         "description": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.",
         "section": "Community Events",
@@ -658,6 +693,7 @@
           }
         },
         "ui": {
+          "helpText": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.",
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
           "builderEndpoints": {
@@ -666,18 +702,24 @@
             "calendarState": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId",
             "publish": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish",
             "rotateToken": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token"
-          },
-          "helpText": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder."
+          }
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.calendars",
+        "pluginId": "official.community-events",
         "path": "calendars",
+        "id": "plugin.official.community-events.calendars",
         "label": "Event calendars",
         "description": "Reusable calendar export resources managed by the event profile builder.",
         "section": "Community Events",
@@ -689,20 +731,27 @@
           }
         },
         "ui": {
+          "helpText": "Reusable calendar export resources managed by the event profile builder.",
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
-          "hideWhenBuilderMounted": true,
-          "helpText": "Reusable calendar export resources managed by the event profile builder."
+          "hideWhenBuilderMounted": true
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.adoption",
+        "pluginId": "official.community-events",
         "path": "adoption",
+        "id": "plugin.official.community-events.adoption",
         "label": "Adopt existing event",
         "description": "Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management.",
         "section": "Community Events",
@@ -712,24 +761,31 @@
           "properties": {}
         },
         "ui": {
+          "helpText": "Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management.",
           "widget": "builder",
           "builderId": "official.community-events.adoption.v1",
           "builderEndpoints": {
             "options": "/api/v1/plugins/official.community-events/adoptions/:scopeId/options",
             "adopt": "/api/v1/plugins/official.community-events/adoptions"
           },
-          "hideWhenBuilderMounted": true,
-          "helpText": "Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management."
+          "hideWhenBuilderMounted": true
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.cleanup.retryDelaysMinutes",
+        "pluginId": "official.community-events",
         "path": "cleanup.retryDelaysMinutes",
+        "id": "plugin.official.community-events.cleanup.retryDelaysMinutes",
         "label": "Cleanup retry delays",
         "description": "Retry delays, in minutes, for subgroup transcript capture or deletion failures.",
         "section": "Community Events",
@@ -741,18 +797,25 @@
           }
         },
         "ui": {
-          "widget": "number",
-          "helpText": "Retry delays, in minutes, for subgroup transcript capture or deletion failures."
+          "helpText": "Retry delays, in minutes, for subgroup transcript capture or deletion failures.",
+          "widget": "number"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.cleanup.lastFailureMessage",
+        "pluginId": "official.community-events",
         "path": "cleanup.lastFailureMessage",
+        "id": "plugin.official.community-events.cleanup.lastFailureMessage",
         "label": "Cleanup failure",
         "description": "Most recent subgroup transcript capture or deletion failure.",
         "section": "Community Events",
@@ -761,18 +824,25 @@
           "type": "string"
         },
         "ui": {
-          "widget": "text",
-          "helpText": "Most recent subgroup transcript capture or deletion failure."
+          "helpText": "Most recent subgroup transcript capture or deletion failure.",
+          "widget": "text"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       },
       {
-        "id": "plugin.official.community-events.cleanup.lastFailureAt",
+        "pluginId": "official.community-events",
         "path": "cleanup.lastFailureAt",
+        "id": "plugin.official.community-events.cleanup.lastFailureAt",
         "label": "Cleanup failure time",
         "description": "ISO timestamp for the most recent subgroup cleanup failure.",
         "section": "Community Events",
@@ -781,14 +851,20 @@
           "type": "string"
         },
         "ui": {
-          "widget": "text",
-          "helpText": "ISO timestamp for the most recent subgroup cleanup failure."
+          "helpText": "ISO timestamp for the most recent subgroup cleanup failure.",
+          "widget": "text"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
         },
         "relatedCommandIds": [
           "/event new",
           "/event edit",
           "/event status"
-        ]
+        ],
+        "relatedActionIds": []
       }
     ],
     "internalConfigPaths": []
@@ -1012,5 +1088,160 @@
       "timezone"
     ],
     "providesGroupTimezones": true
-  }
+  },
+  "externalActions": [
+    {
+      "actionId": "official.community-events.adopt",
+      "access": "mutation",
+      "scope": "scope",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.terminate",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.retryCancellationCleanup",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.calendarHintReplay",
+      "access": "mutation",
+      "scope": "scope",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.publishCalendar",
+      "access": "mutation",
+      "scope": "scope",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.resumeProvisioning",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.retryPreCreateProvisioning",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.replaceRejectedChild",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    },
+    {
+      "actionId": "official.community-events.recoverJobs",
+      "access": "mutation",
+      "scope": "account",
+      "timeoutMs": 120000
+    }
+  ],
+  "configuration": {
+    "changedActionId": "official.community-events.recoverJobs",
+    "permissionDeclarations": [
+      {
+        "arrayPath": "eventProfiles",
+        "prefix": "events.create.",
+        "valuePaths": [
+          "permissionSuffix",
+          "id"
+        ]
+      }
+    ]
+  },
+  "consoleOperations": [
+    {
+      "operationId": "official.community-events.eventsCalendarSubscriptionInfo",
+      "access": "read",
+      "authorization": "operator",
+      "description": "events Calendar Subscription Info"
+    },
+    {
+      "operationId": "official.community-events.publishEventsCalendar",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "publish Events Calendar"
+    },
+    {
+      "operationId": "official.community-events.rotateEventsCalendarSubscriptionToken",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "rotate Events Calendar Subscription Token"
+    },
+    {
+      "operationId": "official.community-events.officialEventsProfileOptions",
+      "access": "read",
+      "authorization": "operator",
+      "description": "official Events Profile Options"
+    },
+    {
+      "operationId": "official.community-events.renameOfficialEventProfileQuestion",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "rename Official Event Profile Question"
+    },
+    {
+      "operationId": "official.community-events.officialEventsForScope",
+      "access": "read",
+      "authorization": "operator",
+      "description": "official Events For Scope"
+    },
+    {
+      "operationId": "official.community-events.terminateOfficialEvent",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "terminate Official Event"
+    },
+    {
+      "operationId": "official.community-events.retryOfficialEventCancellationCleanup",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "retry Official Event Cancellation Cleanup"
+    },
+    {
+      "operationId": "official.community-events.replayOfficialEventCalendarHint",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "replay Official Event Calendar Hint"
+    },
+    {
+      "operationId": "official.community-events.setOfficialEventCalendarDisposition",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "set Official Event Calendar Disposition"
+    },
+    {
+      "operationId": "official.community-events.assignOfficialEventCalendarOwnership",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "assign Official Event Calendar Ownership"
+    },
+    {
+      "operationId": "official.community-events.officialEventsAdoptionOptions",
+      "access": "read",
+      "authorization": "operator",
+      "description": "official Events Adoption Options"
+    },
+    {
+      "operationId": "official.community-events.adoptOfficialEvent",
+      "access": "mutation",
+      "authorization": "operator",
+      "description": "adopt Official Event"
+    },
+    {
+      "operationId": "official.community-events.eventsCalendarSubscriptionDocument",
+      "access": "read",
+      "authorization": "resource-token",
+      "description": "events Calendar Subscription Document"
+    }
+  ]
 }

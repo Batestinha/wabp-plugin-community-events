@@ -6,7 +6,7 @@ const metadata = JSON.parse(fs.readFileSync(path.join(root, 'wa-plugin.json')));
 const plugin = require(path.join(root, metadata.entrypoint)).default;
 assert.equal(plugin.manifest.pluginId, 'official.community-events');
 assert.equal(plugin.manifest.version, metadata.version);
-assert.equal(plugin.manifest.coreApiRange, '^0.3.6');
+assert.equal(plugin.manifest.coreApiRange, '^0.3.7');
 for (const method of ['registerCommands', 'registerCancellations', 'registerHooks', 'registerServices', 'resolveGroupTimezone']) assert.equal(typeof plugin[method], 'function');
 assert.deepEqual(Object.keys(plugin.lifecycle), ['migrateData']);
 const pt = JSON.parse(fs.readFileSync(path.join(root, 'locales/pt-PT/official.community-events.json')));

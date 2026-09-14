@@ -1,3 +1,4 @@
+import { beginFinalEventCreation, registerFinalEventCreationFlow } from './creationDecision';
 import { resolveEventBody } from './announcements';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { eventAnswersInTimezone } from './locationTimezone';
@@ -179,6 +180,10 @@ interface EventCancelDraft {
 }
 
 export interface EventUpdateDraft {
+  flowVersion?: 2;
+  initialData?: Record<string, unknown>;
+  replacesOpenPoll?: boolean;
+  activeAtStart?: boolean;
   flowSessionId: string;
   flowType: string;
   scopeId: string;
@@ -300,6 +305,8 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   const runtime = requireOfficialCommandRuntime(context);
   const router = context.router;
   registerEventLocationSelectionHandler(context);
+  registerEventPublicationRecovery(context);
+  registerEventEditRecovery(context);
   registerEventEditSelectionHandler(context);
 
   router.register('event', 'status', eventCommand({
@@ -1020,6 +1027,10 @@ async function beginEventUpdateFlow(
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
         await runtime.dataStore.set(eventUpdateDraftKey(input.event.scopeId, session.id), {
+          flowVersion: 2,
+          initialData,
+          replacesOpenPoll,
+          activeAtStart: input.event.eventStatus === 'active',
           flowSessionId: session.id,
           flowType: definition.flowType,
           scopeId: input.event.scopeId,
@@ -1055,12 +1066,58 @@ async function beginEventUpdateFlow(
   };
 }
 
+const editResolverRegistrations = new WeakSet<object>();
+const editCompletionRegistrations = new WeakMap<object, Set<string>>();
+
+function registerEventEditRecovery(context: PluginOperationContext): void {
+  const engine = context.flowEngine;
+  if (editResolverRegistrations.has(engine)) return;
+  const runtime = requireOfficialCommandRuntime(context);
+  const prefix = 'official.community-events.update.';
+  engine.registerDefinitionResolver({
+    ownerId: EVENTS_PLUGIN_ID, flowTypePrefix: prefix,
+    async resolve(session) {
+      if (!session.scopeId) throw new Error('Event edit flow has no scope.');
+      const draft = await runtime.dataStore.get<EventUpdateDraft>(eventUpdateDraftKey(session.scopeId, session.id));
+      if (!draft || draft.flowSessionId !== session.id || draft.flowType !== session.flowType
+        || draft.scopeId !== session.scopeId || draft.actorIdentityId !== session.identityId) {
+        throw new Error('Event edit flow does not match its durable draft.');
+      }
+      const t = await context.i18n.translatorForIdentity(draft.actorIdentityId, draft.scopeId);
+      const event = getEvent(eventsDatabase(runtime.databases), draft.eventId);
+      const replacesOpenPoll = draft.replacesOpenPoll ?? (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open');
+      const startedAt = new Date(draft.createdAt);
+      const definition = createEventFlowDefinition({
+        templateMentions: { context, scopeId: draft.scopeId, chatId: session.chatId,
+          currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
+        t, profiles: [draft.profile], prefill: draft.prefill, timezone: draft.timezone, locale: draft.locale,
+        initialData: draft.initialData ?? eventInitialFlowData([draft.profile], draft.prefill, {
+          timezone: draft.timezone, locale: draft.locale, now: startedAt, allowPast: !replacesOpenPoll
+        }),
+        flowVersion: draft.flowVersion ?? 1,
+        askPrefilledQuestions: true, flowTypePrefix: prefix.slice(0, -1), flowInstanceId: session.flowType.slice(prefix.length),
+        confirmMessageKey: replacesOpenPoll ? 'official.community-events.update.confirmOpenPoll' : 'official.community-events.update.confirm',
+        pastCompletionConfirmMessageKey: (draft.activeAtStart ?? event?.eventStatus === 'active')
+          ? 'official.community-events.update.confirmPastCompletion' : 'official.community-events.update.confirm',
+        allowPastStartsAt: !replacesOpenPoll, now: () => startedAt, completeMessageKey: false
+      });
+      registerEventUpdateFlowCompletionHandler(context, definition.flowType, draft.profile, t);
+      return definition;
+    }
+  });
+  editResolverRegistrations.add(engine);
+}
+
 function registerEventUpdateFlowCompletionHandler(
   context: PluginOperationContext,
   flowType: string,
   profile: EventProfile,
   t: CommandContext['t']
 ): void {
+  const registered = editCompletionRegistrations.get(context.flowEngine) ?? new Set<string>();
+  if (registered.has(flowType)) return;
+  registered.add(flowType);
+  editCompletionRegistrations.set(context.flowEngine, registered);
   const runtime = requireOfficialCommandRuntime(context);
   context.flowEngine.registerPromptHandler(eventConfirmPurpose(flowType, profile), async (lock, activeTransport) => {
     if (!lock.flowSessionId) {
@@ -3418,7 +3475,7 @@ function registerEventLocationSelectionHandler(context: PluginOperationContext):
       place: candidate
     });
     if (pending.kind === 'create') {
-      await publishConfirmedEvent({
+      await beginFinalEventCreation({
         context,
         runtime,
         activeTransport,
@@ -3429,7 +3486,7 @@ function registerEventLocationSelectionHandler(context: PluginOperationContext):
         announcementGroupWid: pending.announcementGroupWid,
         eventLocation,
         t
-      });
+      }, publishConfirmedEvent);
     } else {
       await applyEventUpdate({
         context,
@@ -3587,10 +3644,10 @@ async function beginEventLocationSelection(input: {
 }): Promise<void> {
   const fixedLocation = fixedEventLocation(input.profile, input.draft.timezone);
   if (fixedLocation) {
-    await publishConfirmedEvent({
+    await beginFinalEventCreation({
       ...input,
       eventLocation: fixedLocation
-    });
+    }, publishConfirmedEvent);
     return;
   }
   const place = eventLocationQuery(input.profile, input.answers.answers);
@@ -3669,7 +3726,7 @@ async function beginEventLocationSelection(input: {
   }
 }
 
-async function publishConfirmedEvent(input: {
+export interface ConfirmedEventPublicationInput {
   context: EventFlowCompletionContext;
   runtime: OfficialPluginCommandRuntime;
   activeTransport: EventTextTransport;
@@ -3680,7 +3737,13 @@ async function publishConfirmedEvent(input: {
   announcementGroupWid: string;
   eventLocation: StoredEventLocation;
   t: CommandContext['t'];
-}): Promise<void> {
+}
+
+export function registerEventPublicationRecovery(context: EventFlowCompletionContext): void {
+  registerFinalEventCreationFlow(context, requireEventFlowRuntime(context), publishConfirmedEvent);
+}
+
+async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Promise<void> {
   const eventId = newEventId(`creation-flow:${input.draft.flowSessionId}`);
   let creationMode: 'poll' | 'unplanned' = 'poll';
   let db: ReturnType<typeof eventsDatabase> | undefined;
@@ -3697,6 +3760,16 @@ async function publishConfirmedEvent(input: {
         input.responseChatId,
         input.t('official.community-events.invalid')
       );
+      return;
+    }
+    const actor = await resolveEventDraftAuthorizationActor(input.context, input.draft);
+    if (!actor || !await eventActorPermissionAllowed(input.context, {
+      actor, action: eventProfilePermission(input.profile), scopeId: input.draft.scopeId,
+      allowCurrentManagedGroupMember: input.profile.allowScopeMemberCreation === true,
+      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
+      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {})
+    })) {
+      await input.activeTransport.sendText(input.responseChatId, input.t('official.community-events.permissionDenied'));
       return;
     }
     input = { ...input,
@@ -3717,6 +3790,11 @@ async function publishConfirmedEvent(input: {
     creationMode = input.answers.pollPhase === 'unplanned'
       || materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
     if (creationMode === 'unplanned') {
+      if (input.answers.pollPhase === 'poll') {
+        await input.activeTransport.sendText(input.responseChatId, input.t('official.community-events.flow.pollDeadlinePassed', {
+          closeAt: formatEventDateTime(materialized.closeAt, input.draft.timezone, input.draft.locale)
+        }), { idempotencyKey: `community-events:event-creation:${eventId}:poll-deadline-notice` });
+      }
       const result = await createUnplannedEventLifecycle({
         context: input.context,
         runtime: input.runtime,

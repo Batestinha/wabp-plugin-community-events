@@ -248,5 +248,7 @@
   "official.community-events.help.cancel.title": "Cancelar eventos",
   "official.community-events.help.cancel.summary": "Seleciona um ciclo de evento ativo e confirma o cancelamento.",
   "official.community-events.help.cancel.instruction": "O criador do evento ou um gestor de eventos pode cancelar um evento ativo; o cancelamento exige confirmação.",
-  "official.community-events.help.cancel.example": "/event cancel Boulder em Sintra"
+  "official.community-events.help.cancel.example": "/event cancel Boulder em Sintra",
+  "official.community-events.flow.publicationChoice": "Como devo criar este evento?\n\n{title}\nDe: {startsAt}\nAté: {endsAt}\nPrazo da sondagem: {closeAt}",
+  "official.community-events.flow.pollDeadlinePassed": "O prazo da sondagem ({closeAt}) já passou, pelo que já não é possível criar uma sondagem. Vou criar diretamente o grupo do evento."
 }

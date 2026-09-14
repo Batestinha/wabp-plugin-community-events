@@ -38,6 +38,7 @@ import {
   renderEventTemplateText
 } from './template';
 
+export const EVENT_FLOW_VERSION_KEY = '__eventFlowVersion';
 export const EVENT_PROFILE_STEP_ID = 'profile';
 export const EVENT_CREATION_SPAN_STEP_ID = 'event-span';
 export const EVENT_CREATION_POLL_PHASE_STEP_ID = 'event-poll-phase';
@@ -99,6 +100,7 @@ export function createEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -115,7 +117,7 @@ export function createEventFlowDefinition(input: {
   const flowType = input.flowTypePrefix
     ? `${input.flowTypePrefix}.${input.flowInstanceId?.trim() || randomUUID()}`
     : `${EVENT_CREATION_FLOW_TYPE_PREFIX}${randomUUID()}`;
-  return buildEventFlowDefinition(input, flowType);
+  return buildEventFlowDefinition({ ...input, flowVersion: input.flowVersion ?? 2 }, flowType);
 }
 
 export function restoreEventFlowDefinition(input: {
@@ -123,6 +125,7 @@ export function restoreEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -140,7 +143,8 @@ export function restoreEventFlowDefinition(input: {
     timezone: input.timezone,
     locale: input.locale,
     initialData: input.initialData,
-    completeMessageKey: false
+    completeMessageKey: false,
+    flowVersion: input.flowVersion ?? (input.initialData[EVENT_FLOW_VERSION_KEY] === 2 ? 2 : 1)
   }, flowType);
 }
 
@@ -153,6 +157,7 @@ function buildEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -164,16 +169,18 @@ function buildEventFlowDefinition(input: {
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
 }, flowType: string): FlowDefinition {
-  const askPollPhase = isEventCreationFlowType(flowType);
-  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data);
-  const durationFirst = askPollPhase || input.askPrefilledQuestions === true;
+  const sharedNavigation = input.flowVersion === 2;
+  const isCreation = isEventCreationFlowType(flowType);
+  const askPollPhase = isCreation && !sharedNavigation;
+  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data, askPollPhase);
+  const durationFirst = isCreation || input.askPrefilledQuestions === true;
   const nextQuestionStepId = (state: FlowState) => input.askPrefilledQuestions
     ? nextReviewQuestionStepId(input.profiles, state)
     : creationStepId(state.data);
   const timezone = canonicalTimezone(input.timezone ?? 'UTC');
   const timezoneForData = (data: Record<string, unknown>) => {
     const selected = input.profiles.find((profile) => profile.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
-    return canonicalTimezone(askPollPhase && selected?.location.source === 'fixed' ? selected.location.timezone : timezone);
+    return canonicalTimezone(isCreation && selected?.location.source === 'fixed' ? selected.location.timezone : timezone);
   };
   const timezoneForState = (state: FlowState) => timezoneForData(state.data);
   const locale = input.locale ?? 'en';
@@ -235,7 +242,7 @@ function buildEventFlowDefinition(input: {
   }
 
   for (const profile of input.profiles) {
-    const visibleQuestions = askPollPhase || input.askPrefilledQuestions
+    const visibleQuestions = isCreation || input.askPrefilledQuestions
       ? profile.questions
       : initialProfile?.id === profile.id
       ? profile.questions.filter((question) => !questionComplete(profile, question, initialData))
@@ -254,19 +261,19 @@ function buildEventFlowDefinition(input: {
         steps[stepId] = {
           id: stepId,
           kind: 'choice',
-          prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue),
+          prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue, !sharedNavigation),
           promptForState: (state) => safeQuestionPromptForState(
             input.t,
             profile,
             question,
             state.data,
-            currentValue
+            currentValue, !sharedNavigation
           ),
           options: initialOptions,
           optionsForState: (state) => safeEventQuestionChoiceOptions(profile, question, state.data),
           minSelections: question.required ? 1 : 0,
           maxSelections: 1,
-          skipOnSymbolInput: !question.required,
+          ...(sharedNavigation ? { navigation: { ...(!question.required ? { skip: 'unreserved-symbols' as const } : {}) } } : { skipOnSymbolInput: !question.required }),
           nextStepId,
           ...(durationFirst ? {
             nextStepIdForState: nextQuestionStepId
@@ -277,20 +284,20 @@ function buildEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
-        promptMessageForState: state => resolveFlowFragment(questionPromptFragment(input.t, profile, question, state.data, currentValue), input.templateMentions),
-        prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue),
+        promptMessageForState: state => resolveFlowFragment(questionPromptFragment(input.t, profile, question, state.data, currentValue, !sharedNavigation), input.templateMentions),
+        prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue, !sharedNavigation),
         promptForState: (state) => safeQuestionPromptForState(
           input.t,
           profile,
           question,
           state.data,
-          currentValue
+          currentValue, !sharedNavigation
         ),
         nextStepId,
         ...(durationFirst ? {
           nextStepIdForState: nextQuestionStepId
         } : {}),
-        skipOnSymbolInput: !question.required,
+        ...(sharedNavigation ? { navigation: { ...(!question.required ? { skip: 'unreserved-symbols' as const } : {}) } } : { skipOnSymbolInput: !question.required }),
         ...(question.type === EVENT_DATE_QUESTION_TYPE
           ? {
               resolveInput: (resolutionInput) => resolveDateQuestionInput({
@@ -367,19 +374,19 @@ function buildEventFlowDefinition(input: {
     steps[endTimeStepId(profile)] = {
       id: endTimeStepId(profile),
       kind: 'text',
-      prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime'), initialData),
+      prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime'), initialData, !sharedNavigation),
       promptMessageForState: state => resolveFlowFragment(joinTemplateFragments([
         textTemplateFragment(input.t('official.community-events.flow.endTime') + '\n'),
-        profileOptionalPromptFragment(input.t, profile, eventQuestionAnswersBefore(profile, state.data, profile.questions.length), rawAnswersBefore(profile, state.data, profile.questions.length))
+        profileOptionalPromptFragment(input.t, profile, eventQuestionAnswersBefore(profile, state.data, profile.questions.length), rawAnswersBefore(profile, state.data, profile.questions.length), !sharedNavigation)
       ]), input.templateMentions),
       promptForState: (state) => optionalFlowPrompt(
         input.t,
         profile,
         input.t('official.community-events.flow.endTime'),
-        state.data
+        state.data, !sharedNavigation
       ),
       nextStepId: confirmStepId(profile),
-      skipOnSymbolInput: true,
+      ...(sharedNavigation ? { navigation: { skip: 'unreserved-symbols' as const } } : { skipOnSymbolInput: true }),
       resolveSkippedInput: (resolutionInput) => resolveSkippedEventEndTime({
         t: input.t,
         profile,
@@ -432,7 +439,7 @@ function buildEventFlowDefinition(input: {
       if (step.kind === 'choice') step.backOptionPosition = 'last';
     }
     const keepAnswer = (stepId: string, value: unknown, label?: string, optional = false) => {
-      steps[stepId] = withSavedEventAnswer(steps[stepId]!, input.t, value, label, optional);
+      steps[stepId] = withSavedEventAnswer(steps[stepId]!, input.t, value, label, optional, sharedNavigation);
     };
     keepAnswer(EVENT_PROFILE_STEP_ID, initialProfile.id, initialProfile.label);
     const savedSpan = eventSpanKind(initialData, initialProfile) ?? input.prefill?.spanKind;
@@ -448,9 +455,10 @@ function buildEventFlowDefinition(input: {
 
   return {
     flowType,
+    ...(sharedNavigation ? { navigationControls: true as const } : {}),
     t: input.t,
     initialStepId: input.askPrefilledQuestions ? EVENT_CREATION_SPAN_STEP_ID
-      : askPollPhase ? creationStepId(initialData) : initialProfile
+      : isCreation ? creationStepId(initialData) : initialProfile
         ? firstMissingQuestionStepId(initialProfile, initialData)
           ?? firstMissingSpanStepId(initialProfile, initialData, askPollPhase)
           ?? confirmStepId(initialProfile)
@@ -469,7 +477,8 @@ function withSavedEventAnswer(
   t: TranslateFn,
   savedValue: unknown,
   savedLabel?: string,
-  optional = false
+  optional = false,
+  sharedNavigation = false
 ): FlowStep {
   // Capture the persisted answer, not a replacement entered earlier in this edit.
   // Normalize dates so keeping "tomorrow" cannot move an already scheduled event.
@@ -479,6 +488,16 @@ function withSavedEventAnswer(
   if (!value && !optional) return step;
   const current = step.options?.find((option) => option.value === value)?.label
     ?? value ?? t('official.community-events.flow.unset');
+  if (sharedNavigation) {
+    const saved = step.kind === 'choice' ? (value ? [value] : []) : value ?? null;
+    return { ...step, navigation: { ...step.navigation, keep: { value: saved, label: current } },
+      resolveKeptInput: (input) => {
+        if (step.kind === 'choice') return { status: 'use-value', value: input.savedAnswer.value };
+        const original = input.savedAnswer.value;
+        if (original === null) return step.resolveSkippedInput?.(input) ?? { status: 'use-value', value: null };
+        return step.resolveInput?.({ ...input, input: String(original) }) ?? { status: 'use-value', value: original };
+      } };
+  }
   const promptKey = step.kind === 'choice'
     ? 'official.community-events.flow.editChoicePrompt'
     : 'official.community-events.flow.editTextPrompt';
@@ -539,13 +558,14 @@ export function eventInitialFlowData(
 ): Record<string, unknown> {
   const profileId = prefill?.profileId ?? (profiles.length === 1 ? profiles[0]?.id : undefined);
   if (!profileId) {
-    return {};
+    return { [EVENT_FLOW_VERSION_KEY]: 2 };
   }
   const profile = profiles.find((candidate) => candidate.id === profileId);
   if (!profile) {
-    return {};
+    return { [EVENT_FLOW_VERSION_KEY]: 2 };
   }
   const data: Record<string, unknown> = {
+    [EVENT_FLOW_VERSION_KEY]: 2,
     [EVENT_PROFILE_STEP_ID]: profile.id
   };
   for (const question of profile.questions) {
@@ -860,9 +880,8 @@ function eventFlowAnswersFromData(
     startsAt,
     endsAt,
     spanKind: selectedSpanKind,
-    pollPhase: eventPollPhase(data, profile) === 'unplanned'
-      ? 'unplanned'
-      : 'poll',
+    ...(eventPollPhase(data, profile) ? { pollPhase: eventPollPhase(data, profile) }
+      : data[EVENT_FLOW_VERSION_KEY] === 2 ? {} : { pollPhase: 'poll' as const }),
     localDate: formatEventDateParts(startDate),
     ...(startDateReference ? { startDateReference: { ...startDateReference, answerKey: profile.startsAtDateQuestionKey } } : {}),
     ...(endDateReference ? { endDateReference } : {}),
@@ -876,11 +895,11 @@ function firstQuestionStepId(profile: EventProfile): string {
   return questionStepId(profile, profile.questions[0]!);
 }
 
-function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>): string {
+function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>, askPollPhase = false): string {
   const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
   const spanKind = eventSpanKind(data, profile);
   if (!spanKind) return EVENT_CREATION_SPAN_STEP_ID;
-  if (!eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
+  if (askPollPhase && !eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
   if (!profile) return EVENT_PROFILE_STEP_ID;
   const question = profile.questions.find((candidate) => (
     questionAppliesToSpan(profile, candidate, spanKind)
@@ -966,7 +985,7 @@ function endTimeStepId(profile: EventProfile): string {
   return `${EVENT_END_TIME_STEP_ID_PREFIX}${profile.id}`;
 }
 
-function questionPromptFragment(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string): TemplateFragment {
+function questionPromptFragment(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string, legacyHelp = true): TemplateFragment {
   const questionIndex = profile.questions.indexOf(question);
   const priorAnswers = eventQuestionAnswersBefore(profile, data, questionIndex);
   const authored = renderEventConditionalFragment({ source: question.prompt,
@@ -975,10 +994,10 @@ function questionPromptFragment(t: TranslateFn, profile: EventProfile, question:
     emptyResult: 'reject', field: `questions.${question.key}.prompt` });
   let prompt = wrapFragment(authored, marker => questionPromptByType(t, question, marker));
   if (currentValue?.trim()) prompt = wrapFragment(prompt, marker => t('official.community-events.flow.currentValuePrompt', { prompt: marker, current: currentValue.trim() }));
-  return question.required ? prompt : joinTemplateFragments([prompt, textTemplateFragment('\n'), profileOptionalPromptFragment(t, profile, priorAnswers, rawAnswersBefore(profile, data, questionIndex))]);
+  return question.required || !legacyHelp ? prompt : joinTemplateFragments([prompt, textTemplateFragment('\n'), profileOptionalPromptFragment(t, profile, priorAnswers, rawAnswersBefore(profile, data, questionIndex))]);
 }
-function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string): string {
-  return previewTemplateFragment(questionPromptFragment(t, profile, question, data, currentValue));
+function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string, legacyHelp = true): string {
+  return previewTemplateFragment(questionPromptFragment(t, profile, question, data, currentValue, legacyHelp));
 }
 
 function initialQuestionPrompt(
@@ -986,10 +1005,11 @@ function initialQuestionPrompt(
   profile: EventProfile,
   question: EventQuestion,
   data: Record<string, unknown>,
-  currentValue?: string | undefined
+  currentValue?: string | undefined,
+  legacyHelp = true
 ): string {
   try {
-    return questionPrompt(t, profile, question, data, currentValue);
+    return questionPrompt(t, profile, question, data, currentValue, legacyHelp);
   } catch (error) {
     if (!(error instanceof EventConditionalTextConfigurationError) || error.code !== 'rendered-empty') {
       throw error;
@@ -1009,10 +1029,11 @@ function safeQuestionPromptForState(
   profile: EventProfile,
   question: EventQuestion,
   data: Record<string, unknown>,
-  currentValue?: string | undefined
+  currentValue?: string | undefined,
+  legacyHelp = true
 ): string {
   try {
-    return questionPrompt(t, profile, question, data, currentValue);
+    return questionPrompt(t, profile, question, data, currentValue, legacyHelp);
   } catch (error) {
     if (!(error instanceof EventConditionalTextConfigurationError)) {
       throw error;
@@ -1145,8 +1166,10 @@ function optionalFlowPrompt(
   t: TranslateFn,
   profile: EventProfile,
   prompt: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  legacyHelp = true
 ): string {
+  if (!legacyHelp) return prompt;
   const suffix = profileOptionalPromptSuffix(
     t,
     profile,
@@ -1155,7 +1178,8 @@ function optionalFlowPrompt(
   return suffix ? `${prompt}\n${suffix}` : prompt;
 }
 
-function profileOptionalPromptFragment(t: TranslateFn, profile: EventProfile, answers: Record<string, string>, rawAnswers?: Record<string, string>): TemplateFragment {
+function profileOptionalPromptFragment(t: TranslateFn, profile: EventProfile, answers: Record<string, string>, rawAnswers?: Record<string, string>, legacyHelp = true): TemplateFragment {
+  if (!legacyHelp) return textTemplateFragment('');
   const source = profile.optionalPromptSuffix.trim() ? profile.optionalPromptSuffix : t('official.community-events.flow.optionalPromptSuffix');
   const firstOptional = profile.questions.findIndex(question => !question.required);
   return renderEventConditionalFragment({ source,

@@ -4,8 +4,8 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.16.2",
-  "coreApiRange": "^0.3.6",
+  "version": "0.17.0",
+  "coreApiRange": "^0.3.7",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -270,7 +270,7 @@
     "workflows": [
       {
         "id": "event-create",
-        "description": "Guided event setup before an event poll is published.",
+        "description": "Guided event setup and final publication choice before an event is created.",
         "mode": "core-flow",
         "scope": "actor-chat",
         "commands": [

@@ -1,3 +1,4 @@
+import { registerEventPublicationRecovery } from './commands';
 import { resolveEventBody } from './announcements';
 import { startRecoverySweep } from './recoverySweep';
 import { randomUUID } from 'node:crypto';
@@ -276,6 +277,7 @@ interface EventsHooksOptions {
 
 export function createEventsHooks(context: PluginRuntimeContext, options: EventsHooksOptions = {}): PluginRuntimeHooks {
   if (context.flowEngine) {
+    registerEventPublicationRecovery(context);
     registerEventCreationFlowDefinitionResolver({
       flowEngine: context.flowEngine,
       coveredGroupsForScope: context.coveredGroupsForScope,

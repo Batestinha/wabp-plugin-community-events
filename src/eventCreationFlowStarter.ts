@@ -36,7 +36,7 @@ import { EVENTS_PLUGIN_ID } from './manifest';
 import { renderEventConditionalText } from './template';
 
 export interface EventDraft {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   flowSessionId: string;
   flowType: string;
   scopeId: string;
@@ -91,7 +91,7 @@ const privateDeliveryFallbackSchema = z.object({
 }).strict();
 
 export const eventDraftSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
   flowSessionId: z.string().trim().min(1),
   flowType: z.string().trim().refine(
     isEventCreationFlowType,
@@ -416,7 +416,7 @@ export class EventCreationFlowStarter {
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
         const draft: EventDraft = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           flowSessionId: session.id,
           flowType: definition.flowType,
           scopeId: input.scopeId,
@@ -507,6 +507,7 @@ export function registerEventCreationFlowDefinitionResolver(
         templateMentions: { context, scopeId: draft.scopeId, chatId: draft.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         flowType: draft.flowType,
+        flowVersion: draft.schemaVersion,
         t,
         profiles: draft.profiles,
         prefill: draft.prefill,

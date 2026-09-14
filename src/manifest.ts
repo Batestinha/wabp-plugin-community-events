@@ -49,8 +49,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.16.2',
-  coreApiRange: '^0.3.6',
+  version: '0.17.0',
+  coreApiRange: '^0.3.7',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     changedActionId: 'official.community-events.recoverJobs',
@@ -203,7 +203,7 @@ export const eventsManifest: PluginManifest = {
     workflows: [
       {
         id: 'event-create',
-        description: 'Guided event setup before an event poll is published.',
+        description: 'Guided event setup and final publication choice before an event is created.',
         mode: 'core-flow',
         scope: 'actor-chat',
         commands: ['/event new'],

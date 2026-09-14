@@ -118,6 +118,8 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.lifecycle.group.none': 'Not started',
   'official.community-events.flow.profile': 'What type of event?',
   'official.community-events.flow.spanKind': 'Is this a day trip or a multi-day event?',
+  'official.community-events.flow.publicationChoice': 'How should I create this event?\n\n{title}\nFrom: {startsAt}\nTo: {endsAt}\nPoll deadline: {closeAt}',
+  'official.community-events.flow.pollDeadlinePassed': 'The poll deadline ({closeAt}) has now passed, so a poll is no longer possible. I will create the event group directly.',
   'official.community-events.flow.pollPhase': 'Should this event have a poll first, or should I create the event group directly?',
   'official.community-events.flow.pollPhase.poll': 'Create a poll first',
   'official.community-events.flow.pollPhase.unplanned': 'Skip the poll and create the group directly',

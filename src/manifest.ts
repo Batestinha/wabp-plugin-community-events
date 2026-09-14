@@ -49,7 +49,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.16.1',
+  version: '0.16.2',
   coreApiRange: '^0.3.6',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {

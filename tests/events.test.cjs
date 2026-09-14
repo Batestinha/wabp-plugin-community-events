@@ -49,6 +49,41 @@ function fixture() {
     createdAt: '2026-09-12T10:00:00.000Z', updatedAt: '2026-09-12T10:00:00.000Z' };
 }
 
+test('template backfill preserves history for deleted scopes without looking up their configuration', async () => {
+  const { backfillEventTemplateValues } = require('../dist/templateMigration');
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    const config = parseEventsConfig({});
+    insertEvent(db, { ...fixture(), profileId: config.eventProfiles[0].id });
+    insertEvent(db, { ...fixture(), id: 'historical', scopeId: 'deleted-scope' });
+    db.run('UPDATE event_records SET raw_answers_json = NULL');
+    const historical = db.get('SELECT * FROM event_records WHERE id = ?', 'historical');
+    const requested = [];
+    await backfillEventTemplateValues({ databases: { open: () => db }, listEnabledScopes: async () => [{ scopeId: 'fixture-scope' }],
+      configFor: async scope => { requested.push(scope); assert.equal(scope, 'fixture-scope'); return config; },
+      i18n: { translatorForScope: async () => key => key }, logger: { warn() {} } });
+    assert.deepEqual(requested, ['fixture-scope']);
+    assert.notEqual(db.get('SELECT raw_answers_json FROM event_records WHERE id = ?', 'fixture-event').raw_answers_json, null);
+    assert.deepEqual(db.get('SELECT * FROM event_records WHERE id = ?', 'historical'), historical);
+  } finally { db.close(); }
+});
+
+test('template backfill tolerates a scope disappearing but retains errors for an enabled scope', async () => {
+  const { backfillEventTemplateValues } = require('../dist/templateMigration');
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    insertEvent(db, fixture()); db.run('UPDATE event_records SET raw_answers_json = NULL');
+    let discovered = false;
+    const context = { databases: { open: () => db }, configFor: async () => { throw new Error('Unknown scope'); },
+      listEnabledScopes: async () => { if (discovered) return []; discovered = true; return [{ scopeId: 'fixture-scope' }]; } };
+    await backfillEventTemplateValues(context);
+    assert.equal(db.get('SELECT raw_answers_json FROM event_records').raw_answers_json, null);
+    await assert.rejects(backfillEventTemplateValues({ ...context, listEnabledScopes: async () => [{ scopeId: 'fixture-scope' }] }), /Unknown scope/);
+  } finally { db.close(); }
+});
+
 test('an empty installed account finalizes identities without platform identity access', async () => {
   const db = open(':memory:');
   try {

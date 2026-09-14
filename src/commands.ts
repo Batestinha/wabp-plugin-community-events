@@ -3787,10 +3787,14 @@ async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Pro
       eventLocation: input.eventLocation
     });
     const now = new Date();
-    creationMode = input.answers.pollPhase === 'unplanned'
-      || materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
+    const committed = getEvent(eventDb, eventId);
+    // A recovered completion must resume the committed route even if its poll
+    // deadline passed after publication and before the prompt was acknowledged.
+    creationMode = committed
+      ? committed.origin === 'unplanned' ? 'unplanned' : 'poll'
+      : input.answers.pollPhase === 'unplanned' || materialized.closeAt.getTime() <= now.getTime() ? 'unplanned' : 'poll';
     if (creationMode === 'unplanned') {
-      if (input.answers.pollPhase === 'poll') {
+      if (input.answers.pollPhase === 'poll' && !committed) {
         await input.activeTransport.sendText(input.responseChatId, input.t('official.community-events.flow.pollDeadlinePassed', {
           closeAt: formatEventDateTime(materialized.closeAt, input.draft.timezone, input.draft.locale)
         }), { idempotencyKey: `community-events:event-creation:${eventId}:poll-deadline-notice` });

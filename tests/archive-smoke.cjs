@@ -14,7 +14,7 @@ for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key
 for (const file of ['node_modules/@wabs/plugin-sdk/dist/managed-group-plugin.js', 'node_modules/@wabs/plugin-sdk/LICENSE', 'node_modules/zod/LICENSE', 'contracts/provenance.json', 'contracts/LICENSE.wabp']) assert.ok(fs.statSync(path.join(root, file)).isFile());
 assert.equal(fs.existsSync(path.join(root, 'node_modules/geo-tz')), false);
 assert.equal(plugin.manifest.configSchema.parse({ timezone: 'Atlantic/Azores' }).timezone, 'Atlantic/Azores');
-assert.equal(metadata.dataVersion, '19');
+assert.equal(metadata.dataVersion, '20');
 assert.equal(fs.readdirSync(path.join(root, 'migrations/events')).length, 44);
 assert.equal(require(path.join(root, 'node_modules/chrono-node/package.json')).version, '2.9.1');
 console.log(JSON.stringify({ pluginId: metadata.pluginId, version: metadata.version, standaloneLoad: true, translations: Object.keys(pt).length, controls: metadata.operatorConsole.controls.length }));

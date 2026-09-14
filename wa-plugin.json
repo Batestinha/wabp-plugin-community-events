@@ -4,7 +4,7 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "coreApiRange": "^0.3.6",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -423,7 +423,7 @@
       "resource": "transport.poll-history"
     }
   ],
-  "dataVersion": "19",
+  "dataVersion": "20",
   "assistant": {
     "summary": "Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.",
     "useCases": [
@@ -647,7 +647,7 @@
           "helpText": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.",
           "widget": "text",
           "multiline": true,
-          "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.",
+          "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let\u2019s create the event now.",
           "templateDialect": "conditional-values-v2",
           "templateMentions": {
             "people": true,

@@ -1,6 +1,6 @@
 {
   "name": "@wabs/plugin-community-events",
-  "version": "0.16.0",
+  "version": "0.16.1",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "license": "MIT",
   "private": true,

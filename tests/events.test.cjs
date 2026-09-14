@@ -49,6 +49,33 @@ function fixture() {
     createdAt: '2026-09-12T10:00:00.000Z', updatedAt: '2026-09-12T10:00:00.000Z' };
 }
 
+test('an empty installed account finalizes identities without platform identity access', async () => {
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    await plugin.lifecycle.migrateData({ databases: { open: () => db }, logger: { info() {} } });
+    assert.equal(db.get('SELECT count(*) AS count FROM event_records').count, 0);
+    assert.deepEqual(db.all('PRAGMA table_info(event_votes)').filter(column => column.pk).map(column => column.name), ['event_id', 'voter_identity_id']);
+  } finally { db.close(); }
+});
+
+test('later template upgrades preserve previously finalized account identities without widening authority', async () => {
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    insertEvent(db, fixture());
+    const context = { databases: { open: () => db }, logger: { info() {} } };
+    await plugin.lifecycle.migrateData({ ...context, resolvePersistedIdentityId: async wid => {
+      assert.equal(wid, 'creator@lid'); return 'fixture-actor';
+    } });
+    const before = db.all('SELECT * FROM event_records');
+    await plugin.lifecycle.migrateData({ ...context, fromDataVersion: '18' });
+    assert.deepEqual(db.all('SELECT * FROM event_records'), before);
+    await assert.rejects(plugin.lifecycle.migrateData({ ...context, fromDataVersion: '17' }), /requires platform identity access/);
+    assert.deepEqual(db.all('SELECT * FROM event_records'), before);
+  } finally { db.close(); }
+});
+
 test('relative dates use the selected location and original reference time after restart', () => {
   const initial = answers();
   assert.equal(initial.localDate, '2026-09-13');
@@ -131,7 +158,7 @@ test('installed SDK errors retain creation certainty and do not opt uncertain ef
 });
 
 test('all migrations and translations are retained and vendored artifacts reconstruct exactly', () => {
-  assert.equal(require('../wa-plugin.json').dataVersion, '19');
+  assert.equal(require('../wa-plugin.json').dataVersion, '20');
   assert.equal(migrations.length, 44);
   for (const name of migrations) assert.equal(fs.readFileSync(path.join('migrations/events', name), 'utf8'), fs.readFileSync(path.join('src/migrations/events', name), 'utf8'));
   for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key]?.trim(), key);

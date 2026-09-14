@@ -48,12 +48,25 @@ type ResolvePersistedIdentityId = (wid: string) => Promise<string>;
 export async function migrateEventIdentityData(
   context: PluginLifecycleContext
 ): Promise<void> {
-  if (!context.resolvePersistedIdentityId) {
-    throw new Error('official.community-events identity migration requires platform identity access.');
+  const db = eventsDatabase(context.databases);
+  const fromVersion = Number(context.fromDataVersion);
+  // Version 18 already records successful authoritative identity finalization.
+  // Later schema-only upgrades preserve that proof without acquiring platform-only
+  // identity services for a separately installed package.
+  if (!context.resolvePersistedIdentityId && Number.isSafeInteger(fromVersion) && fromVersion >= 18) {
+    const actors = readEventActorIdentityRows(db);
+    const votes = readEventVoteIdentityRows(db);
+    if (!eventVoteIdentitySchemaIsFinal(db) || actors.some(row => !row.actor_identity_id?.trim()) || votes.some(row => !row.voter_identity_id?.trim())) {
+      throw new Error('Previously finalized official.community-events identity data is incomplete.');
+    }
+    context.logger.info({ actors: actors.length, votes: votes.length }, 'Preserved previously finalized official.community-events identities');
+    return;
   }
   const result = await finalizeEventIdentityMigration(
-    eventsDatabase(context.databases),
-    context.resolvePersistedIdentityId
+    db,
+    context.resolvePersistedIdentityId ?? (async () => {
+      throw new Error('official.community-events identity migration requires platform identity access.');
+    })
   );
   context.logger.info(result, 'Finalized official.community-events authoritative identity data');
 }

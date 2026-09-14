@@ -194,6 +194,7 @@ export function calendarEventSummary(
     template,
     profile,
     answers: event.answers,
+    rawAnswers: event.rawAnswers,
     startsAt: new Date(event.startsAt),
     endsAt: new Date(event.endsAt),
     spanKind: event.spanKind,

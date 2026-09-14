@@ -1,3 +1,5 @@
+import { eventTemplateDefinition, eventMessageMentions } from './template';
+import { validateValueTemplate } from '@wabs/plugin-sdk/templates';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { z } from 'zod';
 import type { TranslateFn } from './runtime';
@@ -400,6 +402,14 @@ const eventProfileObjectSchema = z.object({
     ...templateTokens,
     ...EVENT_WEATHER_TEMPLATE_TOKENS
   ]);
+  const validateTyped = (source: string, tokens: Iterable<string>, path: (string | number)[], context: z.RefinementCtx, activation: 'always' | 'when-used') => {
+    const question = path[0] === 'questions' ? profile.questions[Number(path[1])] : undefined;
+    const body = (path[0] === 'optionalPromptSuffix' && !profile.questions.some(item => item.type === 'choice' && !item.required)) || (path[0] === 'questions' && path[2] === 'prompt' && question?.type !== 'choice')
+      || ['eventGroupHint', 'eventEditAnnouncement', 'weather'].includes(String(path[0])) || (path[0] === 'calendar' && path[1] === 'hint');
+    for (const issue of validateValueTemplate(source, eventTemplateDefinition(tokens, profile, body, activation))) context.addIssue({ code: z.ZodIssueCode.custom, message: issue.message, path });
+  };
+  const validateEventTemplate = (source: string, tokens: Iterable<string>, path: (string | number)[], context: z.RefinementCtx) => validateTyped(source, tokens, path, context, 'always');
+  const validateEventConditionalTemplate = (source: string, tokens: Iterable<string>, path: (string | number)[], context: z.RefinementCtx) => validateTyped(source, tokens, path, context, 'when-used');
   profile.questions.forEach((question, questionIndex) => {
     const priorQuestionKeys = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
     validateEventConditionalTemplate(
@@ -560,7 +570,7 @@ const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
     'Suggested subgroup titles are not available to the notice template'
   )
   .superRefine((template, ctx) => {
-    for (const issue of validateEventConditionalText(template, ['creatorDisplayName'])) {
+    for (const issue of validateValueTemplate(template, { ...eventTemplateDefinition(['creatorDisplayName'], undefined, true, 'when-used'), mentions: { ...eventMessageMentions, all: false } })) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message });
     }
   });

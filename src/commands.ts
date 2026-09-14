@@ -1,3 +1,4 @@
+import { resolveEventBody } from './announcements';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { eventAnswersInTimezone } from './locationTimezone';
 import { createHash, randomUUID } from 'node:crypto';
@@ -55,7 +56,7 @@ import { appendScopeEventJsonLog } from './log';
 import {
   eventGroupHintEnabled,
   eventGroupJoinUrl,
-  renderEventEditAnnouncement,
+  renderEventEditAnnouncementFragment,
   renderEventGroupAnnouncement
 } from './announcements';
 import { materializeEventLifecycle, type MaterializedEventLifecycle } from './materialize';
@@ -475,6 +476,9 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
+      coveredGroupsForScope: context.coveredGroupsForScope,
+      currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
+      resolveIdentityAddress: context.resolveIdentityAddress,
     dataStore: runtime.dataStore,
     i18n: context.i18n,
     configFor: runtime.configFor,
@@ -983,6 +987,8 @@ async function beginEventUpdateFlow(
     allowPast: !replacesOpenPoll
   });
   const definition = createEventFlowDefinition({
+    templateMentions: { context, scopeId: input.event.scopeId, chatId: input.actor.deliveryChatId,
+      currentGroupId: input.event.groupWid, creatorIdentityId: input.actor.identityId },
     t: input.t,
     profiles: [profile],
     prefill,
@@ -1521,6 +1527,7 @@ async function replaceOpenEventPollLifecycle(input: {
       pollOptions: input.materialized.pollOptions,
       responseClasses: input.materialized.responseClasses,
       answers: input.materialized.answers,
+      rawAnswers: input.materialized.rawAnswers,
       eventLocation: input.materialized.eventLocation,
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
@@ -1540,14 +1547,14 @@ async function replaceOpenEventPollLifecycle(input: {
       calendarDescription: input.materialized.calendarDescription,
       updatedAt: prospectiveUpdatedAt
     };
-    const text = renderEventEditAnnouncement({
+    const { text, ...mentions } = await resolveEventBody(renderEventEditAnnouncementFragment({
       template: input.profile.eventEditAnnouncement.template,
       profile: input.profile,
       event: prospectiveEvent,
       previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       editorDisplayName: input.actorLabel || input.actorWid,
       locale: input.locale
-    });
+    }), input.context, prospectiveEvent, announcementGroupWid);
     if (!text.trim()) {
       throw new Error('Event edit announcement rendered empty.');
     }
@@ -1556,7 +1563,7 @@ async function replaceOpenEventPollLifecycle(input: {
       kind: 'event_edit',
       deliveryKey: input.operationId,
       chatId: announcementGroupWid,
-      text,
+      text, mentions,
       idempotencyKey: eventAnnouncementTransportIdempotencyKey({
         eventId: input.event.id,
         kind: 'event_edit',
@@ -1613,6 +1620,7 @@ async function replaceOpenEventPollLifecycle(input: {
       pollOptions: input.materialized.pollOptions,
       responseClasses: input.materialized.responseClasses,
       answers: input.materialized.answers,
+      rawAnswers: input.materialized.rawAnswers,
       ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
@@ -1977,6 +1985,7 @@ async function convertOpenPollEditToUnplannedLifecycle(input: {
     profileRevision: eventProfileQuestionSchemaRevision(input.profile),
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
+    rawAnswers: input.materialized.rawAnswers,
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
@@ -2239,6 +2248,7 @@ async function updateEventLifecycle(input: {
       pollOptions: input.materialized.pollOptions,
       responseClasses: input.materialized.responseClasses,
       answers: input.materialized.answers,
+      rawAnswers: input.materialized.rawAnswers,
       eventLocation: input.materialized.eventLocation,
       startsAt: input.materialized.startsAt.toISOString(),
       startsAtUtc: input.materialized.startsAt.toISOString(),
@@ -2258,14 +2268,14 @@ async function updateEventLifecycle(input: {
       calendarDescription: input.materialized.calendarDescription,
       updatedAt
     };
-    const text = renderEventEditAnnouncement({
+    const { text, ...mentions } = await resolveEventBody(renderEventEditAnnouncementFragment({
       template: input.profile.eventEditAnnouncement.template,
       profile: input.profile,
       event: prospectiveEvent,
       previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       editorDisplayName: input.actorLabel || input.actorWid,
       locale: input.locale
-    });
+    }), input.context, prospectiveEvent, announcementGroupWid);
     if (!text.trim()) {
       throw new Error('Event edit announcement rendered empty.');
     }
@@ -2274,7 +2284,7 @@ async function updateEventLifecycle(input: {
       kind: 'event_edit',
       deliveryKey: input.operationId,
       chatId: announcementGroupWid,
-      text,
+      text, mentions,
       idempotencyKey: eventAnnouncementTransportIdempotencyKey({
         eventId: input.event.id,
         kind: 'event_edit',
@@ -2289,6 +2299,7 @@ async function updateEventLifecycle(input: {
     pollOptions: input.materialized.pollOptions,
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
+    rawAnswers: input.materialized.rawAnswers,
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),
@@ -2435,6 +2446,7 @@ async function updateEventLifecycle(input: {
       requestedTitle: input.requestedTitle,
       groupTitle: input.materialized.groupTitle,
       answers: input.materialized.answers,
+      rawAnswers: input.materialized.rawAnswers,
       startsAt: input.materialized.startsAt.toISOString(),
       localDate: input.materialized.localDate,
       localTime: input.materialized.localTime,
@@ -2597,6 +2609,7 @@ export function eventUpdatePrefill(event: StoredEventRecord, profile: EventProfi
   return {
     profileId: profile.id,
     answers,
+    rawAnswers: event.rawAnswers,
     spanKind: event.spanKind,
     ...(event.spanKind === 'multi_day'
       ? eventEndPrefill(event)
@@ -3839,6 +3852,7 @@ async function publishConfirmedEvent(input: {
       pollOptions: materialized.pollOptions,
       responseClasses: materialized.responseClasses,
       answers: materialized.answers,
+      rawAnswers: materialized.rawAnswers,
       eventLocation: input.eventLocation,
       startsAt: materialized.startsAt.toISOString(),
       startsAtUtc: materialized.startsAt.toISOString(),
@@ -3995,6 +4009,7 @@ async function publishConfirmedEvent(input: {
         pollOptions: materialized.pollOptions,
         responseClasses: materialized.responseClasses,
         answers: materialized.answers,
+        rawAnswers: materialized.rawAnswers,
         eventLocation: input.eventLocation,
         startsAt: materialized.startsAt.toISOString(),
         closeAt: materialized.closeAt.toISOString(),
@@ -4345,6 +4360,7 @@ async function createUnplannedEventLifecycle(input: {
     pollOptions: [],
     responseClasses: input.materialized.responseClasses,
     answers: input.materialized.answers,
+    rawAnswers: input.materialized.rawAnswers,
     ...(input.materialized.eventLocation ? { eventLocation: input.materialized.eventLocation } : {}),
     startsAt: input.materialized.startsAt.toISOString(),
     startsAtUtc: input.materialized.startsAt.toISOString(),

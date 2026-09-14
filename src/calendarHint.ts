@@ -1,3 +1,5 @@
+import type { PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
+import { resolveEventBody } from './announcements';
 import type { AppConfig } from './deploymentConfig';
 import type { PluginDatabase } from '@wabs/plugin-sdk/database';
 import type { PluginRuntimeContext } from './runtime';
@@ -10,7 +12,7 @@ import {
 import { eventGroupJoinUrl, templateUsesToken } from './announcements';
 import { eventsCalendarSubscriptionUrl } from './calendarSubscription';
 import type { EventCalendarResource, EventProfile } from './config';
-import { renderEventTemplate } from './flow';
+import { renderEventTemplateFragment } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import {
   assertScopeEventCalendarOwnershipResolved,
@@ -45,7 +47,7 @@ export type EventCalendarHintResult =
   | 'skipped'
   | 'failed';
 
-export interface EventCalendarHintContext {
+export interface EventCalendarHintContext extends PluginTemplateMentionContext {
   config: AppConfig;
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
 }
@@ -216,10 +218,11 @@ export async function sendEventCalendarHint(input: {
       (input.subgroupChatId && templateUsesToken(template, 'groupJoinUrl')
         ? await eventGroupJoinUrl(input.context, template, input.subgroupChatId)
         : '');
-    const text = renderEventTemplate({
+    const { text, ...mentions } = await resolveEventBody(renderEventTemplateFragment({
       template,
       profile: input.profile,
       answers: input.event.answers,
+      rawAnswers: input.event.rawAnswers,
       startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
       endsAt: new Date(input.event.endsAt),
       spanKind: input.event.spanKind,
@@ -235,7 +238,7 @@ export async function sendEventCalendarHint(input: {
         calendarDisplayName: calendar.label || calendar.id,
         calendarSubscriptionUrl: subscriptionUrl
       }
-    }).trim();
+    }), input.context, input.event, input.announcementGroupWid);
     if (!text) {
       supersedeEventAnnouncementDelivery(db, {
         eventId: input.event.id,
@@ -252,7 +255,7 @@ export async function sendEventCalendarHint(input: {
       kind: 'calendar_hint',
       deliveryKey,
       chatId: input.announcementGroupWid,
-      text,
+      text, mentions,
       expectedEventUpdatedAt,
       sender: input.activeTransport
     });

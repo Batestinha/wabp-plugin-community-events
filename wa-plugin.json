@@ -4,8 +4,8 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.15.1",
-  "coreApiRange": "^0.3.4",
+  "version": "0.16.0",
+  "coreApiRange": "^0.3.6",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -423,7 +423,7 @@
       "resource": "transport.poll-history"
     }
   ],
-  "dataVersion": "18",
+  "dataVersion": "19",
   "assistant": {
     "summary": "Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.",
     "useCases": [
@@ -648,7 +648,22 @@
           "widget": "text",
           "multiline": true,
           "placeholder": "Event groups are created through guided event setup, so this community group suggestion will be declined. Let’s create the event now.",
-          "templateDialect": "conditional-presence-v1",
+          "templateDialect": "conditional-values-v2",
+          "templateMentions": {
+            "people": true,
+            "groups": true,
+            "all": false,
+            "targets": [
+              {
+                "id": "creator",
+                "label": "Event creator"
+              },
+              {
+                "id": "currentGroup",
+                "label": "Current group"
+              }
+            ]
+          },
           "templateActivation": "when-used",
           "templateVariables": [
             {
@@ -696,6 +711,22 @@
           "helpText": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.",
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
+          "builderTemplateDialect": "conditional-values-v2",
+          "builderTemplateMentions": {
+            "people": true,
+            "groups": true,
+            "all": true,
+            "targets": [
+              {
+                "id": "creator",
+                "label": "Event creator"
+              },
+              {
+                "id": "currentGroup",
+                "label": "Current group"
+              }
+            ]
+          },
           "builderEndpoints": {
             "options": "/api/v1/plugins/official.community-events/profiles/:scopeId/options",
             "renameQuestion": "/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename",
@@ -734,6 +765,22 @@
           "helpText": "Reusable calendar export resources managed by the event profile builder.",
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
+          "builderTemplateDialect": "conditional-values-v2",
+          "builderTemplateMentions": {
+            "people": true,
+            "groups": true,
+            "all": true,
+            "targets": [
+              {
+                "id": "creator",
+                "label": "Event creator"
+              },
+              {
+                "id": "currentGroup",
+                "label": "Current group"
+              }
+            ]
+          },
           "hideWhenBuilderMounted": true
         },
         "dangerous": false,

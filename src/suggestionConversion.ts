@@ -173,6 +173,9 @@ export async function reconcileEventSuggestionsForScope(
   const starter = input.starter ?? new EventCreationFlowStarter(
     {
       flowEngine: capabilities.flowEngine,
+      coveredGroupsForScope: context.coveredGroupsForScope,
+      currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
+      resolveIdentityAddress: context.resolveIdentityAddress,
       dataStore: context.dataStore,
       i18n: context.i18n,
       configFor: context.configFor.bind(context),
@@ -367,6 +370,9 @@ function requireSuggestionRuntime(context: PluginRuntimeContext) {
   }
   return {
     flowEngine: context.flowEngine,
+      coveredGroupsForScope: context.coveredGroupsForScope,
+      currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
+      resolveIdentityAddress: context.resolveIdentityAddress,
     resolveTarget: context.resolveCommunitySuggestionTarget,
     list: context.listCommunityGroupSuggestions,
     reject: context.rejectCommunityGroupSuggestion,

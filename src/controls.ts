@@ -1,3 +1,4 @@
+import { eventMessageMentions } from './template';
 import { defineControl } from '@wabs/plugin-sdk/controls';
 import type { ControlDescriptor, ControlSchemaMetadata, ControlUiHint } from '@wabs/plugin-sdk/controls-types';
 import { DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE } from './config';
@@ -125,7 +126,8 @@ export const eventsControls: ControlDescriptor[] = [
       widget: 'text',
       multiline: true,
       placeholder: DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE,
-      templateDialect: 'conditional-presence-v1',
+      templateDialect: 'conditional-values-v2',
+      templateMentions: { ...eventMessageMentions, all: false },
       templateActivation: 'when-used',
       templateVariables: [
         { token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Diogo Batista' }
@@ -139,6 +141,8 @@ export const eventsControls: ControlDescriptor[] = [
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',
+    builderTemplateDialect: 'conditional-values-v2',
+    builderTemplateMentions: eventMessageMentions,
     builderEndpoints: {
       options: '/api/v1/plugins/official.community-events/profiles/:scopeId/options',
       renameQuestion: '/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename',
@@ -150,6 +154,8 @@ export const eventsControls: ControlDescriptor[] = [
   control('calendars', 'Event calendars', 'Reusable calendar export resources managed by the event profile builder.', 65, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',
+    builderTemplateDialect: 'conditional-values-v2',
+    builderTemplateMentions: eventMessageMentions,
     hideWhenBuilderMounted: true
   }),
   eventsPanelControl,

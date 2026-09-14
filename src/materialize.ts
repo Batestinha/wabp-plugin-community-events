@@ -1,3 +1,4 @@
+import { eventTemplateConditionValues } from './flow';
 import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import type { EventFlowAnswers } from './flow';
 import {
@@ -29,6 +30,7 @@ export interface MaterializedEventLifecycle {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: Date;
   endsAt: Date;
@@ -66,6 +68,7 @@ export function materializeEventLifecycle(input: {
   const templateInput = {
     profile,
     answers: answers.answers,
+    rawAnswers: answers.rawAnswers,
     startsAt: answers.startsAt,
     endsAt,
     spanKind,
@@ -100,6 +103,7 @@ export function materializeEventLifecycle(input: {
       source: option.label,
       allowedTokens: participantTextTokens,
       values: participantTextValues,
+      profile, conditionValues: eventTemplateConditionValues({ ...templateInput, template: option.label }),
       emptyResult: 'reject',
       field: `poll.options.${option.id}.label`
     })!.trim(),
@@ -155,6 +159,7 @@ export function materializeEventLifecycle(input: {
       includeInAttendanceCount: responseClass.includeInAttendanceCount
     })),
     answers: answers.answers,
+    rawAnswers: answers.rawAnswers,
     ...(input.eventLocation ? { eventLocation: input.eventLocation } : {}),
     startsAt: answers.startsAt,
     endsAt,

@@ -1,3 +1,6 @@
+import { EVENT_DATE_TEMPLATE_TOKENS, EVENT_PROFILE_TEMPLATE_TOKENS, EVENT_SPAN_TEMPLATE_TOKENS } from './config';
+import { renderValueTemplate, renderValueTemplateText, previewTemplateFragment, trimTemplateFragment, joinTemplateFragments, textTemplateFragment, resolvePluginTemplateMentions, combineResolvedTemplate, type TemplateFragment, type PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
+import { eventTemplateDefinition, eventRawAnswers, renderEventConditionalFragment } from './template';
 import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import { randomUUID } from 'node:crypto';
 import type { FlowDefinition, FlowOption, FlowState, FlowStep } from '@wabs/plugin-sdk/flow-types';
@@ -46,9 +49,28 @@ const EVENT_CONFIRM_VALUE = 'yes';
 const EVENT_PAST_COMPLETION_CONFIRM_VALUE = 'yes-complete';
 const DEFAULT_MULTI_DAY_END_TIME = { hour: 23, minute: 59, raw: '23:59' } as const;
 
+export interface EventFlowMentionInput {
+  context: PluginTemplateMentionContext; scopeId: string; chatId: string;
+  currentGroupId?: string | undefined; creatorIdentityId: string;
+}
+function wrapFragment(fragment: TemplateFragment, wrap: (marker: string) => string): TemplateFragment {
+  const marker = `template-${randomUUID()}`;
+  const parts = wrap(marker).split(marker);
+  return joinTemplateFragments(parts.flatMap((part, index) => index ? [fragment, textTemplateFragment(part)] : [textTemplateFragment(part)]));
+}
+async function resolveFlowFragment(fragment: TemplateFragment, input: EventFlowMentionInput | undefined) {
+  if (!input) {
+    if (fragment.segments.some(segment => segment.kind === 'mention')) throw new Error('Flow mention context is unavailable.');
+    return { text: previewTemplateFragment(fragment) };
+  }
+  return combineResolvedTemplate(await resolvePluginTemplateMentions(fragment, { ...input,
+    targets: { creator: [{ identityId: input.creatorIdentityId }] } }));
+}
+
 export interface EventFlowAnswers {
   profileId: string;
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   startsAt: Date;
   endsAt: Date;
   spanKind: EventSpanKind;
@@ -64,6 +86,7 @@ export interface EventFlowAnswers {
 export interface EventFlowPrefill {
   profileId?: string | undefined;
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   spanKind?: EventSpanKind | undefined;
   pollPhase?: 'poll' | 'unplanned' | undefined;
   endLocalDate?: string | undefined;
@@ -75,6 +98,7 @@ export const EVENT_CREATION_FLOW_TYPE_PREFIX = 'official.community-events.create
 export function createEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
+  templateMentions?: EventFlowMentionInput | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -98,6 +122,7 @@ export function restoreEventFlowDefinition(input: {
   flowType: string;
   t: TranslateFn;
   profiles: EventProfile[];
+  templateMentions?: EventFlowMentionInput | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -110,6 +135,7 @@ export function restoreEventFlowDefinition(input: {
   return buildEventFlowDefinition({
     t: input.t,
     profiles: input.profiles,
+    templateMentions: input.templateMentions,
     prefill: input.prefill,
     timezone: input.timezone,
     locale: input.locale,
@@ -126,6 +152,7 @@ export function isEventCreationFlowType(flowType: string): boolean {
 function buildEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
+  templateMentions?: EventFlowMentionInput | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
   locale?: string | undefined;
@@ -250,6 +277,7 @@ function buildEventFlowDefinition(input: {
       steps[stepId] = {
         id: stepId,
         kind: 'text',
+        promptMessageForState: state => resolveFlowFragment(questionPromptFragment(input.t, profile, question, state.data, currentValue), input.templateMentions),
         prompt: initialQuestionPrompt(input.t, profile, question, initialData, currentValue),
         promptForState: (state) => safeQuestionPromptForState(
           input.t,
@@ -340,6 +368,10 @@ function buildEventFlowDefinition(input: {
       id: endTimeStepId(profile),
       kind: 'text',
       prompt: optionalFlowPrompt(input.t, profile, input.t('official.community-events.flow.endTime'), initialData),
+      promptMessageForState: state => resolveFlowFragment(joinTemplateFragments([
+        textTemplateFragment(input.t('official.community-events.flow.endTime') + '\n'),
+        profileOptionalPromptFragment(input.t, profile, eventQuestionAnswersBefore(profile, state.data, profile.questions.length), rawAnswersBefore(profile, state.data, profile.questions.length))
+      ]), input.templateMentions),
       promptForState: (state) => optionalFlowPrompt(
         input.t,
         profile,
@@ -454,6 +486,10 @@ function withSavedEventAnswer(
   const shared = {
     ...step,
     prompt: prompt(step.prompt),
+    ...(step.promptMessageForState ? { promptMessageForState: async (state: FlowState) => {
+      const message = await step.promptMessageForState!(state);
+      return { ...message, text: prompt(message.text) };
+    } } : {}),
     promptForState: (state: FlowState) => prompt(step.promptForState?.(state) ?? step.prompt)
   };
   if (step.kind === 'choice') {
@@ -583,6 +619,7 @@ export function eventFlowAnswersFromRaw(input: {
   allowPast?: boolean | undefined;
   profile: EventProfile;
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   timezone: string;
   locale: string;
   now?: Date | undefined;
@@ -655,10 +692,11 @@ export function eventFlowAnswersFromRaw(input: {
   return eventFlowAnswersFromData(data, input.profile, input.timezone, input.locale, input.now);
 }
 
-export function renderEventTemplate(input: {
+type EventTemplateInput = {
   template: string;
   profile: EventProfile;
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   startsAt: Date;
   endsAt?: Date | undefined;
   spanKind?: EventSpanKind | undefined;
@@ -666,13 +704,32 @@ export function renderEventTemplate(input: {
   locale?: string | undefined;
   creatorDisplayName: string;
   extraTokens?: Record<string, string | undefined> | undefined;
-}): string {
-  return renderEventTemplateText(input.template, eventTemplateValues(input));
+  rawExtraTokens?: Record<string, number | string | boolean | undefined> | undefined;
+};
+export function eventTemplateConditionValues(input: EventTemplateInput) {
+  const values: Record<string, string | number | boolean | undefined> = { ...eventTemplateValues(input) };
+  for (const question of input.profile.questions) if (question.type === 'choice') delete values[question.key];
+  if (input.spanKind === 'multi_day' || !input.answers[input.profile.startsAtTimeQuestionKey]) { values.hour = undefined; values.minute = undefined; }
+  return { ...values, ...eventRawAnswers(input.profile, input.answers, input.rawAnswers),
+    isMultiDay: input.spanKind === 'multi_day', spanKind: input.spanKind ?? 'day_trip', ...input.rawExtraTokens };
+}
+function eventDefinition(input: EventTemplateInput, body: boolean) {
+  return eventTemplateDefinition([...input.profile.questions.map(question => question.key), ...EVENT_DATE_TEMPLATE_TOKENS,
+    ...EVENT_PROFILE_TEMPLATE_TOKENS, ...EVENT_SPAN_TEMPLATE_TOKENS, ...Object.keys(input.extraTokens ?? {})], input.profile, body);
+}
+export function renderEventTemplate(input: EventTemplateInput): string {
+  return renderValueTemplateText(input.template, eventDefinition(input, false), {
+    displayValues: eventTemplateValues(input), conditionValues: eventTemplateConditionValues(input) });
+}
+export function renderEventTemplateFragment(input: EventTemplateInput): TemplateFragment {
+  return trimTemplateFragment(renderValueTemplate(input.template, eventDefinition(input, true), {
+    displayValues: eventTemplateValues(input), conditionValues: eventTemplateConditionValues(input) }));
 }
 
 export function eventTemplateValues(input: {
   profile: EventProfile;
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   startsAt: Date;
   endsAt?: Date | undefined;
   spanKind?: EventSpanKind | undefined;
@@ -742,7 +799,7 @@ function eventFlowAnswersFromData(
     const raw = data[questionStepId(profile, question)];
     if (selectedSpanKind === 'multi_day' && question.key === profile.startsAtTimeQuestionKey
       && (data[EVENT_CREATION_SPAN_STEP_ID] || !raw)) continue;
-    const value = eventAnswerValue(raw, question, profile, answers);
+    const value = eventAnswerValue(raw, question, profile, answers, rawAnswersBefore(profile, data, profile.questions.indexOf(question)));
     if (question.required && !value) {
       return undefined;
     }
@@ -799,6 +856,7 @@ function eventFlowAnswersFromData(
   return {
     profileId: profile.id,
     answers,
+    rawAnswers: rawAnswersBefore(profile, data, profile.questions.length),
     startsAt,
     endsAt,
     spanKind: selectedSpanKind,
@@ -908,29 +966,19 @@ function endTimeStepId(profile: EventProfile): string {
   return `${EVENT_END_TIME_STEP_ID_PREFIX}${profile.id}`;
 }
 
-function questionPrompt(
-  t: TranslateFn,
-  profile: EventProfile,
-  question: EventQuestion,
-  data: Record<string, unknown>,
-  currentValue?: string | undefined
-): string {
+function questionPromptFragment(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string): TemplateFragment {
   const questionIndex = profile.questions.indexOf(question);
   const priorAnswers = eventQuestionAnswersBefore(profile, data, questionIndex);
-  const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
-  const authoredPrompt = renderEventConditionalText({
-    source: question.prompt,
-    allowedTokens,
-    values: priorAnswers,
-    emptyResult: 'reject',
-    field: `questions.${question.key}.prompt`
-  })!;
-  const optionalSuffix = optionalQuestionPromptSuffix(t, profile, question, priorAnswers);
-  const basePrompt = questionPromptByType(t, question, authoredPrompt);
-  const prompt = currentValue?.trim()
-    ? t('official.community-events.flow.currentValuePrompt', { prompt: basePrompt, current: currentValue.trim() })
-    : basePrompt;
-  return optionalSuffix ? `${prompt}\n${optionalSuffix}` : prompt;
+  const authored = renderEventConditionalFragment({ source: question.prompt,
+    allowedTokens: profile.questions.slice(0, questionIndex).map(candidate => candidate.key), values: priorAnswers,
+    profile, conditionValues: rawAnswersBefore(profile, data, questionIndex), body: question.type !== 'choice',
+    emptyResult: 'reject', field: `questions.${question.key}.prompt` });
+  let prompt = wrapFragment(authored, marker => questionPromptByType(t, question, marker));
+  if (currentValue?.trim()) prompt = wrapFragment(prompt, marker => t('official.community-events.flow.currentValuePrompt', { prompt: marker, current: currentValue.trim() }));
+  return question.required ? prompt : joinTemplateFragments([prompt, textTemplateFragment('\n'), profileOptionalPromptFragment(t, profile, priorAnswers, rawAnswersBefore(profile, data, questionIndex))]);
+}
+function questionPrompt(t: TranslateFn, profile: EventProfile, question: EventQuestion, data: Record<string, unknown>, currentValue?: string): string {
+  return previewTemplateFragment(questionPromptFragment(t, profile, question, data, currentValue));
 }
 
 function initialQuestionPrompt(
@@ -1015,7 +1063,7 @@ function eventQuestionChoiceOptions(
   const priorAnswers = eventQuestionAnswersBefore(profile, data, questionIndex);
   const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
   const options = question.choices.map((choice) => ({
-    label: renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens),
+    label: renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens, profile, rawAnswersBefore(profile, data, questionIndex)),
     value: choice.id
   }));
   if (new Set(options.map((option) => option.label.toLowerCase())).size !== options.length) {
@@ -1031,15 +1079,29 @@ function renderEventQuestionChoiceLabel(
   question: EventQuestion,
   choice: EventQuestionChoice,
   priorAnswers: Record<string, string>,
-  allowedTokens: string[]
+  allowedTokens: string[],
+  profile?: EventProfile, conditionValues?: Record<string, string>
 ): string {
   return renderEventConditionalText({
     source: choice.label,
     allowedTokens,
+    profile, conditionValues,
     values: priorAnswers,
     emptyResult: 'reject',
     field: `questions.${question.key}.choices.${choice.id}.label`
   })!.trim();
+}
+
+function rawAnswersBefore(profile: EventProfile, data: Record<string, unknown>, endExclusive: number): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const question of profile.questions.slice(0, endExclusive)) {
+    if (!questionAppliesToSpan(profile, question, eventSpanKind(data, profile))) continue;
+    const raw = data[questionStepId(profile, question)];
+    const value = question.type === EVENT_CHOICE_QUESTION_TYPE ? singleChoiceValue(raw)
+      : typeof raw === 'string' ? raw.trim() : isEventDateAnswer(raw) || isEventTimeAnswer(raw) ? raw.normalized : undefined;
+    if (value) result[question.key] = value;
+  }
+  return result;
 }
 
 function eventQuestionAnswersBefore(
@@ -1051,7 +1113,7 @@ function eventQuestionAnswersBefore(
   for (const question of profile.questions.slice(0, Math.max(0, endExclusive))) {
     if (data[EVENT_CREATION_SPAN_STEP_ID] && eventSpanKind(data, profile) === 'multi_day'
       && question.key === profile.startsAtTimeQuestionKey) continue;
-    const value = eventAnswerValue(data[questionStepId(profile, question)], question, profile, answers);
+    const value = eventAnswerValue(data[questionStepId(profile, question)], question, profile, answers, rawAnswersBefore(profile, data, profile.questions.indexOf(question)));
     if (value) answers[question.key] = value;
   }
   return answers;
@@ -1093,25 +1155,16 @@ function optionalFlowPrompt(
   return suffix ? `${prompt}\n${suffix}` : prompt;
 }
 
-function profileOptionalPromptSuffix(
-  t: TranslateFn,
-  profile: EventProfile,
-  answers: Record<string, string>
-): string {
-  const source = profile.optionalPromptSuffix.trim()
-    ? profile.optionalPromptSuffix
-    : t('official.community-events.flow.optionalPromptSuffix');
-  const firstOptionalQuestionIndex = profile.questions.findIndex((question) => !question.required);
-  const allowedTokens = profile.questions
-    .slice(0, firstOptionalQuestionIndex < 0 ? profile.questions.length : firstOptionalQuestionIndex)
-    .map((question) => question.key);
-  return renderEventConditionalText({
-    source,
-    allowedTokens,
-    values: answers,
-    emptyResult: 'suppress',
-    field: 'optionalPromptSuffix'
-  }) ?? '';
+function profileOptionalPromptFragment(t: TranslateFn, profile: EventProfile, answers: Record<string, string>, rawAnswers?: Record<string, string>): TemplateFragment {
+  const source = profile.optionalPromptSuffix.trim() ? profile.optionalPromptSuffix : t('official.community-events.flow.optionalPromptSuffix');
+  const firstOptional = profile.questions.findIndex(question => !question.required);
+  return renderEventConditionalFragment({ source,
+    allowedTokens: profile.questions.slice(0, firstOptional < 0 ? profile.questions.length : firstOptional).map(question => question.key),
+    values: answers, profile, conditionValues: rawAnswers ?? eventRawAnswers(profile, answers), body: !profile.questions.some(question => question.type === 'choice' && !question.required),
+    emptyResult: 'suppress', field: 'optionalPromptSuffix' });
+}
+function profileOptionalPromptSuffix(t: TranslateFn, profile: EventProfile, answers: Record<string, string>): string {
+  return previewTemplateFragment(profileOptionalPromptFragment(t, profile, answers));
 }
 
 function resolveDateQuestionInput(input: {
@@ -1287,7 +1340,8 @@ function eventAnswerValue(
   raw: unknown,
   question: EventQuestion,
   profile: EventProfile,
-  priorAnswers: Record<string, string>
+  priorAnswers: Record<string, string>,
+  rawPrior?: Record<string, string>
 ): string {
   if (question.type === EVENT_DATE_QUESTION_TYPE) {
     return isEventDateAnswer(raw) ? raw.normalized : '';
@@ -1302,12 +1356,12 @@ function eventAnswerValue(
     }
     const questionIndex = profile.questions.indexOf(question);
     const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
-    const choice = question.choices.find((candidate) => {
-      const renderedLabel = renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens);
-      return candidate.id === selected || candidate.label === selected || renderedLabel === selected;
-    });
+    const exact = question.choices.find(candidate => candidate.id === selected);
+    const matches = exact ? [exact] : question.choices.filter(candidate => candidate.label === selected
+      || renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens, profile, rawPrior ?? eventRawAnswers(profile, priorAnswers)) === selected);
+    const choice = matches.length === 1 ? matches[0] : undefined;
     return choice
-      ? renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens)
+      ? renderEventQuestionChoiceLabel(question, choice, priorAnswers, allowedTokens, profile, rawPrior ?? eventRawAnswers(profile, priorAnswers))
       : selected.trim();
   }
   return typeof raw === 'string' ? raw.trim() : '';
@@ -1369,12 +1423,10 @@ function initialChoiceValue(
   const questionIndex = profile.questions.indexOf(question);
   const allowedTokens = profile.questions.slice(0, questionIndex).map((candidate) => candidate.key);
   const normalizedValue = value.toLowerCase();
-  const choice = question.choices.find((candidate) => {
-    const renderedLabel = renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens);
-    return candidate.id.toLowerCase() === normalizedValue
-      || candidate.label.toLowerCase() === normalizedValue
-      || renderedLabel.toLowerCase() === normalizedValue;
-  });
+  const exact = question.choices.find(candidate => candidate.id.toLowerCase() === normalizedValue);
+  const matches = exact ? [exact] : question.choices.filter(candidate => candidate.label.toLowerCase() === normalizedValue
+    || renderEventQuestionChoiceLabel(question, candidate, priorAnswers, allowedTokens, profile, eventRawAnswers(profile, priorAnswers)).toLowerCase() === normalizedValue);
+  const choice = matches.length === 1 ? matches[0] : undefined;
   return choice ? [choice.id] : undefined;
 }
 

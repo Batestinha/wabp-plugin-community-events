@@ -131,8 +131,8 @@ test('installed SDK errors retain creation certainty and do not opt uncertain ef
 });
 
 test('all migrations and translations are retained and vendored artifacts reconstruct exactly', () => {
-  assert.equal(require('../wa-plugin.json').dataVersion, '18');
-  assert.equal(migrations.length, 43);
+  assert.equal(require('../wa-plugin.json').dataVersion, '19');
+  assert.equal(migrations.length, 44);
   for (const name of migrations) assert.equal(fs.readFileSync(path.join('migrations/events', name), 'utf8'), fs.readFileSync(path.join('src/migrations/events', name), 'utf8'));
   for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key]?.trim(), key);
   assert.deepEqual(Object.keys(plugin.lifecycle), ['migrateData']);
@@ -163,4 +163,43 @@ test('packaging rejects a changed pristine artifact before it can produce a rele
     assert.match(result.stderr, /Pristine upstream contract identity changed/);
     assert.equal(fs.existsSync(path.join(directory, '.cache')), false);
   } finally { closeDirectory(directory); }
+});
+
+test('canonical choice IDs survive reopening and a changed display label', () => {
+  const { renderEventTemplate } = require('../dist/flow');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wabs-events-values-'));
+  let db;
+  try {
+    const file = path.join(directory, 'events.sqlite'); db = open(file);
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    const base = parseEventsConfig({}).eventProfiles[0];
+    const profile = { ...base, questions: base.questions.map(question => question.key === 'style'
+      ? { ...question, type: 'choice', choices: [{ id: 'bouldering', label: 'Bouldering' }, { id: 'rope', label: 'Rope' }] } : question) };
+    const choiceQuestion = profile.questions.find(question => question.type === 'choice');
+    const choice = choiceQuestion.choices[0];
+    const record = { ...fixture(), answers: { [choiceQuestion.key]: 'Old translated label' }, rawAnswers: { [choiceQuestion.key]: choice.id } };
+    insertEvent(db, record); db.close(); db = open(file);
+    const stored = getEvent(db, record.id);
+    assert.deepEqual(stored.rawAnswers, record.rawAnswers);
+    const changed = { ...profile, questions: profile.questions.map(question => question.key === choiceQuestion.key
+      ? { ...question, choices: question.choices.map(item => ({ ...item, label: 'New label ' + item.id })) } : question) };
+    assert.equal(renderEventTemplate({ template: `{{#if ${choiceQuestion.key} == ${JSON.stringify(choice.id)}}}selected{{else}}other{{/if}}`,
+      profile: changed, answers: stored.answers, rawAnswers: stored.rawAnswers, startsAt: new Date(stored.startsAt), timezone: stored.timezone, creatorDisplayName: '' }), 'selected');
+  } finally { db?.close(); closeDirectory(directory); }
+});
+
+test('weather intent freezes text, people, native all, and group mentions in one row', () => {
+  const { prepareEventWeatherDelivery } = require('../dist/store');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wabs-events-mentions-'));
+  const db = open(path.join(directory, 'events.sqlite'));
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    const record = fixture(); insertEvent(db, record);
+    const input = { eventId: record.id, eventUpdatedAt: getEvent(db, record.id).updatedAt, kind: 'daily:2026-09-14', scheduleKind: 'daily', scheduledAt: record.startsAt,
+      chatId: '123@g.us', meteorologicalText: '@all @456 @789@g.us Forecast', meteorologicalIdempotencyKey: 'weather-native',
+      mentions: { mentionedWids: ['456@c.us'], mentionAll: true, groupMentions: [{ groupJid: '789@g.us', groupSubject: 'Walks' }] } };
+    const original = prepareEventWeatherDelivery(db, input);
+    const retry = prepareEventWeatherDelivery(db, { ...input, meteorologicalText: 'Changed', mentions: {} });
+    assert.equal(retry.meteorologicalText, original.meteorologicalText); assert.deepEqual(retry.mentions, input.mentions);
+  } finally { db.close(); closeDirectory(directory); }
 });

@@ -49,8 +49,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.15.1',
-  coreApiRange: '^0.3.4',
+  version: '0.16.0',
+  coreApiRange: '^0.3.6',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     changedActionId: 'official.community-events.recoverJobs',
@@ -272,7 +272,7 @@ export const eventsManifest: PluginManifest = {
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   scopeClock: { timezoneConfigPaths: ['timezone'], providesGroupTimezones: true },
   databases: eventsDatabases,
-  dataVersion: '18',
+  dataVersion: '19',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

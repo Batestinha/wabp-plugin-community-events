@@ -1,3 +1,5 @@
+import { previewTemplateFragment, joinTemplateFragments, textTemplateFragment, type TemplateFragment } from '@wabs/plugin-sdk/templates';
+import { resolveEventBody } from './announcements';
 import type { TranslateFn } from './runtime';
 import type { PluginServiceCallInput } from '@wabs/plugin-sdk/services';
 import type { PluginAction } from '@wabs/plugin-sdk/actions';
@@ -17,7 +19,7 @@ import {
 import { renderMarineForecast } from './contracts/weather/marineForecast';
 import { eventDateAndTimeToUtc } from './datetime';
 import { eventDateTemplateTokens } from './templateDates';
-import { renderEventTemplate } from './flow';
+import { renderEventTemplateFragment } from './flow';
 import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { localizeDefaultEventProfiles, type EventProfile } from './config';
@@ -444,14 +446,11 @@ async function prepareWeatherDeliveryIntent(
   const t = await context.i18n.translatorForScope(event.scopeId);
   const resolvedLocale = await context.i18n.resolveScopeLocale(event.scopeId);
   const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
-  const messages = renderEventWeatherForecastDays({
-    event,
-    profile: localizedProfile,
-    report,
-    forecastDays,
-    t,
-    locale: resolvedLocale.locale
-  });
+  const days = forecastDays.map(forecastDay => renderEventWeatherForecastFragment({ event, profile: localizedProfile, report, forecastDay, t, locale: resolvedLocale.locale }));
+  const { text: meteorologicalText, ...mentions } = await resolveEventBody(joinTemplateFragments(days.flatMap((day, index) =>
+    index ? [textTemplateFragment('\n\n'), day.meteorologicalFragment] : [day.meteorologicalFragment])), context, event, event.subgroupChatId!);
+  const messages = { meteorologicalText, marineText: days.map(day => day.marineText).filter(Boolean).join('\n\n') };
+
   if (!messages.meteorologicalText.trim() && !messages.marineText?.trim()) {
     await markWeatherSkipped(
       context,
@@ -480,6 +479,7 @@ async function prepareWeatherDeliveryIntent(
     scheduleKind: schedule.scheduleKind,
     scheduledAt: schedule.scheduledAt.toISOString(),
     chatId: event.subgroupChatId!,
+    mentions,
     ...(messages.meteorologicalText.trim()
       ? {
           meteorologicalText: messages.meteorologicalText,
@@ -608,7 +608,7 @@ async function deliverPreparedWeatherForecast(
       ? requireWeatherMessageId(await context.sendText(
           claim.delivery.chatId!,
           claim.delivery.meteorologicalText,
-          { idempotencyKey: claim.delivery.meteorologicalIdempotencyKey! }
+          { ...claim.delivery.mentions, idempotencyKey: claim.delivery.meteorologicalIdempotencyKey! }
         ), 'meteorological')
       : undefined;
     fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);
@@ -830,7 +830,7 @@ export function eventWeatherForecastRecoverySkipReason(input: {
   return weatherRuntimeSkipReason(input.event, schedule.scheduledAt, input.now);
 }
 
-export function renderEventWeatherForecast(input: {
+export function renderEventWeatherForecastFragment(input: {
   event: StoredEventRecord;
   profile: EventProfile;
   report: WeatherForecastOutput;
@@ -838,23 +838,30 @@ export function renderEventWeatherForecast(input: {
   t: TranslateFn;
   locale: string;
 }): {
-  meteorologicalText: string;
+  meteorologicalFragment: TemplateFragment;
   marineText?: string | undefined;
 } {
   const summary = weatherSummary(input.forecastDay, input.t, input.locale);
   const forecastDate = parseLocalDate(input.forecastDay.date);
   const forecastNoon = forecastDate && eventDateAndTimeToUtc(forecastDate, { hour: 12, minute: 0 }, input.event.timezone);
   const forecastDateTokens = forecastNoon ? eventDateTemplateTokens(forecastNoon, input.event.timezone, input.locale) : {};
-  const meteorologicalText = renderEventTemplate({
+  const meteorologicalFragment = renderEventTemplateFragment({
     template: input.profile.weather.template,
     profile: input.profile,
     answers: input.event.answers,
+    rawAnswers: input.event.rawAnswers,
     startsAt: new Date(input.event.startsAtUtc || input.event.startsAt),
     endsAt: new Date(input.event.endsAt),
     spanKind: input.event.spanKind,
     timezone: input.event.timezone,
     locale: input.locale,
     creatorDisplayName: input.event.actorLabel || input.event.actorWid,
+    rawExtraTokens: {
+      temperatureMax: input.forecastDay.temperatureMax?.value, temperatureMin: input.forecastDay.temperatureMin?.value,
+      precipitation: input.forecastDay.precipitationSum?.value, precipitationProbability: input.forecastDay.precipitationProbabilityMax?.value,
+      windSpeed: input.forecastDay.windSpeedMax?.value, windGust: input.forecastDay.windGustsMax?.value,
+      windDirection: input.forecastDay.windDirectionDominant?.value, weatherCode: input.forecastDay.weatherCode
+    },
     extraTokens: {
       // Existing weather templates use these date tokens instead of weatherDate.
       ...Object.fromEntries(['weekday', 'dd', 'mm', 'yy', 'yyyy'].map((key) => [key, forecastDateTokens[key]])),
@@ -873,7 +880,7 @@ export function renderEventWeatherForecast(input: {
       windDirection: formatMetric(input.forecastDay.windDirectionDominant, input.locale),
       weatherCode: input.forecastDay.weatherCode !== undefined ? String(input.forecastDay.weatherCode) : undefined
     }
-  }).trim();
+  });
   const marineText = renderMarineForecast({
     ...input.report,
     location: {
@@ -883,7 +890,7 @@ export function renderEventWeatherForecast(input: {
     days: [input.forecastDay]
   }, input.t, input.locale);
   return {
-    meteorologicalText,
+    meteorologicalFragment,
     ...(marineText ? { marineText } : {})
   };
 }
@@ -1491,4 +1498,10 @@ function audit(action: string, metadataJson: unknown): PluginAction {
     action,
     metadataJson
   };
+}
+
+export function renderEventWeatherForecast(input: Parameters<typeof renderEventWeatherForecastFragment>[0]) {
+  const { meteorologicalFragment, ...other } = renderEventWeatherForecastFragment(input);
+  if (meteorologicalFragment.segments.some(segment => segment.kind === 'mention')) throw new Error('Resolve weather mentions before delivery.');
+  return { ...other, meteorologicalText: previewTemplateFragment(meteorologicalFragment) };
 }

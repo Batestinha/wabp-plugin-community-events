@@ -1,3 +1,4 @@
+import type { TemplateMessageMentions } from '@wabs/plugin-sdk/templates';
 import type { PluginDatabase } from '@wabs/plugin-sdk/database';
 import {
   claimEventAnnouncementDelivery,
@@ -49,24 +50,27 @@ export async function sendClaimedEventAnnouncement(input: {
   deliveryKey: string;
   chatId: string;
   text: string;
+  mentions?: TemplateMessageMentions | undefined;
   idempotencyKey?: string | undefined;
   expectedEventUpdatedAt?: string | undefined;
   sender: {
     sendText(
       chatId: string,
       text: string,
-      options?: { idempotencyKey?: string | undefined }
+      options?: { idempotencyKey?: string | undefined } & TemplateMessageMentions
     ): Promise<{ messageId?: string | undefined }>;
   };
 }): Promise<ClaimedEventAnnouncementResult> {
   const idempotencyKey = input.idempotencyKey ?? eventAnnouncementTransportIdempotencyKey(input);
+  const frozen = getEventAnnouncementDeliveryClaim(input.db, input.eventId, input.kind, input.deliveryKey);
   const claim = claimEventAnnouncementDelivery(input.db, {
     eventId: input.eventId,
     scopeId: input.scopeId,
     kind: input.kind,
     deliveryKey: input.deliveryKey,
     chatId: input.chatId,
-    text: input.text,
+    text: frozen?.text ?? input.text,
+    mentions: frozen?.text ? frozen.mentions : input.mentions,
     idempotencyKey,
     ...(input.expectedEventUpdatedAt ? { expectedEventUpdatedAt: input.expectedEventUpdatedAt } : {})
   });
@@ -91,6 +95,7 @@ export async function sendClaimedEventAnnouncement(input: {
 
   try {
     const sent = await input.sender.sendText(persisted.chatId, persisted.text, {
+      ...persisted.mentions,
       idempotencyKey: persisted.idempotencyKey
     });
     const messageId = sent.messageId?.trim();

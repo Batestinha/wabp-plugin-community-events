@@ -1,3 +1,6 @@
+import { resolvePluginTemplateMentions, combineResolvedTemplate } from '@wabs/plugin-sdk/templates';
+import { renderEventConditionalFragment } from './template';
+import type { PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { z } from 'zod';
 import type {
@@ -57,6 +60,7 @@ export interface EventDraft {
 const eventFlowPrefillSchema = z.object({
   profileId: z.string().trim().min(1).optional(),
   answers: z.record(z.string()),
+  rawAnswers: z.record(z.string()).optional(),
   spanKind: z.enum(['day_trip', 'multi_day']).optional(),
   endLocalDate: z.string().trim().min(1).optional(),
   endLocalTime: z.string().trim().min(1).optional()
@@ -111,7 +115,7 @@ export const eventDraftSchema = z.object({
   createdAt: z.string().datetime()
 }).strict();
 
-export interface EventCreationFlowStarterContext {
+export interface EventCreationFlowStarterContext extends PluginTemplateMentionContext {
   flowEngine: FlowEngine;
   dataStore: PluginDataStore;
   i18n: Pick<I18nService, 'resolveIdentityLocale' | 'translator'>;
@@ -371,6 +375,8 @@ export class EventCreationFlowStarter {
       now: startedAt
     });
     const definition = createEventFlowDefinition({
+      templateMentions: { context: this.context, scopeId: input.scopeId, chatId: input.prepared.actor.deliveryChatId,
+        currentGroupId: input.groupWid, creatorIdentityId: input.actorIdentityId },
       t: input.prepared.t,
       profiles: input.prepared.profiles,
       prefill: input.prefill,
@@ -379,16 +385,22 @@ export class EventCreationFlowStarter {
       initialData,
       completeMessageKey: false
     });
-    const suggestionRefusalNoticeText = input.includeSuggestionRefusalNotice
+    const suggestionRefusalNoticeFragment = input.includeSuggestionRefusalNotice
       && input.prepared.suggestionRefusalNoticeTemplate
-      ? renderEventConditionalText({
+      ? renderEventConditionalFragment({
           source: input.prepared.suggestionRefusalNoticeTemplate,
           allowedTokens: ['creatorDisplayName'],
           values: { creatorDisplayName: input.actorLabel },
           emptyResult: 'suppress',
-          field: 'subgroupSuggestionConversion.preFlowNotice.template'
+          field: 'subgroupSuggestionConversion.preFlowNotice.template', body: true
         })
       : undefined;
+    const suggestionRefusalNotice = suggestionRefusalNoticeFragment
+      ? combineResolvedTemplate(await resolvePluginTemplateMentions(suggestionRefusalNoticeFragment, {
+          context: this.context, scopeId: input.scopeId, chatId: input.prepared.actor.deliveryChatId,
+          currentGroupId: input.groupWid, targets: { creator: [{ identityId: input.actorIdentityId }] }
+        })) : undefined;
+    const { text: suggestionRefusalNoticeText, ...suggestionRefusalNoticeMentions } = suggestionRefusalNotice ?? { text: '' };
     this.registerCompletionHandlers(definition.flowType, input.prepared.profiles, input.prepared.t);
     let draftCreated = false;
     const flowStart = await this.context.flowEngine.startFlowForIdentity({
@@ -399,7 +411,7 @@ export class EventCreationFlowStarter {
       scopeId: input.scopeId,
       initialData,
       ...(suggestionRefusalNoticeText
-        ? { initialPromptPreface: suggestionRefusalNoticeText }
+        ? { initialPromptPreface: suggestionRefusalNoticeText, initialPromptPrefaceMentions: suggestionRefusalNoticeMentions }
         : {}),
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
@@ -461,7 +473,7 @@ export class EventCreationFlowStarter {
 const eventCreationResolverRegistrations = new WeakSet<FlowEngine>();
 
 export function registerEventCreationFlowDefinitionResolver(
-  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n'>,
+  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n'> & PluginTemplateMentionContext,
   registerCompletionHandlers: RegisterEventCreationCompletionHandlers
 ): void {
   if (eventCreationResolverRegistrations.has(context.flowEngine)) {
@@ -492,6 +504,8 @@ export function registerEventCreationFlowDefinitionResolver(
       }
       const t = await translatorForEventDraft(context.i18n, draft);
       const definition = restoreEventFlowDefinition({
+        templateMentions: { context, scopeId: draft.scopeId, chatId: draft.chatId,
+          currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         flowType: draft.flowType,
         t,
         profiles: draft.profiles,

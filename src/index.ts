@@ -1,3 +1,4 @@
+import { backfillEventTemplateValues } from './templateMigration';
 import { registerEventsExternalActions } from './externalActions';
 import { registerEventsConsoleOperations } from './consoleOperations';
 import { eventsDatabase, getEventTimezoneForGroup } from './store';
@@ -31,6 +32,7 @@ export const eventsPlugin: BotPlugin = {
       recoverJobHandoffs: true
     });
     return { ...hooks, async onRuntimeReady(event) {
+      await backfillEventTemplateValues(context);
       await recoverEventJobs(context, { startupBeforeWorker: event.startupBeforeWorker });
     } };
   },

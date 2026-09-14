@@ -1,3 +1,4 @@
+import { resolveEventBody } from './announcements';
 import { startRecoverySweep } from './recoverySweep';
 import { randomUUID } from 'node:crypto';
 import type { PluginAction } from '@wabs/plugin-sdk/actions';
@@ -24,7 +25,7 @@ import { resolvePluginPollVotes } from '@wabs/plugin-sdk/poll-vote-identity';
 import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
-import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncementFragment } from './announcements';
 import { voterWidsForResponseBehavior, type EventVoteSelection } from './attendance';
 import {
   cancelEventAttendanceLifecycle,
@@ -277,7 +278,11 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   if (context.flowEngine) {
     registerEventCreationFlowDefinitionResolver({
       flowEngine: context.flowEngine,
+      coveredGroupsForScope: context.coveredGroupsForScope,
+      currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
+      resolveIdentityAddress: context.resolveIdentityAddress,
       dataStore: context.dataStore,
+      resolveStableIdentityById: context.resolveStableIdentityById,
       i18n: context.i18n
     }, (flowType, profiles, t) => {
       registerEventFlowCompletionHandlers(context, flowType, profiles, t);
@@ -2040,7 +2045,7 @@ async function retryEventAnnouncementDelivery(
       kind,
       deliveryKey,
       chatId: delivery.chatId,
-      text: delivery.text,
+      text: delivery.text, mentions: delivery.mentions,
       idempotencyKey: delivery.idempotencyKey,
       ...(kind === 'calendar_hint' && delivery.calendarHintIntent
         ? { expectedEventUpdatedAt: delivery.calendarHintIntent.expectedEventUpdatedAt }
@@ -5112,14 +5117,14 @@ async function plannedEventAnnouncementActions(
 
   try {
     const groupJoinUrl = await eventGroupJoinUrl(context, template, subgroupChatId);
-    const text = renderEventGroupAnnouncement({
+    const { text, ...mentions } = await resolveEventBody(renderEventGroupAnnouncementFragment({
       template,
       profile,
       event: record,
       groupDisplayName: input.subgroupTitle || record.groupTitle,
       groupJoinUrl,
       subgroupChatId
-    });
+    }), context, record, record.announcementGroupWid);
     if (!text) {
       await appendPlannedAnnouncementSkipped(context, record, 'empty_rendered_text', { subgroupChatId });
       return [];
@@ -5135,7 +5140,7 @@ async function plannedEventAnnouncementActions(
       kind: 'event_group_hint',
       deliveryKey,
       chatId: record.announcementGroupWid,
-      text,
+      text, mentions,
       idempotencyKey: eventAnnouncementTransportIdempotencyKey({
         eventId: record.id,
         kind: 'event_group_hint',

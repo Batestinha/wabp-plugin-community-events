@@ -1,3 +1,4 @@
+import type { TemplateMessageMentions } from '@wabs/plugin-sdk/templates';
 import { canonicalTimezone } from '@wabs/plugin-sdk/clock';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PluginPollVote } from './runtime';
@@ -144,6 +145,7 @@ export interface EventAnnouncementDeliveryIntent {
   deliveryKey: string;
   chatId: string;
   text: string;
+  mentions?: TemplateMessageMentions | undefined;
   idempotencyKey: string;
 }
 
@@ -276,6 +278,7 @@ export interface StoredEventRecord {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc?: string | undefined;
@@ -343,6 +346,7 @@ export interface EventPollReplacementTarget {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
@@ -519,6 +523,7 @@ export interface StoredEventWeatherDelivery {
   status: EventWeatherDeliveryStatus;
   chatId?: string | undefined;
   meteorologicalText?: string | undefined;
+  mentions?: TemplateMessageMentions | undefined;
   marineText?: string | undefined;
   meteorologicalIdempotencyKey?: string | undefined;
   marineIdempotencyKey?: string | undefined;
@@ -567,6 +572,7 @@ export interface StoredEventAnnouncementDeliveryClaim {
   chatId: string;
   status: EventAnnouncementDeliveryClaimStatus;
   text?: string | undefined;
+  mentions?: TemplateMessageMentions | undefined;
   idempotencyKey?: string | undefined;
   leaseExpiresAt?: string | undefined;
   messageId?: string | undefined;
@@ -637,6 +643,7 @@ interface EventRow extends PluginDatabaseRow {
   poll_options_json: string;
   response_classes_json: string;
   answers_json: string;
+  raw_answers_json: string | null;
   event_location_json: string | null;
   starts_at: string;
   starts_at_utc: string | null;
@@ -781,6 +788,7 @@ interface EventWeatherDeliveryRow extends PluginDatabaseRow {
   status: EventWeatherDeliveryStatus;
   chat_id: string | null;
   meteorological_text: string | null;
+  template_mentions_json: string;
   marine_text: string | null;
   meteorological_idempotency_key: string | null;
   marine_idempotency_key: string | null;
@@ -831,6 +839,7 @@ interface EventAnnouncementDeliveryClaimRow extends PluginDatabaseRow {
   calendar_hint_intent_json: string | null;
   claimed_at: string;
   updated_at: string;
+  template_mentions_json: string;
 }
 
 interface UnplannedEventFinalizationRow extends PluginDatabaseRow {
@@ -1061,6 +1070,20 @@ export function beginEventQuestionKeyRename(db: PluginDatabase, input: {
       input.profileId,
       oldPath
     );
+    db.run(
+      `UPDATE event_records
+          SET raw_answers_json = json_set(raw_answers_json, ?, json_extract(raw_answers_json, ?)),
+              profile_revision = ?
+        WHERE scope_id = ?
+          AND profile_id = ?
+          AND json_type(raw_answers_json, ?) IS NOT NULL`,
+      newPath,
+      oldPath,
+      input.oldProfileRevision,
+      input.scopeId,
+      input.profileId,
+      oldPath
+    );
 
     return eventQuestionKeyRenameFromRow(requireEventQuestionKeyRenameRow(db, input.operationId));
   });
@@ -1202,6 +1225,29 @@ export function settleEventQuestionKeyRename(db: PluginDatabase, input: {
       row.scope_id,
       row.profile_id
     );
+    db.run(
+      `UPDATE event_records
+          SET raw_answers_json = json_remove(
+            CASE
+              WHEN json_type(raw_answers_json, ?) IS NULL
+                   AND json_type(raw_answers_json, ?) IS NOT NULL
+                THEN json_set(raw_answers_json, ?, json_extract(raw_answers_json, ?))
+              ELSE raw_answers_json
+            END,
+            ?
+          ),
+              profile_revision = ?
+        WHERE scope_id = ?
+          AND profile_id = ?`,
+      authoritativePath,
+      discardedPath,
+      authoritativePath,
+      discardedPath,
+      discardedPath,
+      input.authorityRevision,
+      row.scope_id,
+      row.profile_id
+    );
 
     return eventQuestionKeyRenameFromRow(requireEventQuestionKeyRenameRow(db, input.operationId));
   });
@@ -1249,7 +1295,7 @@ export function insertEvent(
       attendance_lifecycle_snapshot_sha256, attendance_lifecycle_snapshot_json,
       attendance_lifecycle_finalized_at, attendance_lifecycle_cancelled_at,
       poll_question, poll_options_json, response_classes_json,
-      answers_json, event_location_json, starts_at, starts_at_utc, ends_at, lifecycle_complete_at, span_kind, timezone, local_date, local_time, place, style,
+      answers_json, raw_answers_json, event_location_json, starts_at, starts_at_utc, ends_at, lifecycle_complete_at, span_kind, timezone, local_date, local_time, place, style,
       close_at, cleanup_at, group_title,
       calendar_duration_minutes, calendar_location, calendar_description, subgroup_chat_id, subgroup_title,
       created_at, updated_at, closed_at, cleaned_at, cancelled_at, cancelled_by_wid, cancelled_by_label,
@@ -1259,7 +1305,7 @@ export function insertEvent(
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    )`,
+    , ?)`,
     event.id,
     event.scopeId,
     event.groupId ?? null,
@@ -1310,6 +1356,7 @@ export function insertEvent(
     JSON.stringify(event.pollOptions),
     JSON.stringify(event.responseClasses),
     JSON.stringify(event.answers),
+    event.rawAnswers ? JSON.stringify(event.rawAnswers) : null,
     event.eventLocation ? JSON.stringify(event.eventLocation) : null,
     event.startsAt,
     event.startsAtUtc || event.startsAt,
@@ -1352,6 +1399,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
   pollOptions: StoredEventPollOption[];
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
@@ -1386,7 +1434,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
             poll_question = ?,
             poll_options_json = ?,
             response_classes_json = ?,
-            answers_json = ?,
+            answers_json = ?, raw_answers_json = ?,
             profile_revision = ?,
             event_location_json = ?,
             starts_at = ?,
@@ -1436,6 +1484,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
       JSON.stringify(input.pollOptions),
       JSON.stringify(input.responseClasses),
       JSON.stringify(input.answers),
+      input.rawAnswers ? JSON.stringify(input.rawAnswers) : null,
       input.profileRevision,
       input.eventLocation ? JSON.stringify(input.eventLocation) : null,
       input.startsAt,
@@ -1468,9 +1517,9 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
       const intent = normalizedEventAnnouncementIntent(input.announcementIntent);
       const inserted = db.run(
         `INSERT INTO event_announcement_delivery_claims (
-           event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+           event_id, kind, delivery_key, scope_id, chat_id, status, text, template_mentions_json, idempotency_key,
            lease_expires_at, message_id, error, claimed_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, NULL, NULL, ?, ?)
          ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
         input.eventId,
         intent.kind,
@@ -1478,6 +1527,7 @@ export function updateEventStructuredData(db: PluginDatabase, input: {
         intent.scopeId,
         intent.chatId,
         intent.text,
+      JSON.stringify(intent.mentions ?? {}),
         intent.idempotencyKey,
         input.updatedAt,
         input.updatedAt
@@ -1529,6 +1579,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
   profileRevision: string;
   responseClasses: StoredEventResponseClass[];
   answers: Record<string, string>;
+  rawAnswers?: Record<string, string> | undefined;
   eventLocation?: StoredEventLocation | undefined;
   startsAt: string;
   startsAtUtc: string;
@@ -1556,7 +1607,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
           SET profile_label = ?, profile_revision = ?, origin = 'unplanned',
               event_status = 'failed', group_lifecycle_status = 'none', calendar_status = 'hidden',
               poll_wa_msg_id = NULL, poll_generation = poll_generation + 1, poll_question = NULL,
-              poll_options_json = '[]', response_classes_json = ?, answers_json = ?,
+              poll_options_json = '[]', response_classes_json = ?, answers_json = ?, raw_answers_json = ?,
               event_location_json = ?, starts_at = ?, starts_at_utc = ?, ends_at = ?, lifecycle_complete_at = ?, span_kind = ?,
               timezone = ?, local_date = ?, local_time = ?, place = ?, style = NULL,
               close_at = ?, cleanup_at = ?, group_title = ?, calendar_duration_minutes = ?,
@@ -1586,6 +1637,7 @@ export function convertOpenPollEventToUnplanned(db: PluginDatabase, input: {
       input.profileRevision,
       JSON.stringify(input.responseClasses),
       JSON.stringify(input.answers),
+      input.rawAnswers ? JSON.stringify(input.rawAnswers) : null,
       input.eventLocation ? JSON.stringify(input.eventLocation) : null,
       input.startsAt,
       input.startsAtUtc,
@@ -2478,7 +2530,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
               attendance_lifecycle_finalized_at = NULL,
               attendance_lifecycle_cancelled_at = NULL,
               poll_question = ?, poll_options_json = ?,
-              response_classes_json = ?, answers_json = ?, event_location_json = ?,
+              response_classes_json = ?, answers_json = ?, raw_answers_json = ?, event_location_json = ?,
               starts_at = ?, starts_at_utc = ?, timezone = ?, local_date = ?,
               ends_at = ?, lifecycle_complete_at = ?, span_kind = ?,
               local_time = ?, place = ?, style = NULL, close_at = ?, cleanup_at = ?,
@@ -2514,6 +2566,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
       JSON.stringify(target.pollOptions),
       JSON.stringify(target.responseClasses),
       JSON.stringify(target.answers),
+      target.rawAnswers ? JSON.stringify(target.rawAnswers) : null,
       target.eventLocation ? JSON.stringify(target.eventLocation) : null,
       target.startsAt,
       target.startsAtUtc,
@@ -2593,9 +2646,9 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
     if (announcementIntent) {
       const inserted = db.run(
         `INSERT INTO event_announcement_delivery_claims (
-           event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+           event_id, kind, delivery_key, scope_id, chat_id, status, text, template_mentions_json, idempotency_key,
            lease_expires_at, message_id, error, claimed_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL, NULL, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, NULL, NULL, ?, ?)
          ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
         replacement.eventId,
         announcementIntent.kind,
@@ -2603,6 +2656,7 @@ export function swapPublishedEventPollReplacement(db: PluginDatabase, input: {
         announcementIntent.scopeId,
         announcementIntent.chatId,
         announcementIntent.text,
+      JSON.stringify(announcementIntent.mentions ?? {}),
         announcementIntent.idempotencyKey,
         swappedAt,
         swappedAt
@@ -5475,9 +5529,9 @@ export function prepareEventCalendarHintDelivery(db: PluginDatabase, input: {
 
     const inserted = db.run(
       `INSERT INTO event_announcement_delivery_claims (
-         event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+         event_id, kind, delivery_key, scope_id, chat_id, status, text, template_mentions_json, idempotency_key,
          lease_expires_at, message_id, error, calendar_hint_intent_json, claimed_at, updated_at
-       ) VALUES (?, 'calendar_hint', ?, ?, ?, 'pending', NULL, ?, NULL, NULL, NULL, ?, ?, ?)
+       ) VALUES (?, 'calendar_hint', ?, ?, ?, 'pending', NULL, '{}', ?, NULL, NULL, NULL, ?, ?, ?)
        ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
       input.eventId,
       deliveryKey,
@@ -5578,6 +5632,7 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
   deliveryKey: string;
   chatId: string;
   text: string;
+  mentions?: TemplateMessageMentions | undefined;
   idempotencyKey: string;
   expectedEventUpdatedAt?: string | undefined;
   claimedAt?: string | undefined;
@@ -5653,9 +5708,9 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
     ).toISOString();
     const inserted = db.run(
       `INSERT INTO event_announcement_delivery_claims (
-         event_id, kind, delivery_key, scope_id, chat_id, status, text, idempotency_key,
+         event_id, kind, delivery_key, scope_id, chat_id, status, text, template_mentions_json, idempotency_key,
          lease_expires_at, message_id, error, claimed_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'sending', ?, ?, ?, NULL, NULL, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, 'sending', ?, ?, ?, ?, NULL, NULL, ?, ?)
        ON CONFLICT(event_id, kind, delivery_key) DO NOTHING`,
       input.eventId,
       intent.kind,
@@ -5663,6 +5718,7 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
       intent.scopeId,
       intent.chatId,
       intent.text,
+      JSON.stringify(intent.mentions ?? {}),
       intent.idempotencyKey,
       leaseExpiresAt,
       now,
@@ -5685,7 +5741,7 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
     if (
       existingClaim.scopeId !== intent.scopeId ||
       existingClaim.chatId !== intent.chatId ||
-      (!materializesPreparedCalendarHint && existingClaim.text !== intent.text) ||
+      (!materializesPreparedCalendarHint && (existingClaim.text !== intent.text || JSON.stringify(existingClaim.mentions ?? {}) !== JSON.stringify(intent.mentions ?? {}))) ||
       existingClaim.idempotencyKey !== intent.idempotencyKey
     ) {
       throw new Error(
@@ -5697,6 +5753,7 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
       `UPDATE event_announcement_delivery_claims
           SET status = 'sending',
               text = ?,
+              template_mentions_json = ?,
               idempotency_key = ?,
               lease_expires_at = ?,
               error = NULL,
@@ -5710,6 +5767,7 @@ export function claimEventAnnouncementDelivery(db: PluginDatabase, input: {
             OR (status = 'sending' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
           )`,
       intent.text,
+      JSON.stringify(intent.mentions ?? {}),
       intent.idempotencyKey,
       leaseExpiresAt,
       now,
@@ -8399,6 +8457,7 @@ export function prepareEventWeatherDelivery(db: PluginDatabase, input: {
   scheduledAt: string;
   chatId: string;
   meteorologicalText?: string | undefined;
+  mentions?: TemplateMessageMentions | undefined;
   marineText?: string | undefined;
   meteorologicalIdempotencyKey?: string | undefined;
   marineIdempotencyKey?: string | undefined;
@@ -8437,13 +8496,13 @@ export function prepareEventWeatherDelivery(db: PluginDatabase, input: {
     const persisted = db.run(
       `INSERT INTO event_weather_deliveries (
          event_id, event_updated_at, kind, schedule_kind, scheduled_at, status, chat_id,
-         meteorological_text, marine_text,
+         meteorological_text, template_mentions_json, marine_text,
          meteorological_idempotency_key, marine_idempotency_key,
          meteorological_message_id, marine_message_id,
          claim_id, lease_expires_at, attempt, next_run_at,
          sent_at, skipped_at, error, updated_at
        )
-       SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, NULL, NULL, NULL, ?
+       SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, NULL, NULL, NULL, ?
          FROM event_records
         WHERE id = ? AND updated_at = ?
        ON CONFLICT(event_id, kind, event_updated_at) DO UPDATE SET
@@ -8452,6 +8511,7 @@ export function prepareEventWeatherDelivery(db: PluginDatabase, input: {
          status = 'pending',
          chat_id = excluded.chat_id,
          meteorological_text = excluded.meteorological_text,
+         template_mentions_json = excluded.template_mentions_json,
          marine_text = excluded.marine_text,
          meteorological_idempotency_key = excluded.meteorological_idempotency_key,
          marine_idempotency_key = excluded.marine_idempotency_key,
@@ -8468,6 +8528,7 @@ export function prepareEventWeatherDelivery(db: PluginDatabase, input: {
       input.scheduledAt,
       input.chatId,
       meteorologicalText ?? null,
+      JSON.stringify(input.mentions ?? {}),
       marineText ?? null,
       input.meteorologicalIdempotencyKey?.trim() ?? null,
       input.marineIdempotencyKey?.trim() ?? null,
@@ -9091,6 +9152,7 @@ function eventFromRow(row: EventRow): StoredEventRecord {
     pollOptions: parseJson<StoredEventPollOption[]>(row.poll_options_json, []),
     responseClasses: parseJson<StoredEventResponseClass[]>(row.response_classes_json, []),
     answers: parseJson<Record<string, string>>(row.answers_json, {}),
+    ...(row.raw_answers_json ? { rawAnswers: parseJson<Record<string, string>>(row.raw_answers_json, {}) } : {}),
     ...(eventLocation ? { eventLocation } : {}),
     startsAt: row.starts_at,
     startsAtUtc: row.starts_at_utc || row.starts_at,
@@ -9332,6 +9394,7 @@ function eventAnnouncementDeliveryClaimFromRow(
   );
   return {
     eventId: row.event_id,
+    mentions: parseJson<TemplateMessageMentions>(row.template_mentions_json, {}),
     kind: row.kind,
     deliveryKey: row.delivery_key,
     scopeId: row.scope_id,
@@ -9395,7 +9458,7 @@ function normalizedEventAnnouncementIntent(
   const chatId = requiredEventOperationValue(input.chatId, 'announcement chat id');
   const text = requiredEventOperationValue(input.text, 'announcement text', false);
   const idempotencyKey = requiredEventOperationValue(input.idempotencyKey, 'announcement idempotency key');
-  return { scopeId, kind: input.kind, deliveryKey, chatId, text, idempotencyKey };
+  return { scopeId, kind: input.kind, deliveryKey, chatId, text, idempotencyKey, ...(input.mentions ? { mentions: input.mentions } : {}) };
 }
 
 function normalizedEventCalendarHintDeliveryIntent(
@@ -9605,6 +9668,7 @@ function eventCalendarPublicationGenerationFromRow(
 function eventWeatherDeliveryFromRow(row: EventWeatherDeliveryRow): StoredEventWeatherDelivery {
   return {
     eventId: row.event_id,
+    mentions: parseJson<TemplateMessageMentions>(row.template_mentions_json, {}),
     eventUpdatedAt: row.event_updated_at,
     kind: row.kind,
     scheduleKind: row.schedule_kind,

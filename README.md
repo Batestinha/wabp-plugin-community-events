@@ -2,7 +2,11 @@
 
 Community events, attendance polls, subgroup creation and recovery, calendar publication, and event weather reports.
 
-Standalone WABS package `official.community-events` version `0.15.1`, requiring WABP core API `^0.3.4`. It retains the plugin ID, account-owned `events` database, data version 18, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
+Standalone WABS package `official.community-events` version `0.17.6`, requiring WABP core API `^0.3.22`. It retains the plugin ID, account-owned `events` database, data version 18, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
+
+Workflow discovery resolves “this event” only from a unique, authorized event whose subgroup matches the invoking chat, independently of title, search and pagination. Explicit event selections remain authoritative. Read-only `locationQuery` discovery returns validated geocoder-backed location candidates and timezones; ambiguous candidates still require a choice before preparation.
+
+The retained 0.17.2 source was reconciled with the installed 0.17.5 package before this release. `recovery/live-0.17.5.json` records matching compiled files and the intentional discovery change; the missing original Git history is not claimed to have been recovered. The SDK pin is corrected to support the live interactive-job fields.
 
 New event timezones are inferred from the coordinates returned by the existing geocoder disambiguation. There is no separate timezone question. Relative dates use the selected location and the original answer instant, including after restart. Persisted event timezone snapshots govern event-group clock behavior; scope clocks supply other defaults. Existing saved civil dates and UTC schedules remain fixed unless the event is explicitly edited.
 

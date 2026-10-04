@@ -49,8 +49,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.17.5',
-  coreApiRange: '^0.3.7',
+  version: '0.17.6',
+  coreApiRange: '^0.3.22',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     changedActionId: 'official.community-events.recoverJobs',

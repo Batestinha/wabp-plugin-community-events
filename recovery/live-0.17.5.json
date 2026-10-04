@@ -1,0 +1,654 @@
+{
+  "schemaVersion": 1,
+  "kind": "compiled-source-recovery",
+  "upstreamVersion": "0.17.5",
+  "installedArchiveSha256": "0b730ee373b352ac87b06b1e66300a174c59210a864cbe695f337f9676a71ecd",
+  "retainedSourceCommit": "ac8a08a2c8c0a83870d5f7911626fb86b113d7be",
+  "reconstructedSource": "Restored TypeScript from the retained 0.17.2 source and installed 0.17.5 JavaScript/declarations. This is equivalent-emission source recovery, not recovery of the original unpublished Git commit.",
+  "compilerVersion": "5.9.3",
+  "excluded": [
+    {
+      "path": "dist/workflowActions.js",
+      "reason": "Intentional subgroup discovery and geocoded-location fix in commit 3d4a234."
+    }
+  ],
+  "dependencyRepair": "The installed package declared SDK 0.3.17, whose types lack the live executionClass job fields. Pin the SDK 0.3.22 built from WABP b4ae024116ab0254533605a1295c53e6ecc21502 and retain its archive/provenance. All non-workflow plugin output still matches.",
+  "verified": [
+    {
+      "path": "dist/adoption.d.ts",
+      "sha256": "c3354c5c4916351fa47f6ac1e07b65cb402ff354904d45788d1d03894adce308"
+    },
+    {
+      "path": "dist/adoption.js",
+      "sha256": "988ba7ca60168358d05f1a9f8acf9910c0f548b20f923ea8d4b2f4e4a802570b"
+    },
+    {
+      "path": "dist/announcementDelivery.d.ts",
+      "sha256": "cff6900fb02a84454709c487591116d06e537861d36066b0fef2e13798a94861"
+    },
+    {
+      "path": "dist/announcementDelivery.js",
+      "sha256": "a330f03804ad58589e67baae4debd58182d160f281697b5268d52ce56977faea"
+    },
+    {
+      "path": "dist/announcements.d.ts",
+      "sha256": "7df7db36b63fea8497a23f47be9ef8fa4aa2ce55b3f01cb37c2eba7e1adbebf6"
+    },
+    {
+      "path": "dist/announcements.js",
+      "sha256": "6b75a46fff1fe09f05b4019d1dd87abc0998eafea7b199bb6828452923cf3819"
+    },
+    {
+      "path": "dist/attendance.d.ts",
+      "sha256": "9d254b2e64ce0a1ca2d51f4df4fef1de57dab74a8001ea7882d2f98210657497"
+    },
+    {
+      "path": "dist/attendance.js",
+      "sha256": "65736bb707d57a6785ed94250bfb39b6aba3034e466f012de0de208f87eaaa2e"
+    },
+    {
+      "path": "dist/attendanceLifecycle.d.ts",
+      "sha256": "111c20e5ff19f4626a484ed4ebe6fb905162ead5c62b40bcc767a119e4f5dd19"
+    },
+    {
+      "path": "dist/attendanceLifecycle.js",
+      "sha256": "ce64dc49411e3ce7400955e0acc9cec3e5a5cf0f82cc45b807550cd72c192369"
+    },
+    {
+      "path": "dist/calendarHint.d.ts",
+      "sha256": "bd56f657a160f47f588cb2f7e628cfb9ea2c8607bfe7e2cb6d7fbd0b8ca93f00"
+    },
+    {
+      "path": "dist/calendarHint.js",
+      "sha256": "46986f3cae0f57e75538485825bc438996f569f49270596fa06a157110ca0274"
+    },
+    {
+      "path": "dist/calendarPublication.d.ts",
+      "sha256": "837a8103e0294329a3028fa3c5760783c8faca482be9b6da925383e497b41ca8"
+    },
+    {
+      "path": "dist/calendarPublication.js",
+      "sha256": "795913072cf593cc70feb7ac616e789251f032a303c4177ae9de37d6b934d6a5"
+    },
+    {
+      "path": "dist/calendarStatus.d.ts",
+      "sha256": "bc8d35f5ebb729857ee6cfadef469977453ce88e756f7dfb0072b9af5d4da5f0"
+    },
+    {
+      "path": "dist/calendarStatus.js",
+      "sha256": "02baf9c58aa251e98a77f32cb4a57ef78409a9e1185525cf28cf58abb669b35b"
+    },
+    {
+      "path": "dist/calendarSubscription.d.ts",
+      "sha256": "1efbd6c4d808879c86eb25cb90c384fa70894b888c609e4ae364ddfa16d739d5"
+    },
+    {
+      "path": "dist/calendarSubscription.js",
+      "sha256": "2adfec7cf2ab72595f1e932b8b8311a8dfeb736919ae0eaca0b2a0c31fc96947"
+    },
+    {
+      "path": "dist/cancellation.d.ts",
+      "sha256": "983142ec14cf5a915c3811af0c8930802409b27cfe477b710234fc00f8a0414b"
+    },
+    {
+      "path": "dist/cancellation.js",
+      "sha256": "29b99636c6be2db113e67d29eb0883d043a1e7072cdee2739b2fed265d116067"
+    },
+    {
+      "path": "dist/cleanupScheduling.d.ts",
+      "sha256": "5718020896a9fc01203fe76df3e9c01ea5c359202167a6d78bbe4f4ee0d4acf6"
+    },
+    {
+      "path": "dist/cleanupScheduling.js",
+      "sha256": "2f3b714040526994f0241edfc57a58ca9253250e1fd25b122c0c465280c05b3e"
+    },
+    {
+      "path": "dist/commands.d.ts",
+      "sha256": "1ed9d31fde39c251b32df9eba221f02086f02b3a9c3b8b9c73921bb87c8f449b"
+    },
+    {
+      "path": "dist/commands.js",
+      "sha256": "382d93111207f314dbadc54fa525fc8657581cdfebe86ce941502e42deb4053c"
+    },
+    {
+      "path": "dist/communityLinkCalendar.d.ts",
+      "sha256": "0ba9cb23a605e1e90f994db4d8d3aa7095c6c18bb0ee6f433b3bb08bdd30b0df"
+    },
+    {
+      "path": "dist/communityLinkCalendar.js",
+      "sha256": "3f7f286b8fd1885a30e655d4b01077ee4d76341f8d349c9e9c0ed4d6c094e525"
+    },
+    {
+      "path": "dist/completionRecovery.d.ts",
+      "sha256": "8ed541b629faef71cf6ae7766976595c31e64014cb1295fba027a3a9e7a2487a"
+    },
+    {
+      "path": "dist/completionRecovery.js",
+      "sha256": "5dace96a41cc25c2130a75b4af9573dad872f3866459af61cf3766d8071b0652"
+    },
+    {
+      "path": "dist/config.d.ts",
+      "sha256": "e85ce79e34d3c1b27bbb0786f40bc766421f19866a106c04796ebe403b0a7ff7"
+    },
+    {
+      "path": "dist/config.js",
+      "sha256": "5185b756593e87a6b793344a4b76feaf300254e526ad4f1eef7034248277175d"
+    },
+    {
+      "path": "dist/consoleOperationDeclarations.d.ts",
+      "sha256": "2688acc8cd698546d40f1a2b55a2e08ea0329bbc349b9de687a0a23e7db6d55a"
+    },
+    {
+      "path": "dist/consoleOperationDeclarations.js",
+      "sha256": "d49939521aa856bb7cf5c47bedbb5a304ee269d383caf847d80582a820c89eb0"
+    },
+    {
+      "path": "dist/consoleOperations.d.ts",
+      "sha256": "27c8d790f11d2cbc496308bb1a78f64a6a0d20f98b847ad14c1f7b6f29e9d625"
+    },
+    {
+      "path": "dist/consoleOperations.js",
+      "sha256": "f947c1c9797b2558b42b64057a1c4047fafd463dd8fef242aa670fef0cccf7d9"
+    },
+    {
+      "path": "dist/contracts/community-subgroups/serviceApi.d.ts",
+      "sha256": "0bde94fad2d97a62379d70c7af1efb05b4e064b17f64deb5dab56cf883cbd38b"
+    },
+    {
+      "path": "dist/contracts/community-subgroups/serviceApi.js",
+      "sha256": "15e0d7055bf80a7207c42dabd03324941a57e0a4a26377ad44013201eb7c9fbb"
+    },
+    {
+      "path": "dist/contracts/doas/serviceApi.d.ts",
+      "sha256": "57f3d29436fa4be0f86a16c3b6b22e9c2e38f26d766de4ef898e65a4f05e1583"
+    },
+    {
+      "path": "dist/contracts/doas/serviceApi.js",
+      "sha256": "38f89879d7e0ef56b9b39fdcb8962794d5b89f6fe11fb3f5b3d1e4e447759cae"
+    },
+    {
+      "path": "dist/contracts/geocoder/serviceApi.d.ts",
+      "sha256": "91f8ad7da7343578b9748f084cb0034711e0941a4e246690ddb38ce960fede80"
+    },
+    {
+      "path": "dist/contracts/geocoder/serviceApi.js",
+      "sha256": "2d2764d982e3072d1b0be0b4b6a4dced7447470e86a586ac13f5514fca2d5955"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/domain.d.ts",
+      "sha256": "3462c36235184a44c84906ffe00be12a7c1f29db44a7184933dbfd9f3bb15a9f"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/domain.js",
+      "sha256": "1e631cfe6522ac1928d98a4d03525c59abed016598033977c0b48d80ddd8d652"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/lifecycleServiceApi.d.ts",
+      "sha256": "e7c9bf792a431ab784379c88b67fdb855a270dcc35ab6c7058f20e62ce916aad"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/lifecycleServiceApi.js",
+      "sha256": "85be0767fb46088649d940393b6f47aa550f896bcafc9dbd58430d85d44ad5ba"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/serviceApi.d.ts",
+      "sha256": "94d539ccf256eae8f4a54823948c6cee260a5711b73a82f51c77f8c45abe2970"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/serviceApi.js",
+      "sha256": "9e9beee6b12d4653521812365ad69bf9c31f32bc3a60b7e4bcd74accd92a8a5a"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/workingHours.d.ts",
+      "sha256": "353d45848e57dcdf0d6d0aef719657157041121d24e3b67bdba2af71c1150db6"
+    },
+    {
+      "path": "dist/contracts/poll-assistant/workingHours.js",
+      "sha256": "c35878bd72a7f50074908e09f691303e2d504b373f7fe8d3e0ade9d2b578a22a"
+    },
+    {
+      "path": "dist/contracts/weather/config.d.ts",
+      "sha256": "f093c022cc94ed6f58a3770346102b76fea77628e337314b37324e138f9d94cf"
+    },
+    {
+      "path": "dist/contracts/weather/config.js",
+      "sha256": "62d765f7935467441ba53fb583017f11e65f8e048a387f4e31fb631e794616bb"
+    },
+    {
+      "path": "dist/contracts/weather/marineForecast.d.ts",
+      "sha256": "2c33ebc771fd351c85d4c9af7d2420e8ac1b460e3f139ad1842dcb9a160a57f0"
+    },
+    {
+      "path": "dist/contracts/weather/marineForecast.js",
+      "sha256": "a9a44eadae87deac3e1baa7d2fc29326539c29f89c26ca88e1c422409bcb2ac0"
+    },
+    {
+      "path": "dist/contracts/weather/serviceApi.d.ts",
+      "sha256": "f9b1fdfa747998a1fdd9e64cb75a86c966a7aa3d12ef812fca4771900f61a790"
+    },
+    {
+      "path": "dist/contracts/weather/serviceApi.js",
+      "sha256": "6b9ff9b2235cb598c9484c429a8cc2dbffb5b814454997d95a32033f92e648a5"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/config.d.ts",
+      "sha256": "e0c9daf7bf0bf907abcd29f1dc449e6f09d34ef5d6afccc0bce4422742e62c8c"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/config.js",
+      "sha256": "f2e4f840e9fc70a754df4f189a6c266977810807242419e12b0d8aa7de9f454e"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/contracts/workspace-connector-v0.3.d.ts",
+      "sha256": "0591d6b026558a6c8afb2335a9a4c16d44f44746addaf82204e4ea5a9855311e"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/contracts/workspace-connector-v0.3.js",
+      "sha256": "ac411592ae942c8b4e23d35454f95c23d2aa6a7050adad9a36b88385d407dec7"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/serviceApi.d.ts",
+      "sha256": "916666acb1a22449e021bf8328703d337951952d032521a014673f5ed2a268e4"
+    },
+    {
+      "path": "dist/contracts/workspace-connector/serviceApi.js",
+      "sha256": "3668520567077a7864b16956598653e5c5ef33cca292bc5acd0545b6e26a0451"
+    },
+    {
+      "path": "dist/contracts/workspace-protocol.d.ts",
+      "sha256": "0591d6b026558a6c8afb2335a9a4c16d44f44746addaf82204e4ea5a9855311e"
+    },
+    {
+      "path": "dist/contracts/workspace-protocol.js",
+      "sha256": "ac411592ae942c8b4e23d35454f95c23d2aa6a7050adad9a36b88385d407dec7"
+    },
+    {
+      "path": "dist/controls.d.ts",
+      "sha256": "3d299ae62404949d97776fb59d59d25a33c026e96588406701c7287b499d279c"
+    },
+    {
+      "path": "dist/controls.js",
+      "sha256": "460d0a3f9ad46c7d39843561ad016d96be505b8a47f36b13b0b1516c32e8a5dd"
+    },
+    {
+      "path": "dist/creationDecision.d.ts",
+      "sha256": "96804c023aa684886684d52641a2ba1981c330d82b9569593111e92caac450bf"
+    },
+    {
+      "path": "dist/creationDecision.js",
+      "sha256": "b34be9e6ebd46e275cf358000ec8903673575a0efecb4fb11fa9c00ce77d6bb4"
+    },
+    {
+      "path": "dist/creatorMembershipNotice.d.ts",
+      "sha256": "a5dceabbc5cc94cc0ac6bd9216edb9fed349cbf7ff020cf44c00300cdfb384be"
+    },
+    {
+      "path": "dist/creatorMembershipNotice.js",
+      "sha256": "a3233d26cb19d213f00daee6b3654fd433ce3323d90f87d265021a92ce767c75"
+    },
+    {
+      "path": "dist/datetime.d.ts",
+      "sha256": "10b3c868fa834bcad016024f95a98f3812e1aad04f2e7b4ce81f29fa408b1c00"
+    },
+    {
+      "path": "dist/datetime.js",
+      "sha256": "462ec34a49a63877f56fb6fa0356220f0fe7607193634a7bf700a813c7a15424"
+    },
+    {
+      "path": "dist/deploymentConfig.d.ts",
+      "sha256": "de9fda0a65f40e88c2aa894874c13032f3dd686472dcee60a33fbc54a0e30852"
+    },
+    {
+      "path": "dist/deploymentConfig.js",
+      "sha256": "d43aa81f5bc89faa359e0f97c814ba25155591ff078fbb9bfd40f8c7c9683230"
+    },
+    {
+      "path": "dist/editRepair.d.ts",
+      "sha256": "dc0a5847254db1a253d78f4d30d4d922edf211e3896b7381fa3d3480caa29bf0"
+    },
+    {
+      "path": "dist/editRepair.js",
+      "sha256": "9eb40a7ce0cf087c329943a4b9a376c5fc4d3797aa8beb518b25adbf020d55fb"
+    },
+    {
+      "path": "dist/eventArtifactDeletion.d.ts",
+      "sha256": "bae6546101c3d0983967f0bf9776961d3fa653d40c51ae1d0515950a8e6ce6fb"
+    },
+    {
+      "path": "dist/eventArtifactDeletion.js",
+      "sha256": "281e7609723b3cfef8dc11acd58a6e441b55432750f4d84b1c4e04fb67893175"
+    },
+    {
+      "path": "dist/eventCalendarHintReplay.d.ts",
+      "sha256": "7827b84a50fd4cf5f54232f2d63b2644269bd5e7fa55a4a6d73813eecf9efa6f"
+    },
+    {
+      "path": "dist/eventCalendarHintReplay.js",
+      "sha256": "2489c72d1021b0efb2559a30a2206d8668112e7406eb7fb10421f9cfc1ca979d"
+    },
+    {
+      "path": "dist/eventCalendarPublication.d.ts",
+      "sha256": "86a213edd065dc4d61a33100fb5c42e3e946474bb878d5b2cea2e51a2ea393e0"
+    },
+    {
+      "path": "dist/eventCalendarPublication.js",
+      "sha256": "6b76a31ee46c13d55d48dc2490d74ca876e6b060109173498e8a87c6b39c20e4"
+    },
+    {
+      "path": "dist/eventCreationFlowStarter.d.ts",
+      "sha256": "9fa4eace3e5a7561937d813016f02134093d053715e0ac6a84381144a87e03cd"
+    },
+    {
+      "path": "dist/eventCreationFlowStarter.js",
+      "sha256": "826a5905ea216770a497a80cf119827cad74dddb181d726368779eff655af118"
+    },
+    {
+      "path": "dist/eventLocation.d.ts",
+      "sha256": "489808201ef8a39ea86d7cf18ae7bee2d81409e813a6ef97b38b5b346773742d"
+    },
+    {
+      "path": "dist/eventLocation.js",
+      "sha256": "70c2e8f953d0e942c9c6ca9f4aaa64e65f716ad5e218ee48058722cc74304b7d"
+    },
+    {
+      "path": "dist/externalActions.d.ts",
+      "sha256": "c49de434ac7a25a5f5e9fba9764bdc44ee7559f8a306626ed5916c8e89a61bce"
+    },
+    {
+      "path": "dist/externalActions.js",
+      "sha256": "f958f0e22bd0c1ea0807148e8d9e252d9ae3b7f5aad739dee01475a6a1741471"
+    },
+    {
+      "path": "dist/flow.d.ts",
+      "sha256": "3f7c6bf441b2240d1c70c6536de73ad2d07894793ffbd1e4f866c5950a5ddc47"
+    },
+    {
+      "path": "dist/flow.js",
+      "sha256": "e75f488dba41a8ba1b15dc4c6b47c67fb5edbcbda86121da16c6e3063780bedb"
+    },
+    {
+      "path": "dist/hooks.d.ts",
+      "sha256": "5c465a26f859000caad676b60cf6d80237ddd42258d688b9a4b3f1fc3e319606"
+    },
+    {
+      "path": "dist/hooks.js",
+      "sha256": "fe245bd3f07ddbdceb1ed66403f9a40d72b8ae7cdaad14047aee2d21c086aa58"
+    },
+    {
+      "path": "dist/ics.d.ts",
+      "sha256": "1e13c02766fe3c8f156a3b4447e69b59e4ee5e6b5b144984a2a270998f432ab2"
+    },
+    {
+      "path": "dist/ics.js",
+      "sha256": "d7acb609ad0d8d5b5f561471917b4cb257a6cd0fdec614b14bc8cd0689ef83df"
+    },
+    {
+      "path": "dist/identityMigration.d.ts",
+      "sha256": "21311942e8d11994fb195b5605890a89ef2c33b3bff6e4d93f9f073e47dc630c"
+    },
+    {
+      "path": "dist/identityMigration.js",
+      "sha256": "d0ce640ce6731aef364466844d0eafdc7bc389ec93db78f342b2e07b40acc3b6"
+    },
+    {
+      "path": "dist/index.d.ts",
+      "sha256": "52005fdb960592cccc47a11ffc1995bde02fdde5966ba448b510360c52d99e24"
+    },
+    {
+      "path": "dist/index.js",
+      "sha256": "e84d836789d3d79829affb1a042c777e2de07578447e7e4262cede27c771bbb4"
+    },
+    {
+      "path": "dist/legacyChildReplacement.d.ts",
+      "sha256": "567a3df731433346fd823435f41925028124ca3a45a26aabde17c64360b44f5b"
+    },
+    {
+      "path": "dist/legacyChildReplacement.js",
+      "sha256": "93b92ddeb9fdeafa26cb5f55624194bd789cbeec1d33258caf6395ebb1106d49"
+    },
+    {
+      "path": "dist/locationTimezone.d.ts",
+      "sha256": "465374d6a6b503b49b8f1e5742d693c8955ae80d558984fda40b760647b3e8fd"
+    },
+    {
+      "path": "dist/locationTimezone.js",
+      "sha256": "a5e4f35e30a1a8064d51b1ecc30644dc97a3f0b382fb76f3a4243026d3ad76e3"
+    },
+    {
+      "path": "dist/log.d.ts",
+      "sha256": "5f228053d9f81e31d3e74a27ed85fb0af87601350973106e44ac212613a631b2"
+    },
+    {
+      "path": "dist/log.js",
+      "sha256": "f93e4b0921746b9d220d182259148e35f4a4b12e516420140222e1c0920a7f28"
+    },
+    {
+      "path": "dist/manifest.d.ts",
+      "sha256": "293e532297b717e9ecc2e18dfd00c0085979a1c90aa0dca5cd4fbeddbee3bd2e"
+    },
+    {
+      "path": "dist/manifest.js",
+      "sha256": "bb00b157c4555f435689ecb6e6c0a0d55b08952fcb4370be7332df87fbc249bc"
+    },
+    {
+      "path": "dist/materialize.d.ts",
+      "sha256": "6a4aad1157d30ec1351185ba5bdc753548ef8f67d172bb5d91c80c02b5336c4a"
+    },
+    {
+      "path": "dist/materialize.js",
+      "sha256": "76a3d0dfdc041cc472a9e10f82d836810d12e124381312c565bc98f8e21ed73b"
+    },
+    {
+      "path": "dist/messages.d.ts",
+      "sha256": "cbb6cfd8127671ce2f2bb79364d36df5369dde43c064b508df17c1f54be466d4"
+    },
+    {
+      "path": "dist/messages.js",
+      "sha256": "a36f6a6596c7d570086fe6b856d38f59cbeb3f071354146a03d9fc4bbda8f2fb"
+    },
+    {
+      "path": "dist/operatorActions.d.ts",
+      "sha256": "37dce0921275f0553e4b8a140ad2bdf77c8249a87211d58f6ca9875da9a949ee"
+    },
+    {
+      "path": "dist/operatorActions.js",
+      "sha256": "334d9112ca2aea9c1599f5bcc84ee95bd54d9d45c6798d6c3e517daa1294c132"
+    },
+    {
+      "path": "dist/pollReplacement.d.ts",
+      "sha256": "e995627b0b80d9528c986ded68e9c88e823204ce4a02712920be69fe82b5c7d2"
+    },
+    {
+      "path": "dist/pollReplacement.js",
+      "sha256": "1583c55f72a1eb2f7f3168b6bf32c400a05f334dbb70e6a16c71b2d33b75351c"
+    },
+    {
+      "path": "dist/profileRevision.d.ts",
+      "sha256": "d0299be6068026d3a65cc570d427ca3f7ad80a073a9bb587d76d09c83f37eda0"
+    },
+    {
+      "path": "dist/profileRevision.js",
+      "sha256": "be9239a7fd4eaf3dfd1c0f7ec90e1f143d9de74fd21774f2375b22b4e9829fba"
+    },
+    {
+      "path": "dist/provisioningRecovery.d.ts",
+      "sha256": "1280066ba373c17b9d4d87fb2cf804d00d9007e6bf58cda85dca677c18201c3a"
+    },
+    {
+      "path": "dist/provisioningRecovery.js",
+      "sha256": "7d800c229d7114d26e238a07e781d00317d5742c83687894a2ed39a3fe80f18a"
+    },
+    {
+      "path": "dist/provisioningTerminalNotice.d.ts",
+      "sha256": "c4097f6ae56b716f4426061052f6ad94a583efeaac2ebe2da94209175aad6d0a"
+    },
+    {
+      "path": "dist/provisioningTerminalNotice.js",
+      "sha256": "f45be31bb29a4bff67b68b687f14d9a4caa3f75dbb1d683a1b6b3343154b0930"
+    },
+    {
+      "path": "dist/questionKeyRenameRecovery.d.ts",
+      "sha256": "e0b68ef0fb20080ae023f7085af81f2af8da807265ecbf8eda9598cdc2c19904"
+    },
+    {
+      "path": "dist/questionKeyRenameRecovery.js",
+      "sha256": "a364191c075fe00c6684965eae8acd3681cf78eade7e576dcc9d8b05027952f3"
+    },
+    {
+      "path": "dist/recoverySweep.d.ts",
+      "sha256": "cd62651eeb51487c25c17df5479ec4405d29b59979ae0ab3d664dbcf9ba8e02a"
+    },
+    {
+      "path": "dist/recoverySweep.js",
+      "sha256": "07e1247d095fac988a98c6df62d32fa1174a5d032ad9ebb0d2200c99128eca28"
+    },
+    {
+      "path": "dist/runtime.d.ts",
+      "sha256": "33eb59cff9392ff55850346e59e8184c4b342921c3eb28b5cba1935d36330d33"
+    },
+    {
+      "path": "dist/runtime.js",
+      "sha256": "82daaa9c2e34beca757325a9c3800320042d924ae3ac5f0592318574a24d9841"
+    },
+    {
+      "path": "dist/service.d.ts",
+      "sha256": "c632c86a094a0c69228858a80b2d876379f7e250b930fd2245f5cb7498d3507a"
+    },
+    {
+      "path": "dist/service.js",
+      "sha256": "ae5103e89261fa8ec904630858c1aebd5768d5005a2706c8a085d3692812bdb6"
+    },
+    {
+      "path": "dist/serviceApi.d.ts",
+      "sha256": "0810dc1432a98fbea9d2e6bf8f328e1e236c34db5cc7e98f02dbce6cc4d0621c"
+    },
+    {
+      "path": "dist/serviceApi.js",
+      "sha256": "caaaee9210abbca35544c1907a43d24ef285a1afc2163bbdf7e563e7ad95aea1"
+    },
+    {
+      "path": "dist/span.d.ts",
+      "sha256": "538abeffce92c06c695ec24d0dd90cfb1fcf984b351ce92531f2c98e8c67d88d"
+    },
+    {
+      "path": "dist/span.js",
+      "sha256": "c591df771428ccfb77761d508d7466128dd9f7c686f418a97b2e9d63efda297d"
+    },
+    {
+      "path": "dist/startTimeAgreement.d.ts",
+      "sha256": "08ba9519d089a95b96813987ce6f8948d6b84b6abdfc3782080abe0ec13086c5"
+    },
+    {
+      "path": "dist/startTimeAgreement.js",
+      "sha256": "39a651385ada697320ae55109f31e339ed8f665764929172dd5e068f573fa83c"
+    },
+    {
+      "path": "dist/startTimeAgreementStore.d.ts",
+      "sha256": "baf7e7dba4bffcc071b7b1c9508e7e78783179fc88bd63f60473f5a45689e20c"
+    },
+    {
+      "path": "dist/startTimeAgreementStore.js",
+      "sha256": "e6a75a22c0f3f8b875faf4d6da2f372e3a7dcc71762a69904eae457b94616e55"
+    },
+    {
+      "path": "dist/store.d.ts",
+      "sha256": "3dcf79bc854c02782f3a37d745d8d36218a17b48de7b6a1b7fe18148a219e8a3"
+    },
+    {
+      "path": "dist/store.js",
+      "sha256": "924a5d40c54d4868bf459ee2803a4ece1c2952e6eac45886c5a011c940cb4b81"
+    },
+    {
+      "path": "dist/subgroups.d.ts",
+      "sha256": "0218b279371518076795b44798a96af73c0c40cfcbce06209e4ba6cdcd3115f0"
+    },
+    {
+      "path": "dist/subgroups.js",
+      "sha256": "47548c9bb9d9f9611069d4f4764d7e7bda84a7982d10b5a2813620aa240d0be3"
+    },
+    {
+      "path": "dist/suggestionConversion.d.ts",
+      "sha256": "f15c8f3abe0c6cdd4a5130949da32a8baa871c2512f5244f2412872b4c48fc1a"
+    },
+    {
+      "path": "dist/suggestionConversion.js",
+      "sha256": "537b97d377942ff6407017c1fa98ff5634855a9ed6bb7c945afff39748cd3f79"
+    },
+    {
+      "path": "dist/suggestionConversionStore.d.ts",
+      "sha256": "48f20bc28e6f967ded70017ba79cd826aa4be701593ef5db7237a422bbd741e0"
+    },
+    {
+      "path": "dist/suggestionConversionStore.js",
+      "sha256": "7aa98625f9e5db70ece24393d1a4b189c297cbadeddcc0e5192c4d84e19c40b1"
+    },
+    {
+      "path": "dist/template.d.ts",
+      "sha256": "e6d8595f715f382c2d45465956d2a315ed7f720a04e7766ace61ed63809e0275"
+    },
+    {
+      "path": "dist/template.js",
+      "sha256": "a28614d9e9ff89202780ec9865ce876c70ba27871482840c60cbe731ae75a56c"
+    },
+    {
+      "path": "dist/templateDates.d.ts",
+      "sha256": "c2e5d185a3a3d3ff5770f7e430ccad66741cd4cf4583f3f165db08382ee7cb3d"
+    },
+    {
+      "path": "dist/templateDates.js",
+      "sha256": "d914ee157c9ec937f13e6264beef70ce9fdde0fd6efd29d04102974b3cf7f056"
+    },
+    {
+      "path": "dist/templateMigration.d.ts",
+      "sha256": "a8ffe61e8e43a42ecbbba17e6e142f669dd77b80522a89d82e2370c4bdf60d48"
+    },
+    {
+      "path": "dist/templateMigration.js",
+      "sha256": "8b0de5db92c4ba6a578ee323f71cc9ee6fea5e26535bce1657c98436206ae026"
+    },
+    {
+      "path": "dist/templateVariables.d.ts",
+      "sha256": "ae915857ec2ed50b6d79c06c5c805bdf3ddfa98d24d1603552cd77d31bdc31ef"
+    },
+    {
+      "path": "dist/templateVariables.js",
+      "sha256": "6c82ce37d8633ff4e192f31e78e363c4f7fe37969ada612d7a54012b46f87f35"
+    },
+    {
+      "path": "dist/weather.d.ts",
+      "sha256": "4f3f5c2ad8d3631182d41aca0b159df756c9b846fe8ad04043185ff4ac052663"
+    },
+    {
+      "path": "dist/weather.js",
+      "sha256": "69a3d4b7b3e875ecde56c2da2ced646f06c1116d54868602e110c6c422a0ecca"
+    },
+    {
+      "path": "dist/workflowActionApi.d.ts",
+      "sha256": "94d240818e8fced231b87db26480ea9a7c957fed2de5ff610e9a6c327771c64f"
+    },
+    {
+      "path": "dist/workflowActionApi.js",
+      "sha256": "68178d3aaed9bd75a57ceb49e55c30c472a67b2c1fdeeb167677ded49b0d2d42"
+    },
+    {
+      "path": "dist/workflowActions.d.ts",
+      "sha256": "1923d14053464c60de9d45032a6c53f2293cab8d45d9e535c940100a03d0051b"
+    },
+    {
+      "path": "dist/workspaceCalendarContract.d.ts",
+      "sha256": "35a404c5233594f3d561108f192e9f014fab5920ba3a9b840da14bee73e88d73"
+    },
+    {
+      "path": "dist/workspaceCalendarContract.js",
+      "sha256": "6fd47ad4059890fd01bf9465712b0175780b275710c28baca24d58826fc7b4a6"
+    },
+    {
+      "path": "dist/workspaceCalendarPublication.d.ts",
+      "sha256": "113b3e73525a3632a95c0a611c41508360f8f6067d08b571851dfe6be7240318"
+    },
+    {
+      "path": "dist/workspaceCalendarPublication.js",
+      "sha256": "40617e13246740b7a8897d883c8ec32cc9719e40b8a6a3383771929561b6901a"
+    }
+  ]
+}

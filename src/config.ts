@@ -269,8 +269,7 @@ const eventProfileObjectSchema = z.object({
     titleTemplate: optionalAuthoredTextSchema.optional(),
     descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
-      sendOnPollPublished: z.boolean().default(false),
-      sendOnUnplannedCreated: z.boolean().default(false),
+      enabled: z.boolean().default(false),
       template: authoredTextSchema.default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
     }).strict().default({})
   }).strict().default({}),
@@ -532,8 +531,7 @@ export const defaultClimbingEventProfile: EventProfile = {
     durationMinutes: 240,
     titleTemplate: DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE,
     hint: {
-      sendOnPollPublished: false,
-      sendOnUnplannedCreated: false,
+      enabled: false,
       template: DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE
     }
   },
@@ -911,8 +909,19 @@ function normalizeEventCalendarInput(input: unknown): unknown {
     return input;
   }
   const durationMinutes = input.durationMinutes;
+  const hint = isRecord(input.hint) ? input.hint : undefined;
+  const normalizedHint = hint ? (() => {
+    const { sendOnPollPublished, sendOnUnplannedCreated, ...current } = hint;
+    return {
+      ...current,
+      enabled: current.enabled === undefined
+        ? sendOnPollPublished === true || sendOnUnplannedCreated === true
+        : current.enabled
+    };
+  })() : undefined;
   return {
     ...input,
+    ...(normalizedHint ? { hint: normalizedHint } : {}),
     ...(typeof durationMinutes === 'number' && Number.isInteger(durationMinutes) &&
       durationMinutes >= MIN_DAY_TRIP_DURATION_MINUTES && durationMinutes <= 7 * 24 * 60
       ? { durationMinutes: Math.min(durationMinutes, MAX_DAY_TRIP_DURATION_MINUTES) }

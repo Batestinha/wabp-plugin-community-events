@@ -35,6 +35,7 @@ import { sendEventCalendarHint } from './calendarHint';
 import { eventLifecycleCompleteAt, formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
 import {
   createEventFlowDefinition,
@@ -124,6 +125,7 @@ import {
   configuredEventCalendarOwnership,
   eventsDatabase,
   getEvent,
+  getUnplannedEventFinalization,
   listEventsBySubgroupChatId,
   insertEvent,
   listCancellableEvents,
@@ -1719,7 +1721,7 @@ async function replaceOpenEventPollLifecycle(input: {
     targetGroupTitle: input.materialized.groupTitle,
     calendarId: calendarId ?? '',
     ...(announcementIntent ? { announcementDeliveryKey: announcementIntent.deliveryKey } : {}),
-    ...(input.profile.calendar.hint.sendOnPollPublished && input.event.announcementGroupWid
+    ...(input.profile.calendar.hint.enabled && input.event.announcementGroupWid
       ? {
           calendarHintDeliveryKey: input.operationId,
           calendarHintLocale: input.locale
@@ -3933,18 +3935,28 @@ async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Pro
           closeAt: formatEventDateTime(materialized.closeAt, input.draft.timezone, input.draft.locale)
         }), { idempotencyKey: `community-events:event-creation:${eventId}:poll-deadline-notice` });
       }
-      const result = await createUnplannedEventLifecycle({
-        context: input.context,
-        runtime: input.runtime,
-        activeTransport: input.activeTransport,
-        db,
-        eventId,
-        draft: input.draft,
-        profile: input.profile,
-        announcementGroupWid: input.announcementGroupWid,
-        materialized,
-        now
-      });
+      let pendingNotice: Promise<void> | undefined;
+      const pendingTimer = setTimeout(() => {
+        pendingNotice = sendUnplannedEventProgressNotice(input, eventDb, eventId);
+      }, 60_000);
+      let result: CreateUnplannedEventLifecycleResult;
+      try {
+        result = await createUnplannedEventLifecycle({
+          context: input.context,
+          runtime: input.runtime,
+          activeTransport: input.activeTransport,
+          db,
+          eventId,
+          draft: input.draft,
+          profile: input.profile,
+          announcementGroupWid: input.announcementGroupWid,
+          materialized,
+          now
+        });
+      } finally {
+        clearTimeout(pendingTimer);
+        await pendingNotice;
+      }
       if (
         result.status !== 'completed' &&
         result.creatorMembershipPauseKind &&
@@ -4018,7 +4030,11 @@ async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Pro
                   title: result.subgroupTitle,
                   eventId: result.eventId
                 })
-            : input.t('official.community-events.unplannedPublished')
+            : result.status === 'finalization_pending'
+              ? input.t('official.community-events.unplannedFinalizationPending', {
+                  eventId: result.eventId
+                })
+              : input.t('official.community-events.unplannedPublished')
         );
       }
       return;
@@ -4534,7 +4550,7 @@ async function eventProfileSnapshotIsCurrent(input: {
 type CreateUnplannedEventLifecycleResult =
   | { status: 'completed' }
   | {
-      status: 'recovery_scheduled' | 'operator_required';
+      status: 'recovery_scheduled' | 'operator_required' | 'finalization_pending';
       eventId: string;
       subgroupChatId?: string | undefined;
       subgroupTitle: string;
@@ -4645,7 +4661,7 @@ async function createUnplannedEventLifecycle(input: {
     }
   });
 
-  await attemptUnplannedEventFinalization({
+  const finalization = await attemptUnplannedEventFinalization({
     context: input.context,
     runtime: input.runtime,
     activeTransport: input.activeTransport,
@@ -4657,7 +4673,37 @@ async function createUnplannedEventLifecycle(input: {
     trigger: 'unplanned_created',
     now: input.now
   });
-  return { status: 'completed' };
+  return finalization.status === 'completed' || finalization.status === 'already_completed'
+    ? { status: 'completed' }
+    : { status: 'finalization_pending', eventId: event.id, subgroupTitle: event.subgroupTitle || event.groupTitle };
+}
+
+async function sendUnplannedEventProgressNotice(
+  input: ConfirmedEventPublicationInput,
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string
+): Promise<void> {
+  try {
+    const event = getEvent(db, eventId);
+    if (!event || event.origin !== 'unplanned') return;
+    const finalization = getUnplannedEventFinalization(db, eventId);
+    if (event.eventStatus === 'active' && finalization?.status === 'completed') return;
+    const key = !event.subgroupChatId
+      ? 'official.community-events.unplannedStillWorkingCreate'
+      : event.eventStatus === 'active'
+        ? 'official.community-events.unplannedStillWorkingAnnouncement'
+        : event.groupLifecycleStatus === 'poll_closed'
+          ? 'official.community-events.unplannedStillWorkingLink'
+          : 'official.community-events.unplannedStillWorkingSetup';
+    await input.activeTransport.sendText(input.responseChatId, input.t(key, { title: event.groupTitle, eventId }), { idempotencyKey: `community-events:event-creation:${eventId}:60-second-progress` });
+    appendEventLog(db, {
+      eventId,
+      action: 'events.unplanned.progress_notice_sent',
+      metadata: { key, elapsedThresholdMs: 60_000 }
+    });
+  } catch (error) {
+    input.context.logger?.warn({ error, eventId }, 'Unable to deliver event creation progress notice');
+  }
 }
 
 type ProvisionUnplannedEventSubgroupResult =
@@ -4913,7 +4959,9 @@ async function provisionUnplannedEventSubgroup(input: {
       : created;
     const recoveryDisposition = isManagedCommunitySubgroupProvisioningError(error)
       ? error.recoveryDisposition
-      : undefined;
+      : knownChild && isKnownChildCompletionTimeout(error)
+        ? 'verify_only'
+        : undefined;
     const creatorMembershipPauseKind = eventCreatorMembershipPauseKindForFailure(error);
     const retryableLinkDisposition = recoveryDisposition === 'verify_only' ||
       recoveryDisposition === 'creator_membership_verify_only' ||
@@ -5096,6 +5144,7 @@ async function provisionUnplannedEventSubgroup(input: {
     try {
       await input.runtime.enqueuePluginJob({
         jobName: EVENTS_JOBS.provisioningRecovery,
+        executionClass: 'interactive',
         scopeId: failedEvent.scopeId,
         ...(failedEvent.groupId ? { groupId: failedEvent.groupId } : {}),
         ...(failedEvent.groupWid ? { groupWid: failedEvent.groupWid } : {}),

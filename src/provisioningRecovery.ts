@@ -31,6 +31,7 @@ import {
 } from './subgroups';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
@@ -301,6 +302,7 @@ export async function enqueueEventPreCreateProvisioningRecovery(input: {
     await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
+      executionClass: 'interactive',
       scopeId: event.scopeId,
       ...(event.groupId ? { groupId: event.groupId } : {}),
       ...(event.groupWid ? { groupWid: event.groupWid } : {}),
@@ -548,7 +550,9 @@ export async function resumeEventProvisioningFromOperator(
             stage: managedFailure.stage,
             mutationDisposition: managedFailure.mutationDisposition
           }
-        : {})
+        : isKnownChildCompletionTimeout(error)
+          ? { recoveryDisposition: 'verify_only' }
+          : {})
     });
   }
 }
@@ -685,6 +689,7 @@ async function settleOperatorKnownChildProvisioningClaim(input: {
     await enqueuePluginJob(input.context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
+      executionClass: 'interactive',
       scopeId: event.scopeId,
       ...(event.groupId ? { groupId: event.groupId } : {}),
       ...(event.groupWid ? { groupWid: event.groupWid } : {}),
@@ -1380,6 +1385,7 @@ export async function scheduleUnplannedEventFinalizationRetry(input: {
   try {
     await input.runtime.enqueuePluginJob({
       jobName: EVENTS_JOBS.unplannedFinalization,
+      executionClass: 'interactive',
       scopeId: input.event.scopeId,
       ...(input.event.groupId ? { groupId: input.event.groupId } : {}),
       ...(input.event.groupWid ? { groupWid: input.event.groupWid } : {}),

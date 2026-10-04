@@ -209,7 +209,7 @@ export interface EventUpdateDraft {
 }
 
 interface PendingEventEditSelection {
-  operation?: 'edit' | 'poll_close' | undefined;
+  operation?: 'edit' | 'poll_close' | 'poll_close_confirm' | undefined;
   id: string;
   responseChatId: string;
   scopeId: string;
@@ -297,6 +297,8 @@ const EVENT_EDIT_SELECTION_PURPOSE = 'official.community-events.edit.select';
 const EVENT_EDIT_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-edit-selection';
 const EVENT_EDIT_FREE_TEXT_OPTION_ID = 'event-query';
 const EVENT_EDIT_SELECTION_TTL_SECONDS = 30 * 60;
+const EVENT_POLL_CLOSE_CONFIRM_OPTION_ID = 'confirm';
+const EVENT_POLL_CLOSE_CANCEL_OPTION_ID = 'cancel';
 const EVENT_UPDATE_CONFLICT_ERROR = 'event_update_conflict';
 const EVENT_POLL_PUBLICATION_OBSERVATION_MS = 35_000;
 const EVENT_POLL_PUBLICATION_OBSERVATION_INTERVAL_MS = 1_000;
@@ -647,8 +649,90 @@ async function startEventPollClose(context: PluginOperationContext, ctx: Command
   if (candidates.length > 1) {
     return startEventEditSelection(context, ctx, { scopeId, actor, query, candidates, operation: 'poll_close' });
   }
-  const result = await closeSelectedEventPoll(runtime, candidates[0]!, actor);
-  return { handled: true, text: ctx.t(result.messageKey, result.params) };
+  return startEventPollCloseConfirmation(context, ctx, candidates[0]!, actor);
+}
+
+async function startEventPollCloseConfirmation(
+  context: PluginOperationContext,
+  ctx: CommandContext,
+  event: StoredEventRecord,
+  actor: EventAuthorizationActor
+) {
+  const runtime = requireOfficialCommandRuntime(context);
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
+  const pending: PendingEventEditSelection = {
+    operation: 'poll_close_confirm',
+    id: randomUUID(),
+    responseChatId: actor.deliveryChatId,
+    scopeId: event.scopeId,
+    actorIdentityId: actor.identityId,
+    actorWid: actor.canonicalWid,
+    actorDeliveryChatId: actor.deliveryChatId,
+    actorMentionWid: actor.mentionWid,
+    actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+    locale: ctx.locale,
+    query: event.id,
+    candidateEventIds: [event.id],
+    originChatId: ctx.message.chatId,
+    originContext: ctx.message.context,
+    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
+    createdAt: new Date().toISOString()
+  };
+  try {
+    await promptEventPollCloseConfirmation({ context, runtime, pending, event, t: ctx.t });
+  } catch {
+    return { handled: true, text: ctx.t('official.community-events.pollClose.confirmStartFailed') };
+  }
+  if (ctx.message.context !== 'group') {
+    return { handled: true, response: { kind: 'none' as const } };
+  }
+  return {
+    handled: true,
+    text: ctx.t(pending.privateDeliveryFallback
+      ? 'official.community-events.edit.selectionStartedInGroupFallback'
+      : 'official.community-events.edit.selectionStartedPrivate')
+  };
+}
+
+async function promptEventPollCloseConfirmation(input: {
+  context: PluginOperationContext;
+  runtime: OfficialPluginCommandRuntime;
+  pending: PendingEventEditSelection;
+  event: StoredEventRecord;
+  t: CommandContext['t'];
+}): Promise<void> {
+  await rememberActiveEventEditSelection(input.runtime, input.pending);
+  try {
+    await input.context.flowEngine.promptChoice({
+      purpose: EVENT_EDIT_SELECTION_PURPOSE,
+      subjectType: 'CommunityEventPollCloseConfirmation',
+      subjectId: input.pending.id,
+      question: input.t('official.community-events.pollClose.confirm', {
+        title: eventDisplayTitle(input.event),
+        eventId: input.event.id
+      }),
+      options: [
+        { id: EVENT_POLL_CLOSE_CONFIRM_OPTION_ID, label: input.t('official.community-events.pollClose.confirmYes') },
+        { id: EVENT_POLL_CLOSE_CANCEL_OPTION_ID, label: input.t('official.community-events.pollClose.confirmNo') }
+      ],
+      recipientWids: [input.pending.responseChatId],
+      eligibleVoterIdentityIds: [input.pending.actorIdentityId],
+      selectionRule: 'SINGLE',
+      minSelections: 1,
+      maxSelections: 1,
+      ...(input.pending.privateDeliveryFallback
+        ? { privateDeliveryFallback: input.pending.privateDeliveryFallback }
+        : {}),
+      questionSendOptions: {
+        idempotencyKey: `community-events:event-poll-close-confirm:${input.pending.id}`
+      },
+      expiresAt: new Date(Date.now() + EVENT_EDIT_SELECTION_TTL_SECONDS * 1000),
+      t: input.t
+    });
+  } catch (error) {
+    await clearActiveEventEditSelection(input.runtime, input.pending);
+    throw error;
+  }
 }
 
 async function closeSelectedEventPoll(
@@ -3204,6 +3288,33 @@ function registerEventEditSelectionHandler(context: PluginOperationContext): voi
     }
 
     const selected = lock.selectedOptions[0];
+    if (pending.operation === 'poll_close_confirm') {
+      let messageKey: string;
+      let params: Record<string, string> | undefined;
+      if (selected?.id === EVENT_POLL_CLOSE_CONFIRM_OPTION_ID) {
+        const eventId = pending.candidateEventIds[0];
+        const event = eventId ? getEvent(eventsDatabase(runtime.databases), eventId) : undefined;
+        if (!event || event.scopeId !== pending.scopeId || !eventPollIsOpen(event)) {
+          messageKey = 'official.community-events.pollClose.unavailable';
+        } else {
+          const result = await closeSelectedEventPoll(runtime, event, eventEditSelectionActor(pending));
+          messageKey = result.messageKey;
+          params = result.params;
+        }
+      } else if (selected?.id === EVENT_POLL_CLOSE_CANCEL_OPTION_ID) {
+        messageKey = 'official.community-events.pollClose.cancelled';
+      } else {
+        messageKey = 'official.community-events.pollClose.unavailable';
+      }
+      await clearActiveEventEditSelection(runtime, pending);
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t(messageKey, params),
+        { idempotencyKey: `community-events:event-poll-close-confirm:${pending.id}:terminal` }
+      );
+      await context.flowEngine.acknowledgePromptLock(lock.flowPromptId);
+      return true;
+    }
     if (selected?.id === EVENT_EDIT_FREE_TEXT_OPTION_ID) {
       const query = selected.label.trim();
       if (!query || isCommandLikeLocationReply(query)) {
@@ -3315,8 +3426,31 @@ async function completeEventEditSelection(input: {
     if (!event || event.scopeId !== input.pending.scopeId || !input.pending.candidateEventIds.includes(event.id)) {
       return terminal('official.community-events.pollClose.noEvents');
     }
-    const result = await closeSelectedEventPoll(input.runtime, event, actor);
-    return terminal(result.messageKey, result.params);
+    await clearActiveEventEditSelection(input.runtime, input.pending);
+    await input.context.flowEngine.acknowledgePromptLock(input.lockFlowPromptId);
+    const pending: PendingEventEditSelection = {
+      ...input.pending,
+      operation: 'poll_close_confirm',
+      id: randomUUID(),
+      candidateEventIds: [event.id],
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await promptEventPollCloseConfirmation({
+        context: input.context,
+        runtime: input.runtime,
+        pending,
+        event,
+        t: input.t
+      });
+    } catch {
+      await input.activeTransport.sendText(
+        input.pending.responseChatId,
+        input.t('official.community-events.pollClose.confirmStartFailed'),
+        { idempotencyKey: `community-events:event-poll-close-confirm:${pending.id}:failed` }
+      );
+    }
+    return true;
   }
 
   if (

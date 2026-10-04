@@ -4,7 +4,7 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "coreApiRange": "^0.3.7",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -351,7 +351,7 @@
       },
       {
         "id": "event-edit-selection",
-        "description": "Pending interactive event selection before an event update or creator poll close.",
+        "description": "Pending interactive event selection or confirmation before an event update or creator poll close.",
         "mode": "plugin-handler",
         "scope": "actor-chat",
         "commands": [

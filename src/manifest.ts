@@ -49,7 +49,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.17.1',
+  version: '0.17.2',
   coreApiRange: '^0.3.7',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -243,7 +243,7 @@ export const eventsManifest: PluginManifest = {
       },
       {
         id: 'event-edit-selection',
-        description: 'Pending interactive event selection before an event update or creator poll close.',
+        description: 'Pending interactive event selection or confirmation before an event update or creator poll close.',
         mode: 'plugin-handler',
         scope: 'actor-chat',
         commands: ['/event edit', '/event poll'],

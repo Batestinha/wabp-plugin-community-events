@@ -41,7 +41,8 @@ def build_release():
     with tempfile.TemporaryDirectory(prefix='wabs-release-') as temporary:
         result = subprocess.run([npm, 'pack', '--ignore-scripts', '--pack-destination', temporary, '--json'], cwd=root,
                                 capture_output=True, text=True, encoding='utf-8', check=True)
-        info = json.loads(result.stdout)[0]
+        pack_result = json.loads(result.stdout)
+        info = pack_result[0] if isinstance(pack_result, list) else next(iter(pack_result.values()))
         files = {}
         with tarfile.open(Path(temporary) / info['filename'], 'r:gz') as archive:
             for member in archive.getmembers():

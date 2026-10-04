@@ -2,7 +2,7 @@
 
 Community events, attendance polls, subgroup creation and recovery, calendar publication, and event weather reports.
 
-Standalone WABS package `official.community-events` version `0.17.6`, requiring WABP core API `^0.3.22`. It retains the plugin ID, account-owned `events` database, data version 18, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
+Standalone WABS package `official.community-events` version `0.17.6`, requiring WABP core API `^0.3.10`. It retains the plugin ID, account-owned `events` database, data version 18, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
 
 Workflow discovery resolves “this event” only from a unique, authorized event whose subgroup matches the invoking chat, independently of title, search and pagination. Explicit event selections remain authoritative. Read-only `locationQuery` discovery returns validated geocoder-backed location candidates and timezones; ambiguous candidates still require a choice before preparation.
 

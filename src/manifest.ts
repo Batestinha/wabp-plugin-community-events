@@ -50,7 +50,7 @@ export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   version: '0.17.6',
-  coreApiRange: '^0.3.22',
+  coreApiRange: '^0.3.10',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     changedActionId: 'official.community-events.recoverJobs',

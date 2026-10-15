@@ -88,7 +88,7 @@ test('an empty installed account finalizes identities without platform identity 
   const db = open(':memory:');
   try {
     for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
-    await plugin.lifecycle.migrateData({ databases: { open: () => db }, logger: { info() {} } });
+    await plugin.lifecycle.migrateData({ databases: { open: () => db }, logger: { info() {} }, migrateConfiguration: async (key, transform) => { assert.match(key, /^saved-event-text-v1-/); assert.deepEqual(transform({ scopes: [], layers: [] }), []); return { changed: 0, backupKey: key }; } });
     assert.equal(db.get('SELECT count(*) AS count FROM event_records').count, 0);
     assert.deepEqual(db.all('PRAGMA table_info(event_votes)').filter(column => column.pk).map(column => column.name), ['event_id', 'voter_identity_id']);
   } finally { db.close(); }
@@ -99,7 +99,7 @@ test('later template upgrades preserve previously finalized account identities w
   try {
     for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
     insertEvent(db, fixture());
-    const context = { databases: { open: () => db }, logger: { info() {} } };
+    const context = { databases: { open: () => db }, logger: { info() {} }, migrateConfiguration: async (key, transform) => { assert.match(key, /^saved-event-text-v1-/); assert.deepEqual(transform({ scopes: [], layers: [] }), []); return { changed: 0, backupKey: key }; } };
     await plugin.lifecycle.migrateData({ ...context, resolvePersistedIdentityId: async wid => {
       assert.equal(wid, 'creator@lid'); return 'fixture-actor';
     } });
@@ -176,7 +176,14 @@ test('custom event profiles, cleanup policy, calendar resources and stored timez
   stored.eventProfiles[0].label = 'Custom profile';
   stored.calendars[0].label = 'Custom calendar';
   const original = JSON.stringify(stored);
-  assert.deepEqual(plugin.manifest.configSchema.parse(stored), stored);
+  const saved = plugin.manifest.configSchema.parse(stored);
+  const hydrated = parseEventsConfig(saved);
+  delete hydrated.messages;
+  delete hydrated.subgroupSuggestionConversion.preFlowNotice.textVersion;
+  for (const profile of hydrated.eventProfiles) delete profile.textVersion;
+  const expected = structuredClone(stored);
+  expected.eventProfiles = require('../dist/config').localizeDefaultEventProfiles(expected.eventProfiles, key => plugin.manifest.defaultMessages[key]);
+  assert.deepEqual(hydrated, expected);
   assert.equal(JSON.stringify(stored), original);
   assert.deepEqual(plugin.manifest.scopeClock.timezoneConfigPaths, ['timezone']);
   assert.equal(plugin.manifest.scopeClock.providesGroupTimezones, true);
@@ -193,7 +200,7 @@ test('installed SDK errors retain creation certainty and do not opt uncertain ef
 });
 
 test('all migrations and translations are retained and vendored artifacts reconstruct exactly', () => {
-  assert.equal(require('../wa-plugin.json').dataVersion, '20');
+  assert.equal(require('../wa-plugin.json').dataVersion, '21');
   assert.equal(migrations.length, 44);
   for (const name of migrations) assert.equal(fs.readFileSync(path.join('migrations/events', name), 'utf8'), fs.readFileSync(path.join('src/migrations/events', name), 'utf8'));
   for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key]?.trim(), key);

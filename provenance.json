@@ -6,13 +6,13 @@
   "sourceTreeSha": "22071bc890a3fb14a6d3515c1015e97456e3e421",
   "extractedHistoryCommit": "af7a58a482cd2574b84a9f6c86321720bf5103bf",
   "sdk": {
-    "version": "0.3.17",
-    "path": "vendor/wabs-plugin-sdk-0.3.17-a3c0fdba6dd6.tgz",
-    "sha256": "a3c0fdba6dd626cbbe4a4245eeb591ee5107163557dab83e8a789a5256340a30",
+    "version": "0.3.25",
+    "path": "vendor/wabs-plugin-sdk-0.3.25.tgz",
+    "sha256": "deb786e63d9f5b8aeff5cc93cbd6423e131cbfcc87ae358c2fc919d00b399b1e",
     "sourceDirectory": "packages/plugin-sdk",
-    "sourceCommit": "5ad7e73482f955850b8dffd1d5d87620b2719668"
+    "sourceCommit": "ccd4e015ab49cc1ac2631d17a76a20c93fa33c8f"
   },
   "vendoredContracts": "contracts/provenance.json",
-  "previousStandaloneCommit": "e45df4e716eaaf02b79116dd2da30d4062318153",
+  "previousStandaloneCommit": "b228f202fb0b81b3c03a4913cd71cb08664968c8",
   "sourceImportTransform": "Replace relative packages/plugin-sdk/src imports with @wabs/plugin-sdk subpaths; retain other source bytes."
 }

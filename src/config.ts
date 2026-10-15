@@ -1,3 +1,4 @@
+import { configuredMessagesSchema, resolveLocalizedTextTree } from '@wabs/plugin-sdk/configuration';
 import { eventTemplateDefinition, eventMessageMentions } from './template';
 import { validateValueTemplate } from '@wabs/plugin-sdk/templates';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
@@ -231,6 +232,7 @@ export const eventWeatherConfigSchema = z.object({
 }).strict().default({});
 
 const eventProfileObjectSchema = z.object({
+  textVersion: z.literal(1).optional(),
   id: z.string().trim().regex(/^[a-z][a-z0-9-]*$/),
   label: z.string().trim().min(1),
   permissionSuffix: z.string().trim().regex(/^[a-z][a-z0-9-]*$/).optional(),
@@ -269,8 +271,7 @@ const eventProfileObjectSchema = z.object({
     titleTemplate: optionalAuthoredTextSchema.optional(),
     descriptionTemplate: optionalAuthoredTextSchema.optional(),
     hint: z.object({
-      sendOnPollPublished: z.boolean().default(false),
-      sendOnUnplannedCreated: z.boolean().default(false),
+      enabled: z.boolean().default(false),
       template: authoredTextSchema.default(DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE)
     }).strict().default({})
   }).strict().default({}),
@@ -532,8 +533,7 @@ export const defaultClimbingEventProfile: EventProfile = {
     durationMinutes: 240,
     titleTemplate: DEFAULT_EVENT_CALENDAR_TITLE_TEMPLATE,
     hint: {
-      sendOnPollPublished: false,
-      sendOnUnplannedCreated: false,
+      enabled: false,
       template: DEFAULT_EVENT_CALENDAR_HINT_TEMPLATE
     }
   },
@@ -576,6 +576,7 @@ const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
   });
 
 export const eventSubgroupSuggestionPreFlowNoticeConfigSchema = z.object({
+  textVersion: z.literal(1).optional(),
   enabled: z.boolean().default(true),
   template: eventSubgroupSuggestionPreFlowNoticeTemplateSchema.default(
     DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE
@@ -588,6 +589,7 @@ export const eventSubgroupSuggestionConversionConfigSchema = z.object({
 }).strict().default({});
 
 const eventsConfigObjectSchema = z.object({
+  messages: configuredMessagesSchema.optional(),
   enabled: z.boolean().default(false),
   timezone: z.string().trim().min(1).default('UTC'),
   subgroupSuggestionConversion: eventSubgroupSuggestionConversionConfigSchema,
@@ -663,13 +665,14 @@ export type EventSubgroupSuggestionConversionConfig = z.infer<typeof eventSubgro
 export type EventsConfig = z.infer<typeof eventsConfigSchema>;
 
 export function parseEventsConfig(input: unknown): EventsConfig {
-  return eventsConfigSchema.parse(input);
+  return eventsConfigSchema.parse(resolveLocalizedTextTree(input, 'en'));
 }
 
 export function localizeSubgroupSuggestionPreFlowNotice(
   notice: EventSubgroupSuggestionPreFlowNoticeConfig,
   t: TranslateFn
 ): EventSubgroupSuggestionPreFlowNoticeConfig {
+  if (notice.textVersion) return notice;
   return {
     ...notice,
     template: localizeIfDefault(
@@ -681,7 +684,7 @@ export function localizeSubgroupSuggestionPreFlowNotice(
 }
 
 export function localizeDefaultEventProfiles(profiles: EventProfile[], t: TranslateFn): EventProfile[] {
-  return profiles.map((profile) => isDefaultClimbingEventProfile(profile)
+  return profiles.map((profile) => !profile.textVersion && isDefaultClimbingEventProfile(profile)
     ? localizedDefaultClimbingEventProfile(profile, t)
     : profile);
 }
@@ -911,8 +914,19 @@ function normalizeEventCalendarInput(input: unknown): unknown {
     return input;
   }
   const durationMinutes = input.durationMinutes;
+  const hint = isRecord(input.hint) ? input.hint : undefined;
+  const normalizedHint = hint ? (() => {
+    const { sendOnPollPublished, sendOnUnplannedCreated, ...current } = hint;
+    return {
+      ...current,
+      enabled: current.enabled === undefined
+        ? sendOnPollPublished === true || sendOnUnplannedCreated === true
+        : current.enabled
+    };
+  })() : undefined;
   return {
     ...input,
+    ...(normalizedHint ? { hint: normalizedHint } : {}),
     ...(typeof durationMinutes === 'number' && Number.isInteger(durationMinutes) &&
       durationMinutes >= MIN_DAY_TRIP_DURATION_MINUTES && durationMinutes <= 7 * 24 * 60
       ? { durationMinutes: Math.min(durationMinutes, MAX_DAY_TRIP_DURATION_MINUTES) }

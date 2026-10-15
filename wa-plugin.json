@@ -4,8 +4,8 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.18.0",
-  "coreApiRange": "^0.3.13",
+  "version": "0.19.0",
+  "coreApiRange": "^0.3.14",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -512,8 +512,7 @@
         },
         "ui": {
           "helpText": "Enable guided event creation in this scope.",
-          "widget": "toggle",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "toggle"
         },
         "dangerous": false,
         "sensitivity": {
@@ -541,8 +540,7 @@
         },
         "ui": {
           "helpText": "IANA timezone used when combining event date and time answers.",
-          "widget": "select",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "select"
         },
         "dangerous": false,
         "sensitivity": {
@@ -589,8 +587,7 @@
               "value": "auto_convert",
               "label": "Automatically convert"
             }
-          ],
-          "settingsPath": "/plugins/community-events/settings"
+          ]
         },
         "dangerous": true,
         "confirmation": {
@@ -621,8 +618,7 @@
         },
         "ui": {
           "helpText": "Send a private explanation to the suggestion creator immediately before the fresh event-creation flow prompt.",
-          "widget": "toggle",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "toggle"
         },
         "dangerous": false,
         "sensitivity": {
@@ -641,17 +637,46 @@
         "path": "subgroupSuggestionConversion.preFlowNotice.template",
         "id": "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template",
         "label": "Suggestion refusal notice text",
-        "description": "Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.",
+        "description": "Explain suggestion conversion before starting event creation.",
         "section": "Community Events",
         "order": 50,
         "schema": {
           "type": "object"
         },
         "ui": {
-          "widget": "builder",
-          "builderId": "official.community-events.messages.v1",
-          "hideWhenBuilderMounted": true,
-          "helpText": "Edit language variants in Messages."
+          "widget": "localized-text",
+          "helpText": "Explain suggestion conversion before starting event creation.",
+          "templateVariables": [
+            {
+              "token": "creatorDisplayName",
+              "label": "Suggestion creator",
+              "sampleValue": "Ana"
+            }
+          ],
+          "templateDialect": "conditional-values-v2",
+          "templateActivation": "when-used",
+          "templateConditionVariables": [
+            {
+              "token": "creatorDisplayName",
+              "label": "Suggestion creator"
+            }
+          ],
+          "templateEmptyResult": "reject",
+          "templateMentions": {
+            "people": true,
+            "groups": true,
+            "all": false,
+            "targets": [
+              {
+                "id": "creator",
+                "label": "Event creator"
+              },
+              {
+                "id": "currentGroup",
+                "label": "Current group"
+              }
+            ]
+          }
         },
         "dangerous": false,
         "sensitivity": {
@@ -706,7 +731,15 @@
             "publish": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish",
             "rotateToken": "/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token"
           },
-          "settingsPath": "/plugins/community-events/settings"
+          "builderTextSlots": [
+            "creation",
+            "questions",
+            "location",
+            "poll",
+            "group",
+            "start-time",
+            "weather"
+          ]
         },
         "dangerous": false,
         "sensitivity": {
@@ -755,7 +788,6 @@
             ]
           },
           "hideWhenBuilderMounted": false,
-          "settingsPath": "/plugins/community-events/settings",
           "builderEndpoints": {
             "options": "/api/v1/plugins/official.community-events/profiles/:scopeId/options",
             "renameQuestion": "/api/v1/plugins/official.community-events/profiles/:scopeId/questions/rename",
@@ -796,8 +828,7 @@
             "options": "/api/v1/plugins/official.community-events/adoptions/:scopeId/options",
             "adopt": "/api/v1/plugins/official.community-events/adoptions"
           },
-          "hideWhenBuilderMounted": true,
-          "settingsPath": "/plugins/community-events/settings"
+          "hideWhenBuilderMounted": true
         },
         "dangerous": false,
         "sensitivity": {
@@ -827,8 +858,7 @@
         },
         "ui": {
           "helpText": "Retry delays, in minutes, for subgroup transcript capture or deletion failures.",
-          "widget": "number",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "number"
         },
         "dangerous": false,
         "sensitivity": {
@@ -855,8 +885,7 @@
         },
         "ui": {
           "helpText": "Most recent subgroup transcript capture or deletion failure.",
-          "widget": "text",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "text"
         },
         "dangerous": false,
         "sensitivity": {
@@ -883,8 +912,7 @@
         },
         "ui": {
           "helpText": "ISO timestamp for the most recent subgroup cleanup failure.",
-          "widget": "text",
-          "settingsPath": "/plugins/community-events/settings"
+          "widget": "text"
         },
         "dangerous": false,
         "sensitivity": {
@@ -920,7 +948,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 0,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.edit.description",
@@ -928,7 +961,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 10,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.cancel.title",
@@ -936,7 +974,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 20,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.cancel.description",
@@ -944,7 +987,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 30,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.edit.summary",
@@ -956,7 +1004,12 @@
                 "changes",
                 "event",
                 "timezone"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.cancel.summary",
@@ -968,7 +1021,12 @@
                 "calendar",
                 "event",
                 "messages"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.deleteMessages",
@@ -976,7 +1034,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 60,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.keepMessages",
@@ -984,7 +1047,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 70,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.unavailable",
@@ -992,7 +1060,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 80,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.noChanges",
@@ -1000,7 +1073,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 90,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.invalidInput",
@@ -1008,7 +1086,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 100,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.locationRequired",
@@ -1016,7 +1099,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 110,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.fixedLocation",
@@ -1024,7 +1112,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 120,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.conflict",
@@ -1032,7 +1125,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 130,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.cancelled",
@@ -1042,7 +1140,12 @@
               "order": 140,
               "variables": [
                 "event"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.applied",
@@ -1052,7 +1155,12 @@
               "order": 150,
               "variables": [
                 "event"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.pending",
@@ -1060,7 +1168,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 160,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.cleanupReview",
@@ -1068,7 +1181,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 170,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.workflow.span",
@@ -1076,7 +1194,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 180,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.end",
@@ -1084,7 +1207,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 190,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.location",
@@ -1092,7 +1220,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 200,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.workflow.allowCompletion",
@@ -1100,7 +1233,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 210,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.description",
@@ -1108,7 +1246,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 220,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.disabled",
@@ -1116,7 +1259,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 230,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.notConfigured",
@@ -1124,7 +1272,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 240,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.startedPrivate",
@@ -1132,7 +1285,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 250,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.startedInGroupFallback",
@@ -1140,7 +1300,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 260,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.started",
@@ -1148,7 +1315,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 270,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.privateStartFailed",
@@ -1156,7 +1330,14 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 280,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.startFailed",
@@ -1164,7 +1345,14 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 290,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.cancelled",
@@ -1172,7 +1360,14 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 300,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.invalid",
@@ -1180,7 +1375,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 310,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.permissionDenied",
@@ -1188,7 +1388,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 320,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.subgroupSuggestionConversion.policy.off",
@@ -1196,7 +1401,13 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 330,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "controlId": "plugin.official.community-events.subgroupSuggestionConversion.policy",
+                "groupId": "suggestions",
+                "groupLabel": "Suggestion conversion replies"
+              }
             },
             {
               "key": "official.community-events.subgroupSuggestionConversion.policy.auto_convert",
@@ -1204,7 +1415,13 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 340,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "controlId": "plugin.official.community-events.subgroupSuggestionConversion.policy",
+                "groupId": "suggestions",
+                "groupLabel": "Suggestion conversion replies"
+              }
             },
             {
               "key": "official.community-events.subgroupSuggestionConversion.preFlowNotice.template",
@@ -1212,7 +1429,13 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 350,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "controlId": "plugin.official.community-events.subgroupSuggestionConversion.policy",
+                "groupId": "suggestions",
+                "groupLabel": "Suggestion conversion replies"
+              }
             },
             {
               "key": "official.community-events.location.select",
@@ -1223,7 +1446,14 @@
               "variables": [
                 "displayPlace",
                 "searchQuery"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.freeText",
@@ -1231,7 +1461,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 370,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.noResults",
@@ -1241,7 +1478,14 @@
               "order": 380,
               "variables": [
                 "searchQuery"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.timezoneUnavailable",
@@ -1249,7 +1493,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 390,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.missing",
@@ -1257,7 +1508,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 400,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.failed",
@@ -1265,7 +1523,14 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 410,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.promptFailed",
@@ -1273,7 +1538,14 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 420,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.invalid",
@@ -1281,7 +1553,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 430,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.location.wrongRequester",
@@ -1289,7 +1568,14 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 440,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "location",
+                "groupId": "location",
+                "groupLabel": "Location replies"
+              }
             },
             {
               "key": "official.community-events.pollPublished",
@@ -1297,7 +1583,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 450,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollLifecycleQueued",
@@ -1305,7 +1598,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 460,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.unplannedPublished",
@@ -1313,7 +1613,12 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 470,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedFinalizationPending",
@@ -1323,7 +1628,12 @@
               "order": 480,
               "variables": [
                 "eventId"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedStillWorkingCreate",
@@ -1334,7 +1644,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedStillWorkingSetup",
@@ -1345,7 +1660,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedStillWorkingLink",
@@ -1356,7 +1676,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedStillWorkingAnnouncement",
@@ -1367,7 +1692,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedProvisioningPending",
@@ -1378,7 +1708,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedProvisioningOperatorRequired",
@@ -1389,7 +1724,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.unplannedProvisioningRecovered",
@@ -1400,7 +1740,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.provisioningTerminal.attemptsExhausted",
@@ -1411,7 +1756,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.provisioningTerminal.cleanupExpired",
@@ -1422,7 +1772,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.nativeInvite.sentWithJoinLink",
@@ -1434,7 +1789,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.nativeInvite.sent",
@@ -1445,7 +1807,14 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.privacyRestriction.joinLink",
@@ -1457,7 +1826,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.privacyInviteDeliveryUncertain.joinLink",
@@ -1469,7 +1845,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.providerRejection.joinLink",
@@ -1481,7 +1864,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.outcomeAmbiguous.joinLink",
@@ -1493,7 +1883,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.creatorMembershipPaused.directAddNotObserved.joinLink",
@@ -1505,7 +1902,14 @@
                 "eventId",
                 "groupJoinUrl",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "group",
+                "groupId": "group",
+                "groupLabel": "Event group invitation replies"
+              }
             },
             {
               "key": "official.community-events.publishFailed",
@@ -1515,7 +1919,12 @@
               "order": 650,
               "variables": [
                 "reason"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.templateConfigurationInvalid",
@@ -1523,7 +1932,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 660,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.unplannedPublishFailed",
@@ -1533,7 +1947,12 @@
               "order": 670,
               "variables": [
                 "reason"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "provisioning",
+                "groupLabel": "Publication and recovery replies"
+              }
             },
             {
               "key": "official.community-events.status",
@@ -1545,7 +1964,12 @@
                 "enabled",
                 "profiles",
                 "timezone"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.none",
@@ -1553,7 +1977,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 690,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "general",
+                "groupLabel": "Access and general replies"
+              }
             },
             {
               "key": "official.community-events.usage",
@@ -1561,7 +1990,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 700,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.list.none",
@@ -1569,7 +2003,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 710,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.list.item",
@@ -1582,7 +2021,12 @@
                 "range",
                 "status",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.list.dayTrips",
@@ -1592,7 +2036,12 @@
               "order": 730,
               "variables": [
                 "events"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.list.multiDay",
@@ -1602,7 +2051,12 @@
               "order": 740,
               "variables": [
                 "events"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.list.result",
@@ -1613,7 +2067,12 @@
               "variables": [
                 "count",
                 "events"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.edit.noEvents",
@@ -1621,7 +2080,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 760,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.select",
@@ -1629,7 +2093,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 770,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.noMatches",
@@ -1639,7 +2108,12 @@
               "order": 780,
               "variables": [
                 "query"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.refine",
@@ -1647,7 +2121,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 790,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.choiceLabel",
@@ -1660,7 +2139,12 @@
                 "range",
                 "status",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.selectionStartedPrivate",
@@ -1668,7 +2152,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 810,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.selectionStartedInGroupFallback",
@@ -1676,7 +2165,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 820,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.selectionStartFailed",
@@ -1684,7 +2178,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 830,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.invalidSelection",
@@ -1692,7 +2191,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 840,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.selectionStale",
@@ -1700,7 +2204,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 850,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.wrongRequester",
@@ -1708,7 +2217,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 860,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.edit.pollOpen",
@@ -1719,7 +2233,14 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.titleManaged",
@@ -1729,7 +2250,12 @@
               "order": 880,
               "variables": [
                 "eventId"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.titleManagedAmbiguous",
@@ -1737,7 +2263,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 890,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.titleOwnershipUnavailable",
@@ -1745,7 +2276,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 900,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.cancelHelp",
@@ -1753,7 +2289,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 910,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.started",
@@ -1761,7 +2302,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 920,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.startFailed",
@@ -1769,7 +2315,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 930,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.noEvents",
@@ -1777,7 +2328,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 940,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.permissionDenied",
@@ -1785,7 +2341,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 950,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.select",
@@ -1793,7 +2354,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 960,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.choiceLabel",
@@ -1806,7 +2372,12 @@
                 "range",
                 "status",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.summary",
@@ -1819,7 +2390,12 @@
                 "range",
                 "status",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.confirm",
@@ -1829,7 +2405,12 @@
               "order": 990,
               "variables": [
                 "summary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.complete",
@@ -1837,7 +2418,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1000,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.cancelled",
@@ -1845,7 +2431,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1010,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.invalid",
@@ -1853,7 +2444,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1020,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.done",
@@ -1864,7 +2460,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.doneDeletionPending",
@@ -1875,7 +2476,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.staleArtifactNotice",
@@ -1888,7 +2494,12 @@
                 "eventId",
                 "startsAt",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.ended",
@@ -1898,7 +2509,12 @@
               "order": 1060,
               "variables": [
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.notCancellable",
@@ -1909,7 +2525,12 @@
               "variables": [
                 "status",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.cancel.failed",
@@ -1920,7 +2541,12 @@
               "variables": [
                 "reason",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "cancellation",
+                "groupLabel": "Cancellation replies"
+              }
             },
             {
               "key": "official.community-events.lifecycle.label",
@@ -1931,7 +2557,12 @@
               "variables": [
                 "eventStatus",
                 "groupLifecycleStatus"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.event.active",
@@ -1939,7 +2570,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1100,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.event.completed",
@@ -1947,7 +2583,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1110,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.event.cancelled",
@@ -1955,7 +2596,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1120,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.event.failed",
@@ -1963,7 +2609,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1130,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.poll_open",
@@ -1971,7 +2622,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1140,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.poll_closed",
@@ -1979,7 +2637,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1150,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.cleanup_failed",
@@ -1987,7 +2652,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1160,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.cleaned",
@@ -1995,7 +2665,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1170,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.missed",
@@ -2003,7 +2678,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1180,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.lifecycle.group.none",
@@ -2011,7 +2691,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1190,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.flow.profile",
@@ -2019,7 +2704,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1200,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.spanKind",
@@ -2027,7 +2719,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1210,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.publicationChoice",
@@ -2040,7 +2739,14 @@
                 "endsAt",
                 "startsAt",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.pollDeadlinePassed",
@@ -2050,7 +2756,14 @@
               "order": 1230,
               "variables": [
                 "closeAt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.pollPhase",
@@ -2058,7 +2771,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1240,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.pollPhase.poll",
@@ -2066,7 +2786,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1250,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.pollPhase.unplanned",
@@ -2074,7 +2801,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1260,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.usage",
@@ -2082,7 +2816,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1270,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.select",
@@ -2090,7 +2831,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1280,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.confirm",
@@ -2101,7 +2849,14 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.confirmYes",
@@ -2109,7 +2864,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1300,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.confirmNo",
@@ -2117,7 +2879,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1310,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.cancelled",
@@ -2125,7 +2894,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1320,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.confirmStartFailed",
@@ -2133,7 +2909,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1330,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.noMatches",
@@ -2143,7 +2926,14 @@
               "order": 1340,
               "variables": [
                 "query"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.noEvents",
@@ -2151,7 +2941,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1350,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.permissionDenied",
@@ -2159,7 +2956,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1360,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.unavailable",
@@ -2167,7 +2971,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1370,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.pollClose.queued",
@@ -2178,7 +2989,14 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.help.pollClose",
@@ -2186,7 +3004,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 1390,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.pollClose.title",
@@ -2194,7 +3017,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 1400,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.pollClose.instruction",
@@ -2202,7 +3030,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 1410,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.pollClose.example",
@@ -2210,7 +3043,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 1420,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.flow.endDate",
@@ -2218,7 +3056,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1430,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.endTime",
@@ -2226,7 +3071,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1440,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.endInvalid",
@@ -2234,7 +3086,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1450,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.span.dayTrip",
@@ -2242,7 +3101,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1460,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.span.multiDay",
@@ -2250,7 +3114,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1470,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "status",
+                "groupLabel": "Listings and status wording"
+              }
             },
             {
               "key": "official.community-events.flow.confirm",
@@ -2260,7 +3129,14 @@
               "order": 1480,
               "variables": [
                 "summary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.confirmSummary",
@@ -2273,7 +3149,14 @@
                 "profile",
                 "span",
                 "startsAt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.complete",
@@ -2281,7 +3164,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1500,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.yes",
@@ -2289,7 +3179,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1510,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.no",
@@ -2297,7 +3194,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1520,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "creation",
+                "groupId": "creation",
+                "groupLabel": "Creation and confirmation replies"
+              }
             },
             {
               "key": "official.community-events.flow.currentValuePrompt",
@@ -2308,7 +3212,14 @@
               "variables": [
                 "current",
                 "prompt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.editChoicePrompt",
@@ -2319,7 +3230,14 @@
               "variables": [
                 "current",
                 "prompt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.editTextPrompt",
@@ -2330,7 +3248,14 @@
               "variables": [
                 "current",
                 "prompt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.unset",
@@ -2338,7 +3263,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1560,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.datePrompt",
@@ -2348,7 +3280,14 @@
               "order": 1570,
               "variables": [
                 "prompt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.timePrompt",
@@ -2358,7 +3297,14 @@
               "order": 1580,
               "variables": [
                 "prompt"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.optionalPromptSuffix",
@@ -2366,7 +3312,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1590,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.dateHasTime",
@@ -2374,7 +3327,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1600,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.dateInvalid",
@@ -2382,7 +3342,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1610,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.dateUnsupportedLocale",
@@ -2390,7 +3357,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1620,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.timeInvalid",
@@ -2398,7 +3372,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1630,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.datetimeInvalid",
@@ -2406,7 +3387,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1640,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.datetimePast",
@@ -2414,7 +3402,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1650,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.datetimeTooFar",
@@ -2422,7 +3417,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1660,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.flow.datetimeUnsupportedLocale",
@@ -2430,7 +3432,14 @@
               "topic": "Event creation",
               "destination": "Command or workflow reply",
               "order": 1670,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "questions",
+                "groupId": "questions",
+                "groupLabel": "Question replies and validation"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.band.question",
@@ -2438,7 +3447,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1680,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.organizerBand.question",
@@ -2446,7 +3462,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1690,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.exact.question",
@@ -2456,7 +3479,14 @@
               "order": 1700,
               "variables": [
                 "band"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.organizerTime.question",
@@ -2464,7 +3494,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1710,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.band.morning",
@@ -2472,7 +3509,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1720,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.band.afternoon",
@@ -2480,7 +3524,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1730,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.band.evening",
@@ -2488,7 +3539,14 @@
               "topic": "Attendance & polls",
               "destination": "Command or workflow reply",
               "order": 1740,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.applied",
@@ -2498,7 +3556,14 @@
               "order": 1750,
               "variables": [
                 "time"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.manualRequired",
@@ -2508,7 +3573,14 @@
               "order": 1760,
               "variables": [
                 "eventId"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.eventDayManualRequired",
@@ -2518,7 +3590,14 @@
               "order": 1770,
               "variables": [
                 "eventId"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.startTimeAgreement.blocked",
@@ -2528,7 +3607,14 @@
               "order": 1780,
               "variables": [
                 "eventId"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "start-time",
+                "groupId": "start-time",
+                "groupLabel": "Start-time replies"
+              }
             },
             {
               "key": "official.community-events.update.startedPrivate",
@@ -2536,7 +3622,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1790,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.startedInGroupFallback",
@@ -2544,7 +3635,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1800,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.privateStartFailed",
@@ -2552,7 +3648,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1810,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.startFailed",
@@ -2560,7 +3661,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1820,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.confirm",
@@ -2570,7 +3676,12 @@
               "order": 1830,
               "variables": [
                 "summary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.confirmOpenPoll",
@@ -2580,7 +3691,14 @@
               "order": 1840,
               "variables": [
                 "summary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "poll",
+                "groupId": "poll",
+                "groupLabel": "Poll replies"
+              }
             },
             {
               "key": "official.community-events.update.confirmPastCompletion",
@@ -2590,7 +3708,12 @@
               "order": 1850,
               "variables": [
                 "summary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.complete",
@@ -2598,7 +3721,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1860,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.cancelled",
@@ -2606,7 +3734,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 1870,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.invalid",
@@ -2614,7 +3747,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1880,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.ambiguous",
@@ -2622,7 +3760,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1890,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.pastCompletionConfirmationRequired",
@@ -2630,7 +3773,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1900,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.convertedToUnplanned",
@@ -2643,7 +3791,12 @@
                 "eventId",
                 "startsAt",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.convertedNotice",
@@ -2657,7 +3810,12 @@
                 "groupJoinUrl",
                 "startsAt",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.convertedNoticePending",
@@ -2670,7 +3828,12 @@
                 "eventId",
                 "startsAt",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.permissionDenied",
@@ -2678,7 +3841,12 @@
               "topic": "General replies",
               "destination": "Command or workflow reply",
               "order": 1940,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.done",
@@ -2689,7 +3857,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.doneRepairPending",
@@ -2700,7 +3873,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.noChanges",
@@ -2711,7 +3889,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.donePastCompletion",
@@ -2723,7 +3906,12 @@
                 "cleanupAt",
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.donePastCompletionRepairPending",
@@ -2735,7 +3923,12 @@
                 "cleanupAt",
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.failed",
@@ -2743,7 +3936,12 @@
               "topic": "Recovery & status",
               "destination": "Command or workflow reply",
               "order": 2000,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.replacementQueued",
@@ -2754,7 +3952,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.update.replacementExpired",
@@ -2765,7 +3968,12 @@
               "variables": [
                 "eventId",
                 "title"
-              ]
+              ],
+              "placement": {
+                "sectionId": "events-recovery",
+                "groupId": "editing",
+                "groupLabel": "Event editing replies"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.label",
@@ -2773,7 +3981,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2030,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.question.place",
@@ -2781,7 +3994,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2040,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.question.startDate",
@@ -2789,7 +4007,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2050,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.question.startTime",
@@ -2797,7 +4020,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2060,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.question.style",
@@ -2805,7 +4033,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2070,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.poll.titleTemplate",
@@ -2823,7 +4056,12 @@
                 "style",
                 "weekday",
                 "yy"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.group.titleTemplate",
@@ -2840,7 +4078,12 @@
                 "style",
                 "weekday",
                 "yy"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.eventGroupHint.template",
@@ -2852,7 +4095,12 @@
                 "creatorDisplayName",
                 "groupDisplayName",
                 "groupJoinUrl"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.eventEditAnnouncement.template",
@@ -2863,7 +4111,12 @@
               "variables": [
                 "editorDisplayName",
                 "groupDisplayName"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.calendar.titleTemplate",
@@ -2874,7 +4127,12 @@
               "variables": [
                 "place",
                 "style"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.calendar.hint.template",
@@ -2886,7 +4144,12 @@
                 "calendarDisplayName",
                 "calendarSubscriptionUrl",
                 "creatorDisplayName"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.weather.template",
@@ -2898,7 +4161,12 @@
                 "groupDisplayName",
                 "weatherDate",
                 "weatherSummary"
-              ]
+              ],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.responseClass.event_group_member",
@@ -2906,7 +4174,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2150,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.poll.option.going",
@@ -2914,7 +4187,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2160,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.profile.climbing.poll.option.ride",
@@ -2922,7 +4200,12 @@
               "topic": "Profile defaults",
               "destination": "Command or workflow reply",
               "order": 2170,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "groupId": "profile-defaults",
+                "groupLabel": "Default profile wording"
+              }
             },
             {
               "key": "official.community-events.weather.section.temperature",
@@ -2930,7 +4213,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2180,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.section.relativeHumidity",
@@ -2938,7 +4228,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2190,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.section.precipitation",
@@ -2946,7 +4243,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2200,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.section.wind",
@@ -2954,7 +4258,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2210,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.temperatureMax",
@@ -2962,7 +4273,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2220,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.temperatureMin",
@@ -2970,7 +4288,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2230,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.relativeHumidityMax",
@@ -2978,7 +4303,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2240,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.relativeHumidityMin",
@@ -2986,7 +4318,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2250,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.relativeHumidityMean",
@@ -2994,7 +4333,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2260,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.precipitation",
@@ -3002,7 +4348,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2270,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.precipitationProbability",
@@ -3010,7 +4363,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2280,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.windSpeed",
@@ -3018,7 +4378,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2290,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.windGust",
@@ -3026,7 +4393,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2300,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.windDirection",
@@ -3034,7 +4408,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2310,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.metric.weatherCode",
@@ -3042,7 +4423,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2320,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.weather.none",
@@ -3050,7 +4438,14 @@
               "topic": "Calendar & weather",
               "destination": "Command or workflow reply",
               "order": 2330,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "event-profiles",
+                "controlId": "plugin.official.community-events.eventProfiles",
+                "slotId": "weather",
+                "groupId": "weather",
+                "groupLabel": "Weather wording"
+              }
             },
             {
               "key": "official.community-events.help.family",
@@ -3058,7 +4453,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2340,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.command",
@@ -3066,7 +4466,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2350,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.status",
@@ -3074,7 +4479,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2360,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.cancel",
@@ -3082,7 +4492,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2370,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.edit",
@@ -3090,7 +4505,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2380,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.edit.example",
@@ -3098,7 +4518,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2390,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.list",
@@ -3106,7 +4531,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2400,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.list.example",
@@ -3114,7 +4544,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2410,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.feature.title",
@@ -3122,7 +4557,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2420,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.feature.summary",
@@ -3130,7 +4570,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2430,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.overview.example",
@@ -3138,7 +4583,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2440,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.create.title",
@@ -3146,7 +4596,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2450,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.create.summary",
@@ -3154,7 +4609,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2460,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.create.instruction",
@@ -3162,7 +4622,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2470,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.create.example",
@@ -3170,7 +4635,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2480,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.edit.title",
@@ -3178,7 +4648,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2490,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.edit.summary",
@@ -3186,7 +4661,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2500,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.edit.instruction",
@@ -3194,7 +4674,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2510,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.list.title",
@@ -3202,7 +4687,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2520,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.list.summary",
@@ -3210,7 +4700,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2530,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.list.instruction",
@@ -3218,7 +4713,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2540,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.inspect.title",
@@ -3226,7 +4726,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2550,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.inspect.summary",
@@ -3234,7 +4739,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2560,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.status.example",
@@ -3242,7 +4752,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2570,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.cancel.title",
@@ -3250,7 +4765,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2580,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.cancel.summary",
@@ -3258,7 +4778,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2590,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.cancel.instruction",
@@ -3266,7 +4791,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2600,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             },
             {
               "key": "official.community-events.help.cancel.example",
@@ -3274,7 +4804,12 @@
               "topic": "Help & commands",
               "destination": "Command or workflow reply",
               "order": 2610,
-              "variables": []
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "help",
+                "groupLabel": "Help and command replies"
+              }
             }
           ],
           "builderTemplateDialect": "conditional-values-v2",
@@ -3303,62 +4838,49 @@
         "reason": "Saved wording format marker; managed by the configuration migration."
       }
     ],
-    "pages": [
-      {
-        "id": "community-events-settings",
-        "title": "Community Events",
-        "navLabel": "Community Events",
-        "description": "Manage event behavior, wording, calendars and recovery for a community or group.",
-        "path": "/plugins/community-events/settings",
-        "apiPath": "/api/v1/operator-console/controls",
-        "renderer": "workbench",
-        "rendererOptions": {
-          "pluginId": "official.community-events",
-          "settingsSections": [
-            {
-              "title": "General",
-              "controlIds": [
-                "plugin.official.community-events.enabled",
-                "plugin.official.community-events.timezone",
-                "plugin.official.community-events.subgroupSuggestionConversion.policy",
-                "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled"
-              ]
-            },
-            {
-              "title": "Event profiles",
-              "controlIds": [
-                "plugin.official.community-events.eventProfiles"
-              ]
-            },
-            {
-              "title": "Messages",
-              "controlIds": [
-                "plugin.official.community-events.messages"
-              ]
-            },
-            {
-              "title": "Calendars",
-              "controlIds": [
-                "plugin.official.community-events.calendars"
-              ]
-            },
-            {
-              "title": "Events & recovery",
-              "controlIds": [
-                "plugin.official.community-events.eventsPanel",
-                "plugin.official.community-events.adoption",
-                "plugin.official.community-events.cleanup.retryDelaysMinutes",
-                "plugin.official.community-events.cleanup.lastFailureMessage",
-                "plugin.official.community-events.cleanup.lastFailureAt"
-              ]
-            }
+    "pages": [],
+    "settings": {
+      "sections": [
+        {
+          "id": "general",
+          "title": "General",
+          "controlIds": [
+            "plugin.official.community-events.enabled",
+            "plugin.official.community-events.subgroupSuggestionConversion.policy",
+            "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled",
+            "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template"
           ]
         },
-        "order": 35,
-        "runtimeContext": "single-required",
-        "mutation": "durable"
-      }
-    ]
+        {
+          "id": "event-profiles",
+          "title": "Event profiles",
+          "controlIds": [
+            "plugin.official.community-events.eventProfiles"
+          ]
+        },
+        {
+          "id": "calendars",
+          "title": "Calendars",
+          "controlIds": [
+            "plugin.official.community-events.calendars"
+          ]
+        },
+        {
+          "id": "events-recovery",
+          "title": "Events & recovery",
+          "controlIds": [
+            "plugin.official.community-events.eventsPanel",
+            "plugin.official.community-events.adoption",
+            "plugin.official.community-events.cleanup.retryDelaysMinutes",
+            "plugin.official.community-events.cleanup.lastFailureMessage",
+            "plugin.official.community-events.cleanup.lastFailureAt"
+          ]
+        }
+      ],
+      "routeAliases": [
+        "/plugins/community-events/settings"
+      ]
+    }
   },
   "workflowActions": [
     {

@@ -30,7 +30,7 @@ function control(
     configurable,
     storage: { kind: 'plugin-scope-config', pluginId: 'official.community-events', path },
     schema,
-    ui: { settingsPath: '/plugins/community-events/settings', helpText: description, ...ui },
+    ui: { helpText: description, ...ui },
     restartRequirement: 'NO_RESTART',
     dangerous,
     ...(dangerous
@@ -117,10 +117,11 @@ export const eventsControls: ControlDescriptor[] = [
     { type: 'boolean' },
     { widget: 'toggle' }
   ),
-  control('subgroupSuggestionConversion.preFlowNotice.template', 'Suggestion refusal notice text', 'Edit the language variants in Messages.', 50, { type: 'object' }, { widget: 'builder', builderId: 'official.community-events.messages.v1', hideWhenBuilderMounted: true }),
+  control('subgroupSuggestionConversion.preFlowNotice.template', 'Suggestion refusal notice text', 'Explain suggestion conversion before starting event creation.', 50, { type: 'object' }, { widget: 'localized-text', templateVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Ana' }], templateDialect: 'conditional-values-v2', templateActivation: 'when-used', templateConditionVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator' }], templateEmptyResult: 'reject', templateMentions: { ...eventMessageMentions, all: false } }),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',
+    builderTextSlots: ['creation', 'questions', 'location', 'poll', 'group', 'start-time', 'weather'],
     builderTemplateDialect: 'conditional-values-v2',
     builderTemplateMentions: eventMessageMentions,
     builderEndpoints: {

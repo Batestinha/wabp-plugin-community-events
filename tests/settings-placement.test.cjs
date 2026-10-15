@@ -36,3 +36,9 @@ test('upgrading the settings layout preserves all saved wording and profile iden
   saved.eventProfiles[0].label.$text['pt-PT'] = '  Perfil  ';
   assert.deepEqual(materializeEventText(saved), saved);
 });
+
+
+test('runtime compatibility and identity agree with the installable package', () => {
+  const runtime = require('../dist/index').default.manifest;
+  for (const field of ['pluginId', 'version', 'coreApiRange', 'dataVersion']) assert.equal(runtime[field], manifest[field], field);
+});

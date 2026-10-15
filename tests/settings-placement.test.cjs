@@ -5,6 +5,46 @@ const { eventTextDefinitions } = require('../dist/messageDefinitions');
 const { eventsMessages } = require('../dist/messages');
 const { eventsControls } = require('../dist/controls');
 const { materializeEventText } = require('../dist/savedText');
+const { validateConditionalTemplate, renderConditionalTemplate } = require('@wabs/plugin-sdk/templates');
+const portuguese = require('../locales/pt-PT/official.community-events.json');
+
+test('editor variables cover every seeded template, including condition-only variables', () => {
+  for (const [locale, catalog] of Object.entries({ en: eventsMessages, 'pt-PT': portuguese })) {
+    for (const definition of eventTextDefinitions) {
+      const template = catalog[definition.key];
+      if (template === undefined) continue;
+      assert.deepEqual(validateConditionalTemplate(template, definition.variables), [], `${locale}: ${definition.key}`);
+    }
+  }
+});
+
+test('default title previews include the time only when startTime is available', () => {
+  for (const kind of ['poll', 'group']) {
+    const key = `official.community-events.profile.climbing.${kind}.titleTemplate`;
+    const template = eventsMessages[key];
+    const definition = eventTextDefinitions.find(row => row.key === key);
+    assert.deepEqual(validateConditionalTemplate(template, definition.variables), []);
+    const values = { style: 'Bouldering', place: 'Sintra', weekday: 'Sat', dd: '17', mm: '10', yy: '26',
+      startTime: '09:30', hour: '09', minute: '30', creatorDisplayName: 'Creator' };
+    const suffix = kind === 'poll' ? ' By: Creator' : '';
+    assert.equal(renderConditionalTemplate(template, values), `Bouldering in Sintra: Sat, 17-10-26, 09h30${suffix}`);
+    assert.equal(renderConditionalTemplate(template, { ...values, startTime: undefined }), `Bouldering in Sintra: Sat, 17-10-26${suffix}`);
+    assert.deepEqual(validateConditionalTemplate('{{#if typo}}Time{{/if}}', definition.variables),
+      [{ message: 'unknown template variable {typo}' }]);
+  }
+});
+
+test('condition-only variables offered by the editor can also be saved as values', () => {
+  const { eventsStoredConfigSchema } = require('../dist/savedText');
+  for (const kind of ['poll', 'group']) {
+    const key = `official.community-events.profile.climbing.${kind}.titleTemplate`;
+    const saved = materializeEventText({});
+    saved.messages.catalogs.en[key] = '{style} at {startTime}';
+    assert.equal(eventsStoredConfigSchema.parse(saved).messages.catalogs.en[key], '{style} at {startTime}');
+    saved.messages.catalogs.en[key] = '{unknownTime}';
+    assert.throws(() => eventsStoredConfigSchema.parse(saved), /unknown variable unknownTime/);
+  }
+});
 
 test('every catalog entry has exactly one reachable inline placement', () => {
   assert.deepEqual(eventTextDefinitions.map(row => row.key).sort(), Object.keys(eventsMessages).sort());

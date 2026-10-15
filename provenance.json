@@ -13,6 +13,6 @@
     "sourceCommit": "4795dbcb7b2cdf6df2c5fb93feeedda0f21e6bfc"
   },
   "vendoredContracts": "contracts/provenance.json",
-  "previousStandaloneCommit": "bddf695c1684bca6738c83e0cbc4980ec23e4155",
+  "previousStandaloneCommit": "f91906a34511244ece73c29688741ce0e431c74c",
   "sourceImportTransform": "Replace relative packages/plugin-sdk/src imports with @wabs/plugin-sdk subpaths; retain other source bytes."
 }

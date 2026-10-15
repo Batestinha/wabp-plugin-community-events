@@ -5,11 +5,13 @@ import { configuredMessagesSchema, isLocalizedText, localizedTextSchema, resolve
 import type { PluginLifecycleContext, PluginConfigurationMigrationInput } from '@wabs/plugin-sdk/plugin-lifecycle';
 import { eventsConfigSchema, localizeDefaultEventProfiles, localizeSubgroupSuggestionPreFlowNotice } from './config';
 import { eventsMessages } from './messages';
+import { eventTextDefinitions } from './messageDefinitions';
 
 const namespace = 'official.community-events';
 const portuguese = JSON.parse(readFileSync(path.join(__dirname, '..', 'locales', 'pt-PT', `${namespace}.json`), 'utf8')) as Record<string, string>;
 export const eventMessageSeeds = { en: eventsMessages, 'pt-PT': portuguese };
 const textFields = new Set(['label', 'prompt', 'optionalPromptSuffix', 'template', 'titleTemplate', 'descriptionTemplate', 'displayName']);
+const messageVariables = new Map(eventTextDefinitions.map(definition => [definition.key, new Set(definition.variables)]));
 
 export function seedMessages(existing?: unknown, catalogs: Record<string, Record<string, string>> = eventMessageSeeds): ConfiguredMessages {
   const saved = existing ? configuredMessagesSchema.parse(existing) : undefined;
@@ -66,9 +68,9 @@ export const eventsStoredConfigSchema = z.unknown().transform((input, ctx) => {
         const seed = eventsMessages[key];
         if (seed === undefined) continue;
         if (!value.trim() && seed.trim()) throw new Error(`${key} (${locale}): text is required`);
-        const allowed = new Set([...seed.matchAll(/\{([A-Za-z0-9_]+)\}/gu)].map(match => match[1]));
+        const allowed = messageVariables.get(key) ?? new Set<string>();
         for (const match of value.matchAll(/\{([A-Za-z0-9_]+)\}/gu)) {
-          if (!allowed.has(match[1])) throw new Error(`${key} (${locale}): unknown variable ${match[1]}`);
+          if (!allowed.has(match[1]!)) throw new Error(`${key} (${locale}): unknown variable ${match[1]}`);
         }
       }
     }

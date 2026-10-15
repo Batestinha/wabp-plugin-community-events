@@ -2,7 +2,7 @@
 
 Community events, attendance polls, subgroup creation and recovery, calendar publication, and event weather reports.
 
-Standalone WABS package `official.community-events` version `0.19.1`, requiring WABP core API `^0.3.14`. It retains the plugin ID, account-owned `events` database, data version 21, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
+Standalone WABS package `official.community-events` version `0.19.2`, requiring WABP core API `^0.3.14`. It retains the plugin ID, account-owned `events` database, data version 21, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
 
 Workflow discovery resolves “this event” only from a unique, authorized event whose subgroup matches the invoking chat, independently of title, search and pagination. Explicit event selections remain authoritative. Read-only `locationQuery` discovery returns validated geocoder-backed location candidates and timezones; ambiguous candidates still require a choice before preparation.
 
@@ -48,6 +48,8 @@ Optional questions use the platform's shared `/skip` control and unreserved symb
 Each community or group now owns its saved message catalogs and localized profile text. Package English and Portuguese catalogs seed new configurations and new required keys; upgrades and language-pack refreshes never replace saved wording. Profile labels, questions, choices, poll options, titles, announcements and calendar text retain their original text in the initial language variants. The migration snapshots enabled installed catalogs and the original configuration layers in one transaction before writing. Existing event/flow snapshots and already rendered delivery jobs are unchanged.
 
 Open Community Events in the console sidebar and select the bot and community. WABP generates the same settings workspace for every configurable plugin. The sections are General, Event profiles, Calendars, and Events & recovery. Edit profile wording beside its behavior settings; shared bot replies appear in expandable groups at explicit feature slots. These replies apply to all profiles in the selected community/group. Workspace search opens the relevant section and reply group.
+
+Version 0.19.2 declares the condition-only `startTime` variable in the default poll and group title editors, restoring validation and previews. Saving catalog text uses the same declared variables as the editor. Existing saved wording and configuration remain unchanged. The location disambiguation message is under Event profiles → Location replies → Location / select.
 
 WABP's token, condition and mention editors retain their destination-specific capabilities. Source edits automatically update the saved translations; translated wording remains available beside each editor. Autosave preserves active drafts and cursor position. A conflict keeps the draft for review. The 0.19.1 layout uses the existing stored text format and does not reset wording.
 

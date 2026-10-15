@@ -3111,6 +3111,7 @@ export const eventTextDefinitions = [
       "minute",
       "mm",
       "place",
+      "startTime",
       "style",
       "weekday",
       "yy"
@@ -3133,6 +3134,7 @@ export const eventTextDefinitions = [
       "minute",
       "mm",
       "place",
+      "startTime",
       "style",
       "weekday",
       "yy"

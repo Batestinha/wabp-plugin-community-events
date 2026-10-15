@@ -1,3 +1,4 @@
+import { eventsStoredConfigSchema } from './savedText';
 import { eventOperatorActionDeclarations } from './operatorActions';
 import { eventConsoleOperationDeclarations } from './consoleOperationDeclarations';
 import type { PluginManifest } from '@wabs/plugin-sdk/manifest';
@@ -49,10 +50,12 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.17.6',
-  coreApiRange: '^0.3.10',
+  version: '0.18.0',
+  coreApiRange: '^0.3.13',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
+    configuredMessages: true,
+    localizedText: true,
     changedActionId: 'official.community-events.recoverJobs',
     permissionDeclarations: [{ arrayPath: 'eventProfiles', prefix: 'events.create.', valuePaths: ['permissionSuffix', 'id'] }]
   },
@@ -181,7 +184,8 @@ export const eventsManifest: PluginManifest = {
   ],
   requiredBotCapabilities: [],
   workflowActions: eventWorkflowActions,
-  configSchema: eventsConfigSchema,
+  configSchema: eventsStoredConfigSchema,
+  runtimeConfigSchema: eventsConfigSchema,
   dangerousActions: ['message.delete'],
   backgroundJobs: [
     EVENTS_JOBS.close,
@@ -272,7 +276,7 @@ export const eventsManifest: PluginManifest = {
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   scopeClock: { timezoneConfigPaths: ['timezone'], providesGroupTimezones: true },
   databases: eventsDatabases,
-  dataVersion: '20',
+  dataVersion: '21',
   assistant: {
     summary: 'Guided event creation with scoped polls, unplanned attendee subgroups, and calendar export.',
     useCases: [

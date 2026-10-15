@@ -1,3 +1,4 @@
+import { isLocalizedText, preserveLocalizedTextTree } from '@wabs/plugin-sdk/configuration';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -633,7 +634,9 @@ async renameOfficialEventProfileQuestion(input: unknown = {}) {
       }
       const currentProfile = currentConfig.eventProfiles[profileIndex]!;
       const expectedProfile = eventProfileSchema.parse(parsed.expectedProfile);
-      if (JSON.stringify(expectedProfile) !== JSON.stringify(currentProfile)) {
+      const { textVersion: _expectedTextVersion, ...expectedFields } = expectedProfile;
+      const { textVersion: _currentTextVersion, ...currentFields } = currentProfile;
+      if (JSON.stringify(expectedFields) !== JSON.stringify(currentFields)) {
         throw httpError(409, 'The event profile changed while the question rename was being prepared. Refresh and try again.');
       }
       if (!currentProfile.questions.some((question) => question.key === parsed.oldKey)) {
@@ -670,7 +673,19 @@ async renameOfficialEventProfileQuestion(input: unknown = {}) {
       })) {
         throw httpError(409, 'The question-key rename lost its mutation lease before the profile could be updated.');
       }
-      const configUpdate = await this.host.configuration.compareAndSet(parsed.scopeId, { id: instance.id, updatedAt: instance.updatedAt }, nextConfig);
+      const savedConfig = preserveLocalizedTextTree(nextConfig, instance.configJson) as Record<string, unknown>;
+      const savedProfiles = savedConfig.eventProfiles as Record<string, unknown>[];
+      // Rename every language variant in the canonical profile. Existing flow/event
+      // snapshots remain governed by the existing durable rename recovery protocol.
+      const renameVariants = (value: unknown): unknown => {
+        if (isLocalizedText(value)) return { ...value, $text: Object.fromEntries(Object.entries(value.$text)
+          .map(([locale, text]) => [locale, renameEventTemplateToken(text, parsed.oldKey, parsed.newKey)])) };
+        if (Array.isArray(value)) return value.map(renameVariants);
+        if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, renameVariants(item)]));
+        return value;
+      };
+      savedConfig.eventProfiles = savedProfiles.map(profile => profile.id === parsed.profileId ? renameVariants(profile) : profile);
+      const configUpdate = await this.host.configuration.compareAndSet(parsed.scopeId, { id: instance.id, updatedAt: instance.updatedAt }, savedConfig);
       if (configUpdate.count !== 1) {
         throw httpError(409, 'The event profile changed during the question rename. The expanded answers will be recovered from the authoritative profile.');
       }

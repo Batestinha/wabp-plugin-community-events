@@ -1,3 +1,4 @@
+import { eventTextDefinitions } from './messageDefinitions';
 import { eventMessageMentions } from './template';
 import { defineControl } from '@wabs/plugin-sdk/controls';
 import type { ControlDescriptor, ControlSchemaMetadata, ControlUiHint } from '@wabs/plugin-sdk/controls-types';
@@ -116,31 +117,11 @@ export const eventsControls: ControlDescriptor[] = [
     { type: 'boolean' },
     { widget: 'toggle' }
   ),
-  control(
-    'subgroupSuggestionConversion.preFlowNotice.template',
-    'Suggestion refusal notice text',
-    'Private text sent when an eligible native subgroup suggestion is detected, immediately before event setup. The exact suggestion is rejected only after initial flow delivery succeeds; suggested titles and other suggestion metadata are not available as template variables.',
-    50,
-    { type: 'string', required: true, max: 1000 },
-    {
-      widget: 'text',
-      multiline: true,
-      placeholder: DEFAULT_EVENT_SUBGROUP_SUGGESTION_PRE_FLOW_NOTICE_TEMPLATE,
-      templateDialect: 'conditional-values-v2',
-      templateMentions: { ...eventMessageMentions, all: false },
-      templateActivation: 'when-used',
-      templateVariables: [
-        { token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Diogo Batista' }
-      ],
-      templateConditionVariables: [
-        { token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Diogo Batista' }
-      ],
-      templateEmptyResult: 'suppress'
-    }
-  ),
+  control('subgroupSuggestionConversion.preFlowNotice.template', 'Suggestion refusal notice text', 'Explain suggestion conversion before starting event creation.', 50, { type: 'object' }, { widget: 'localized-text', templateVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Ana' }], templateDialect: 'conditional-values-v2', templateActivation: 'when-used', templateConditionVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator' }], templateEmptyResult: 'reject', templateMentions: { ...eventMessageMentions, all: false } }),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',
+    builderTextSlots: ['creation', 'questions', 'location', 'poll', 'group', 'start-time', 'weather'],
     builderTemplateDialect: 'conditional-values-v2',
     builderTemplateMentions: eventMessageMentions,
     builderEndpoints: {
@@ -151,13 +132,15 @@ export const eventsControls: ControlDescriptor[] = [
       rotateToken: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token'
     }
   }),
-  control('calendars', 'Event calendars', 'Reusable calendar export resources managed by the event profile builder.', 65, { type: 'array', items: { type: 'object' } }, {
+  control('calendars', 'Calendars', 'Reusable calendar export resources.', 65, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
-    builderId: 'official.community-events.event-profiles.v1',
+    builderId: 'official.community-events.calendars.v1',
+    builderEndpoints: { calendarState: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId', publish: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/publish', rotateToken: '/api/v1/plugins/official.community-events/calendar/:scopeId/:calendarId/token' },
     builderTemplateDialect: 'conditional-values-v2',
     builderTemplateMentions: eventMessageMentions,
-    hideWhenBuilderMounted: true
+    hideWhenBuilderMounted: false
   }),
+  control('messages', 'Messages', 'Community-owned wording and language variants.', 62, { type: 'object' }, { widget: 'builder', builderId: 'official.community-events.messages.v1', textDefinitions: eventTextDefinitions, builderTemplateDialect: 'conditional-values-v2', builderTemplateMentions: eventMessageMentions }),
   eventsPanelControl,
   control('adoption', 'Adopt existing event', 'Adopt an existing WhatsApp poll or event group into official.community-events lifecycle management.', 70, { type: 'object', properties: {} }, {
     widget: 'builder',

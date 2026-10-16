@@ -26,7 +26,7 @@ import { resolvePluginPollVotes } from '@wabs/plugin-sdk/poll-vote-identity';
 import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
-import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncementFragment } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncementFragment, templateUsesToken } from './announcements';
 import { voterWidsForResponseBehavior, type EventVoteSelection } from './attendance';
 import {
   cancelEventAttendanceLifecycle,
@@ -43,6 +43,7 @@ import {
   writePublishAndRecordScopeCalendar
 } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
 import { repairEventEdit } from './editRepair';
 import { deleteEventArtifacts } from './eventArtifactDeletion';
@@ -279,6 +280,7 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   if (context.flowEngine) {
     registerEventPublicationRecovery(context);
     registerEventCreationFlowDefinitionResolver({
+      services: context.services, ephemeralStore: context.ephemeralStore,
       flowEngine: context.flowEngine,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
@@ -575,6 +577,7 @@ export async function recoverUnplannedEventFinalizationJobs(
     await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.unplannedFinalization,
+      executionClass: 'interactive',
       scopeId: finalization.scopeId,
       ...(event.groupId ? { groupId: event.groupId } : {}),
       ...(event.groupWid ? { groupWid: event.groupWid } : {}),
@@ -767,6 +770,7 @@ export async function recoverEventProvisioningJobs(
     await enqueuePluginJob(context, {
       pluginId: EVENTS_PLUGIN_ID,
       jobName: EVENTS_JOBS.provisioningRecovery,
+      executionClass: 'interactive',
       scopeId: record.scopeId,
       ...(record.groupId ? { groupId: record.groupId } : {}),
       ...(record.groupWid ? { groupWid: record.groupWid } : {}),
@@ -1176,37 +1180,25 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
       delivery.kind === 'calendar_hint' &&
       !delivery.text
     ) {
-      let calendarId = delivery.calendarHintIntent?.calendarId;
-      if (!calendarId) {
-        try {
-          calendarId = resolvedEventCalendarId(event);
-        } catch {
-          continue;
-        }
-      }
-      if (!calendarId) {
-        continue;
-      }
-      let subscriptionUrl = '';
+      let readyForAttempt = false;
       try {
         const config = parseEventsConfig(await context.configFor(event.scopeId));
+        const profile = config.eventProfiles.find((candidate) => candidate.id === event.profileId);
+        const calendarId = delivery.calendarHintIntent?.calendarId ?? resolvedEventCalendarId(event);
         const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
-        subscriptionUrl = calendar
-          ? resolveEventCalendarHintSubscriptionUrl({
+        readyForAttempt = !profile || !profile.calendar.hint.enabled ||
+          !templateUsesToken(profile.calendar.hint.template, 'calendarSubscriptionUrl') ||
+          !calendar?.enabled ||
+          Boolean(resolveEventCalendarHintSubscriptionUrl({
               config: context.config,
               scopeId: event.scopeId,
               calendar,
-              publicationStatus: getCalendarPublicationStatus(
-                db,
-                event.scopeId,
-                calendarId
-              )
-            })
-          : '';
+              publicationStatus: getCalendarPublicationStatus(db, event.scopeId, calendar.id)
+            }));
       } catch {
         // Recovery remains dormant until the persisted scope configuration is readable.
       }
-      if (!subscriptionUrl) {
+      if (!readyForAttempt) {
         continue;
       }
     }
@@ -4285,9 +4277,11 @@ async function recoverFailedEventProvisioning(
     const postCreateError = isManagedCommunitySubgroupProvisioningError(error)
       ? error
       : undefined;
+    const completionTimeout = isKnownChildCompletionTimeout(error);
     const retryableLinkDisposition = postCreateError?.recoveryDisposition === 'verify_only' ||
       postCreateError?.recoveryDisposition === 'creator_membership_verify_only' ||
-      postCreateError?.recoveryDisposition === 'mutation_allowed';
+      postCreateError?.recoveryDisposition === 'mutation_allowed' ||
+      completionTimeout;
     let operatorRequired = Boolean(payload.subgroupChatId) && !retryableLinkDisposition;
     let recoverySubgroupChatId = payload.subgroupChatId;
     let retry: Awaited<ReturnType<typeof enqueueAndRearmClaimedEventProvisioningRecoveryCursor>> = undefined;
@@ -4324,7 +4318,7 @@ async function recoverFailedEventProvisioning(
           record,
           payload,
           failedAt,
-          postCreateError?.recoveryDisposition
+          postCreateError?.recoveryDisposition ?? (completionTimeout ? 'verify_only' : undefined)
         );
       }
     } else {
@@ -4364,14 +4358,14 @@ async function recoverFailedEventProvisioning(
         recoverySubgroupChatId = subgroupChatId;
         const sameCreatedChild = postCreateError?.created.chatId.trim().toLowerCase() ===
           subgroupChatId.trim().toLowerCase();
-        if (retryableLinkDisposition && sameCreatedChild) {
+        if (retryableLinkDisposition && (sameCreatedChild || completionTimeout)) {
           retry = await enqueueAndRearmClaimedEventProvisioningRecoveryCursor(
             context,
             db,
             latestAfterAttempt!,
             { ...payload, subgroupChatId },
             failedAt,
-            postCreateError.recoveryDisposition
+            postCreateError?.recoveryDisposition ?? 'verify_only'
           );
         } else {
           operatorRequired = true;
@@ -4615,6 +4609,7 @@ async function enqueuePendingUnplannedEventFinalization(
   await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.unplannedFinalization,
+    executionClass: 'interactive',
     scopeId: record.scopeId,
     ...(record.groupId ? { groupId: record.groupId } : {}),
     ...(record.groupWid ? { groupWid: record.groupWid } : {}),
@@ -4701,6 +4696,7 @@ async function enqueueAndRearmClaimedEventProvisioningRecoveryCursor(
   await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.provisioningRecovery,
+    executionClass: 'interactive',
     scopeId: advancedRecord.scopeId,
     ...(advancedRecord.groupId ? { groupId: advancedRecord.groupId } : {}),
     ...(advancedRecord.groupWid ? { groupWid: advancedRecord.groupWid } : {}),
@@ -4735,6 +4731,7 @@ async function enqueuePersistedEventProvisioningRecovery(
   await enqueuePluginJob(context, {
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.provisioningRecovery,
+    executionClass: 'interactive',
     scopeId: record.scopeId,
     ...(record.groupId ? { groupId: record.groupId } : {}),
     ...(record.groupWid ? { groupWid: record.groupWid } : {}),
@@ -4955,6 +4952,7 @@ function eventProvisioningRecoveryAction(
     type: 'plugin.enqueueJob',
     pluginId: EVENTS_PLUGIN_ID,
     jobName: EVENTS_JOBS.provisioningRecovery,
+    executionClass: 'interactive',
     scopeId: record.scopeId,
     runAt: new Date(cursor.nextRunAt),
     payload: {

@@ -1,3 +1,5 @@
+import { createEventLocationStep, type EventLocationResolution } from './eventLocationFlow';
+import type { StoredEventLocation } from './store';
 import { EVENT_DATE_TEMPLATE_TOKENS, EVENT_PROFILE_TEMPLATE_TOKENS, EVENT_SPAN_TEMPLATE_TOKENS } from './config';
 import { renderValueTemplate, renderValueTemplateText, previewTemplateFragment, trimTemplateFragment, joinTemplateFragments, textTemplateFragment, resolvePluginTemplateMentions, combineResolvedTemplate, type TemplateFragment, type PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
 import { eventTemplateDefinition, eventRawAnswers, renderEventConditionalFragment } from './template';
@@ -100,6 +102,7 @@ export function createEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  locationResolution?: EventLocationResolution | undefined;
   flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
@@ -125,6 +128,7 @@ export function restoreEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  locationResolution?: EventLocationResolution | undefined;
   flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
@@ -139,6 +143,7 @@ export function restoreEventFlowDefinition(input: {
     t: input.t,
     profiles: input.profiles,
     templateMentions: input.templateMentions,
+    locationResolution: input.locationResolution,
     prefill: input.prefill,
     timezone: input.timezone,
     locale: input.locale,
@@ -157,6 +162,7 @@ function buildEventFlowDefinition(input: {
   t: TranslateFn;
   profiles: EventProfile[];
   templateMentions?: EventFlowMentionInput | undefined;
+  locationResolution?: EventLocationResolution | undefined;
   flowVersion?: 1 | 2 | undefined;
   prefill?: EventFlowPrefill | undefined;
   timezone?: string | undefined;
@@ -172,7 +178,7 @@ function buildEventFlowDefinition(input: {
   const sharedNavigation = input.flowVersion === 2;
   const isCreation = isEventCreationFlowType(flowType);
   const askPollPhase = isCreation && !sharedNavigation;
-  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data, askPollPhase);
+  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data, askPollPhase, Boolean(input.locationResolution));
   const durationFirst = isCreation || input.askPrefilledQuestions === true;
   const nextQuestionStepId = (state: FlowState) => input.askPrefilledQuestions
     ? nextReviewQuestionStepId(input.profiles, state)
@@ -180,7 +186,8 @@ function buildEventFlowDefinition(input: {
   const timezone = canonicalTimezone(input.timezone ?? 'UTC');
   const timezoneForData = (data: Record<string, unknown>) => {
     const selected = input.profiles.find((profile) => profile.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
-    return canonicalTimezone(isCreation && selected?.location.source === 'fixed' ? selected.location.timezone : timezone);
+    return canonicalTimezone(selected && eventFlowLocation(data, selected)?.timezone
+      || (isCreation && selected?.location.source === 'fixed' ? selected.location.timezone : timezone));
   };
   const timezoneForState = (state: FlowState) => timezoneForData(state.data);
   const locale = input.locale ?? 'en';
@@ -434,6 +441,27 @@ function buildEventFlowDefinition(input: {
     };
   }
 
+  if (input.locationResolution) {
+    for (const profile of input.profiles) {
+      if (profile.location.source !== 'question') continue;
+      const questionKey = profile.location.questionKey;
+      const question = profile.questions.find(question => question.key === questionKey);
+      if (!question) continue;
+      const placeStepId = questionStepId(profile, question);
+      const placeStep = steps[placeStepId];
+      if (!placeStep) continue;
+      const id = eventLocationStepId(profile);
+      const continueQuestionnaire = (state: FlowState) => input.askPrefilledQuestions
+        ? nextReviewQuestionStepId(input.profiles, { ...state, currentStepId: placeStepId })
+        : creationStepId(state.data);
+      placeStep.nextStepIdForState = state => input.askPrefilledQuestions && eventFlowLocation(state.data, profile)
+        ? continueQuestionnaire(state) : id;
+      steps[id] = createEventLocationStep({ id, flowType, resolution: input.locationResolution,
+        locale, t: input.t, placeForState: state => eventFlowPlace(state.data, profile),
+        nextStepIdForState: continueQuestionnaire });
+    }
+  }
+
   if (input.askPrefilledQuestions && initialProfile) {
     for (const step of Object.values(steps)) {
       if (step.kind === 'choice') step.backOptionPosition = 'last';
@@ -626,13 +654,29 @@ export function eventFlowSelectedProfileId(snapshot: FlowSessionSnapshot): strin
   return typeof value === 'string' ? value : undefined;
 }
 
+export function eventLocationStepId(profile: EventProfile): string {
+  return `location-${profile.id}`;
+}
+function eventFlowPlace(data: Record<string, unknown>, profile: EventProfile): string | undefined {
+  return profile.location.source === 'question'
+    ? eventQuestionAnswersBefore(profile, data, profile.questions.length)[profile.location.questionKey]
+    : undefined;
+}
+export function eventFlowLocation(data: Record<string, unknown>, profile: EventProfile): StoredEventLocation | undefined {
+  const value = data[eventLocationStepId(profile)] as StoredEventLocation | undefined;
+  return value?.source === 'question' && value.displayLabel === eventFlowPlace(data, profile)
+    && typeof value.timezone === 'string' && Number.isFinite(value.latitude) && Number.isFinite(value.longitude)
+    ? value : undefined;
+}
+
 export function eventFlowAnswers(
   snapshot: FlowSessionSnapshot,
   profile: EventProfile,
   timezone: string,
   locale = 'en'
 ): EventFlowAnswers | undefined {
-  return eventFlowAnswersFromData(snapshot.state.data, profile, isEventCreationFlowType(snapshot.flowType ?? '') && profile.location.source === 'fixed' ? profile.location.timezone : timezone, locale);
+  return eventFlowAnswersFromData(snapshot.state.data, profile, eventFlowLocation(snapshot.state.data, profile)?.timezone
+    ?? (isEventCreationFlowType(snapshot.flowType ?? '') && profile.location.source === 'fixed' ? profile.location.timezone : timezone), locale);
 }
 
 export function eventFlowAnswersFromRaw(input: {
@@ -895,17 +939,18 @@ function firstQuestionStepId(profile: EventProfile): string {
   return questionStepId(profile, profile.questions[0]!);
 }
 
-function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>, askPollPhase = false): string {
+function firstCreationStepId(profiles: EventProfile[], data: Record<string, unknown>, askPollPhase = false, resolveLocation = false): string {
   const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(data[EVENT_PROFILE_STEP_ID]));
   const spanKind = eventSpanKind(data, profile);
   if (!spanKind) return EVENT_CREATION_SPAN_STEP_ID;
   if (askPollPhase && !eventPollPhase(data, profile)) return EVENT_CREATION_POLL_PHASE_STEP_ID;
   if (!profile) return EVENT_PROFILE_STEP_ID;
-  const question = profile.questions.find((candidate) => (
-    questionAppliesToSpan(profile, candidate, spanKind)
-    && !questionComplete(profile, candidate, data)
-  ));
-  if (question) return questionStepId(profile, question);
+  for (const question of profile.questions) {
+    if (!questionAppliesToSpan(profile, question, spanKind)) continue;
+    if (!questionComplete(profile, question, data)) return questionStepId(profile, question);
+    if (resolveLocation && profile.location.source === 'question' && question.key === profile.location.questionKey
+      && !eventFlowLocation(data, profile)) return eventLocationStepId(profile);
+  }
   return firstMissingSpanStepId(profile, data) ?? confirmStepId(profile);
 }
 

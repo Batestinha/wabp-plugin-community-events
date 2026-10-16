@@ -1,3 +1,4 @@
+import { migrateEventText } from './savedText';
 import { backfillEventTemplateValues } from './templateMigration';
 import { registerEventsExternalActions } from './externalActions';
 import { registerEventsConsoleOperations } from './consoleOperations';
@@ -17,7 +18,10 @@ export const eventsPlugin: BotPlugin = {
     return getEventTimezoneForGroup(eventsDatabase(databases), scopeId, groupWid);
   },
   lifecycle: {
-    migrateData: migrateEventIdentityData
+    async migrateData(ctx) {
+      await migrateEventText(ctx);
+      await migrateEventIdentityData(ctx);
+    }
   },
   registerCommands(context) {
     registerEventsCommands(context);

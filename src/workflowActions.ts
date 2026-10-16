@@ -9,12 +9,21 @@ import { applyEventUpdate, eventIsEditable, eventUpdateAllowed, eventUpdatePrefi
 import { cancelEventLifecycle } from './cancellation';
 import { localizeDefaultEventProfiles, parseEventsConfig } from './config';
 import { eventFlowAnswersFromRaw } from './flow';
-import { eventLocationQuery, fixedEventLocation } from './eventLocation';
+import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
+import { GEOCODER_SERVICE_ID, GEOCODER_GEOCODE_METHOD, GEOCODER_TIMEZONE_METHOD,
+  geocodeOutputSchema, geocoderTimezoneOutputSchema } from './contracts/geocoder/serviceApi';
+import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { materializeEventLifecycle } from './materialize';
 import { eventsDatabase, getEvent, getEventEditRepair, getEventPollReplacement, listScopeEvents, listEventAnnouncementMessages, type StoredEventRecord } from './store';
 import { EVENT_WORKFLOW_SERVICE_ID, eventActionCancelInputSchema, eventActionEditInputSchema, eventWorkflowActions, type EventActionEditInput } from './workflowActionApi';
 
-const describeSchema = z.object({ input: z.object({ eventId: z.string().optional(), query: z.string().max(500).optional() }).passthrough() }).strict();
+const describeSchema = z.object({ input: z.object({ eventId: z.string().optional(), query: z.string().max(500).optional(),
+  locationQuery: z.string().trim().min(2).max(256).optional() }).passthrough() }).strict();
+const describeInputSchema = { type: 'object', properties: {
+  eventId: { type: 'string' }, query: { type: 'string', maxLength: 500 },
+  locationQuery: { type: 'string', minLength: 2, maxLength: 256,
+    description: 'With eventId, resolve a proposed place into locationCandidates for patch.location. Do not invent coordinates or choose between ambiguous places.' }
+} };
 const prepareSchema = z.object({ input: z.record(z.unknown()), bindings: z.array(workflowBindingSchema).default([]) }).strict();
 const executeSchema = z.object({ input: z.record(z.unknown()), guard: z.record(z.unknown()), operationId: z.string().min(1).max(300), predecessors: z.record(z.unknown()).default({}) }).strict();
 const inspectSchema = z.object({ operationId: z.string().min(1).max(300) }).strict();
@@ -60,18 +69,24 @@ async function requireEvent(context: PluginServiceRegistrationContext, eventId: 
   return { ...current, event, profile };
 }
 
-async function describe(context: PluginServiceRegistrationContext, operation: Operation, input: { eventId?: string | undefined; query?: string | undefined }, call: PluginServiceCallContext) {
+async function describe(context: PluginServiceRegistrationContext, operation: Operation, input: z.infer<typeof describeSchema>['input'], call: PluginServiceCallContext) {
   const current = await actorContext(context, call);
   if (!input.eventId) {
     const candidates = [];
+    const currentGroupCandidates = [];
     for (const event of listScopeEvents(eventsDatabase(context.databases), call.scopeId)) {
-      if ((operation === 'edit' ? !eventIsEditable(event) : event.eventStatus !== 'active')
-        || (input.query && !`${event.id} ${event.groupTitle}`.toLocaleLowerCase().includes(input.query.toLocaleLowerCase()))) continue;
+      if (operation === 'edit' ? !eventIsEditable(event) : event.eventStatus !== 'active') continue;
       if (!await eventUpdateAllowed(current.domain, { event, actor: current.actor, creatorIdentityId: event.actorIdentityId })) continue;
-      candidates.push({ id: event.id, label: event.groupTitle, startsAt: event.startsAt, timezone: event.timezone });
-      if (candidates.length >= 100) break;
+      const candidate = { id: event.id, label: event.groupTitle, startsAt: event.startsAt, timezone: event.timezone };
+      // groupWid is the event's source/announcement group, NOT its event subgroup.
+      // Resolve independently of search and pagination so an old title or the
+      // 100-candidate display limit cannot hide a real binding or ambiguity.
+      if (call.groupWid && event.subgroupChatId === call.groupWid) currentGroupCandidates.push(candidate);
+      if (candidates.length < 100 && (!input.query
+        || `${event.id} ${event.groupTitle}`.toLocaleLowerCase().includes(input.query.toLocaleLowerCase()))) candidates.push(candidate);
     }
-    return { candidates };
+    return { candidates, currentGroupEvent: currentGroupCandidates.length === 1 ? currentGroupCandidates[0] : null,
+      describeInputSchema };
   }
   const target = await requireEvent(context, input.eventId, call);
   return { eventId: target.event.id, label: target.event.groupTitle, timezone: target.event.timezone,
@@ -80,8 +95,30 @@ async function describe(context: PluginServiceRegistrationContext, operation: Op
       key: question.key, path: ['patch', 'answers', question.key], label: question.prompt, type: 'string', required: false, current: target.event.answers[question.key] ?? '',
       question
     })) : [],
-    current: operation === 'edit' ? eventUpdatePrefill(target.event, target.profile) : { eventStatus: target.event.eventStatus }
+    current: operation === 'edit' ? eventUpdatePrefill(target.event, target.profile) : { eventStatus: target.event.eventStatus },
+    describeInputSchema,
+    ...(operation === 'edit' && input.locationQuery
+      ? { locationCandidates: await describeLocations(context, target, input.locationQuery, call) } : {})
   };
+}
+
+async function describeLocations(context: PluginServiceRegistrationContext, target: Awaited<ReturnType<typeof requireEvent>>,
+  query: string, call: PluginServiceCallContext) {
+  if (!eventIsEditable(target.event)) throw new Error(target.t('official.community-events.workflow.unavailable'));
+  const fixed = fixedEventLocation(target.profile, target.event.timezone);
+  if (fixed) return [{ location: fixed }];
+  if (!context.services) throw new Error(target.t('official.community-events.workflow.locationRequired'));
+  const principal = { scopeId: call.scopeId, actorIdentityId: call.actorIdentityId, groupId: call.groupId,
+    groupWid: call.groupWid, signal: call.signal };
+  const output = geocodeOutputSchema.parse(await context.services.call({ ...principal,
+    serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_GEOCODE_METHOD, input: { query, language: target.locale, limit: 5 } }));
+  return Promise.all(output.results.map(async place => {
+    const timezone = scopeTimezoneSchema.parse(place.timezone ?? geocoderTimezoneOutputSchema.parse(await context.services!.call({
+      ...principal, serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_TIMEZONE_METHOD, input: place.point
+    })).timezone);
+    return { location: geocodedEventLocation({ query, displayLabel: query, timezone, provider: output.provider, place }),
+      attribution: place.attribution };
+  }));
 }
 
 async function prepare(context: PluginServiceRegistrationContext, operation: Operation, request: z.infer<typeof prepareSchema>, call: PluginServiceCallContext): Promise<PreparedAction> {

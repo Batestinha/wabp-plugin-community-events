@@ -34,7 +34,7 @@ export interface CalendarHintTextTransport {
   sendText(
     chatId: string,
     text: string,
-    options?: { idempotencyKey?: string | undefined }
+    options?: { idempotencyKey?: string | undefined; requiredProviderId?: 'whatsmeow' | undefined }
   ): Promise<{ messageId?: string | undefined }>;
 }
 
@@ -84,13 +84,10 @@ export async function sendEventCalendarHint(input: {
   deliveryKey?: string | undefined;
 }): Promise<EventCalendarHintResult> {
   const hint = input.profile.calendar.hint;
-  const enabled = input.trigger === 'poll_published'
-    ? hint.sendOnPollPublished
-    : hint.sendOnUnplannedCreated;
   const runtime = input.runtime;
   const db = input.db ?? eventsDatabase(runtime.databases);
   const deliveryKey = input.deliveryKey?.trim() || 'initial';
-  if (!enabled) {
+  if (!hint.enabled) {
     const existing = getEventAnnouncementDeliveryClaim(
       db,
       input.event.id,
@@ -191,15 +188,22 @@ export async function sendEventCalendarHint(input: {
       return 'superseded';
     }
     intentPrepared = true;
-    const publicationStatus = getCalendarPublicationStatus(db, input.scopeId, calendarId);
-    const origin = operatorConsolePublicOriginForRuntime(runtime.config);
-    const subscriptionUrl = resolveEventCalendarHintSubscriptionUrl({
-      config: runtime.config,
-      scopeId: input.scopeId,
-      calendar,
-      publicationStatus
-    });
-    if (!subscriptionUrl) {
+    const requiresSubscriptionUrl = templateUsesToken(template, 'calendarSubscriptionUrl');
+    const publicationStatus = requiresSubscriptionUrl
+      ? getCalendarPublicationStatus(db, input.scopeId, calendarId)
+      : undefined;
+    const origin = requiresSubscriptionUrl
+      ? operatorConsolePublicOriginForRuntime(runtime.config)
+      : '';
+    const subscriptionUrl = requiresSubscriptionUrl
+      ? resolveEventCalendarHintSubscriptionUrl({
+          config: runtime.config,
+          scopeId: input.scopeId,
+          calendar,
+          publicationStatus
+        })
+      : '';
+    if (requiresSubscriptionUrl && !subscriptionUrl) {
       deferEventCalendarHintDelivery(db, {
         eventId: input.event.id,
         deliveryKey,
@@ -257,7 +261,12 @@ export async function sendEventCalendarHint(input: {
       chatId: input.announcementGroupWid,
       text, mentions,
       expectedEventUpdatedAt,
-      sender: input.activeTransport
+      sender: {
+        sendText: (chatId, text, options) => input.activeTransport.sendText(chatId, text, {
+          ...options,
+          requiredProviderId: 'whatsmeow'
+        })
+      }
     });
     if (delivery.status !== 'sent') {
       return delivery.status;

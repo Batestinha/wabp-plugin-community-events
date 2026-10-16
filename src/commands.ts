@@ -1,3 +1,4 @@
+import { eventFlowLocation, eventLocationStepId } from './flow';
 import { beginFinalEventCreation, registerFinalEventCreationFlow } from './creationDecision';
 import { resolveEventBody } from './announcements';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
@@ -35,6 +36,7 @@ import { sendEventCalendarHint } from './calendarHint';
 import { eventLifecycleCompleteAt, formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
+import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
 import {
   createEventFlowDefinition,
@@ -124,6 +126,7 @@ import {
   configuredEventCalendarOwnership,
   eventsDatabase,
   getEvent,
+  getUnplannedEventFinalization,
   listEventsBySubgroupChatId,
   insertEvent,
   listCancellableEvents,
@@ -209,7 +212,7 @@ export interface EventUpdateDraft {
 }
 
 interface PendingEventEditSelection {
-  operation?: 'edit' | 'poll_close' | undefined;
+  operation?: 'edit' | 'poll_close' | 'poll_close_confirm' | undefined;
   id: string;
   responseChatId: string;
   scopeId: string;
@@ -297,6 +300,8 @@ const EVENT_EDIT_SELECTION_PURPOSE = 'official.community-events.edit.select';
 const EVENT_EDIT_SELECTION_CANCELLATION_WORKFLOW_ID = 'event-edit-selection';
 const EVENT_EDIT_FREE_TEXT_OPTION_ID = 'event-query';
 const EVENT_EDIT_SELECTION_TTL_SECONDS = 30 * 60;
+const EVENT_POLL_CLOSE_CONFIRM_OPTION_ID = 'confirm';
+const EVENT_POLL_CLOSE_CANCEL_OPTION_ID = 'cancel';
 const EVENT_UPDATE_CONFLICT_ERROR = 'event_update_conflict';
 const EVENT_POLL_PUBLICATION_OBSERVATION_MS = 35_000;
 const EVENT_POLL_PUBLICATION_OBSERVATION_INTERVAL_MS = 1_000;
@@ -483,6 +488,7 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
+    services: context.services, ephemeralStore: runtime.ephemeralStore,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
       resolveIdentityAddress: context.resolveIdentityAddress,
@@ -647,8 +653,90 @@ async function startEventPollClose(context: PluginOperationContext, ctx: Command
   if (candidates.length > 1) {
     return startEventEditSelection(context, ctx, { scopeId, actor, query, candidates, operation: 'poll_close' });
   }
-  const result = await closeSelectedEventPoll(runtime, candidates[0]!, actor);
-  return { handled: true, text: ctx.t(result.messageKey, result.params) };
+  return startEventPollCloseConfirmation(context, ctx, candidates[0]!, actor);
+}
+
+async function startEventPollCloseConfirmation(
+  context: PluginOperationContext,
+  ctx: CommandContext,
+  event: StoredEventRecord,
+  actor: EventAuthorizationActor
+) {
+  const runtime = requireOfficialCommandRuntime(context);
+  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
+  const pending: PendingEventEditSelection = {
+    operation: 'poll_close_confirm',
+    id: randomUUID(),
+    responseChatId: actor.deliveryChatId,
+    scopeId: event.scopeId,
+    actorIdentityId: actor.identityId,
+    actorWid: actor.canonicalWid,
+    actorDeliveryChatId: actor.deliveryChatId,
+    actorMentionWid: actor.mentionWid,
+    actorLabel: ctx.message.senderDisplayName ?? ctx.message.senderWid,
+    locale: ctx.locale,
+    query: event.id,
+    candidateEventIds: [event.id],
+    originChatId: ctx.message.chatId,
+    originContext: ctx.message.context,
+    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
+    createdAt: new Date().toISOString()
+  };
+  try {
+    await promptEventPollCloseConfirmation({ context, runtime, pending, event, t: ctx.t });
+  } catch {
+    return { handled: true, text: ctx.t('official.community-events.pollClose.confirmStartFailed') };
+  }
+  if (ctx.message.context !== 'group') {
+    return { handled: true, response: { kind: 'none' as const } };
+  }
+  return {
+    handled: true,
+    text: ctx.t(pending.privateDeliveryFallback
+      ? 'official.community-events.edit.selectionStartedInGroupFallback'
+      : 'official.community-events.edit.selectionStartedPrivate')
+  };
+}
+
+async function promptEventPollCloseConfirmation(input: {
+  context: PluginOperationContext;
+  runtime: OfficialPluginCommandRuntime;
+  pending: PendingEventEditSelection;
+  event: StoredEventRecord;
+  t: CommandContext['t'];
+}): Promise<void> {
+  await rememberActiveEventEditSelection(input.runtime, input.pending);
+  try {
+    await input.context.flowEngine.promptChoice({
+      purpose: EVENT_EDIT_SELECTION_PURPOSE,
+      subjectType: 'CommunityEventPollCloseConfirmation',
+      subjectId: input.pending.id,
+      question: input.t('official.community-events.pollClose.confirm', {
+        title: eventDisplayTitle(input.event),
+        eventId: input.event.id
+      }),
+      options: [
+        { id: EVENT_POLL_CLOSE_CONFIRM_OPTION_ID, label: input.t('official.community-events.pollClose.confirmYes') },
+        { id: EVENT_POLL_CLOSE_CANCEL_OPTION_ID, label: input.t('official.community-events.pollClose.confirmNo') }
+      ],
+      recipientWids: [input.pending.responseChatId],
+      eligibleVoterIdentityIds: [input.pending.actorIdentityId],
+      selectionRule: 'SINGLE',
+      minSelections: 1,
+      maxSelections: 1,
+      ...(input.pending.privateDeliveryFallback
+        ? { privateDeliveryFallback: input.pending.privateDeliveryFallback }
+        : {}),
+      questionSendOptions: {
+        idempotencyKey: `community-events:event-poll-close-confirm:${input.pending.id}`
+      },
+      expiresAt: new Date(Date.now() + EVENT_EDIT_SELECTION_TTL_SECONDS * 1000),
+      t: input.t
+    });
+  } catch (error) {
+    await clearActiveEventEditSelection(input.runtime, input.pending);
+    throw error;
+  }
 }
 
 async function closeSelectedEventPoll(
@@ -993,7 +1081,10 @@ async function beginEventUpdateFlow(
     now: startedAt,
     allowPast: !replacesOpenPoll
   });
+  if (input.event.eventLocation) initialData[eventLocationStepId(profile)] = input.event.eventLocation;
   const definition = createEventFlowDefinition({
+    locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
+      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid },
     templateMentions: { context, scopeId: input.event.scopeId, chatId: input.actor.deliveryChatId,
       currentGroupId: input.event.groupWid, creatorIdentityId: input.actor.identityId },
     t: input.t,
@@ -1088,6 +1179,8 @@ function registerEventEditRecovery(context: PluginOperationContext): void {
       const replacesOpenPoll = draft.replacesOpenPoll ?? (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open');
       const startedAt = new Date(draft.createdAt);
       const definition = createEventFlowDefinition({
+        locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid },
         templateMentions: { context, scopeId: draft.scopeId, chatId: session.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         t, profiles: [draft.profile], prefill: draft.prefill, timezone: draft.timezone, locale: draft.locale,
@@ -1179,12 +1272,13 @@ function registerEventUpdateFlowCompletionHandler(
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
+    const earlyLocation = eventFlowLocation(snapshot.state.data, draft.profile);
     const lifecycleCompleteAt = eventLifecycleCompleteAt({
       localDate: answers.localDate,
       ...(answers.localTime ? { localTime: answers.localTime } : {}),
       endsAt: answers.endsAt,
       spanKind: answers.spanKind,
-      timezone: draft.timezone
+      timezone: earlyLocation?.timezone ?? draft.timezone
     });
     const startsInPast = Boolean(lifecycleCompleteAt && lifecycleCompleteAt.getTime() <= Date.now());
     const pastCompletionConfirmed = eventFlowPastCompletionConfirmed(snapshot, draft.profile);
@@ -1196,6 +1290,11 @@ function registerEventUpdateFlowCompletionHandler(
       return true;
     }
 
+    if (earlyLocation) {
+      await applyEventUpdate({ context, runtime, activeTransport, responseChatId, draft,
+        eventId: event.id, answers, eventLocation: earlyLocation, pastCompletionConfirmed, t });
+      return true;
+    }
     await beginEventUpdateLocationSelection({
       context,
       runtime,
@@ -1635,7 +1734,7 @@ async function replaceOpenEventPollLifecycle(input: {
     targetGroupTitle: input.materialized.groupTitle,
     calendarId: calendarId ?? '',
     ...(announcementIntent ? { announcementDeliveryKey: announcementIntent.deliveryKey } : {}),
-    ...(input.profile.calendar.hint.sendOnPollPublished && input.event.announcementGroupWid
+    ...(input.profile.calendar.hint.enabled && input.event.announcementGroupWid
       ? {
           calendarHintDeliveryKey: input.operationId,
           calendarHintLocale: input.locale
@@ -3160,6 +3259,13 @@ export function registerEventFlowCompletionHandlers(
         await activeTransport.sendText(responseChatId, t('official.community-events.notConfigured'));
         return true;
       }
+      const earlyLocation = eventFlowLocation(snapshot.state.data, profile);
+      if (earlyLocation) {
+        await beginFinalEventCreation({ context, runtime, activeTransport, responseChatId,
+          draft: { ...draft, actorWid: actor.canonicalWid }, profile, answers, announcementGroupWid,
+          eventLocation: earlyLocation, t }, publishConfirmedEvent);
+        return true;
+      }
       await beginEventLocationSelection({
         context,
         runtime,
@@ -3204,6 +3310,33 @@ function registerEventEditSelectionHandler(context: PluginOperationContext): voi
     }
 
     const selected = lock.selectedOptions[0];
+    if (pending.operation === 'poll_close_confirm') {
+      let messageKey: string;
+      let params: Record<string, string> | undefined;
+      if (selected?.id === EVENT_POLL_CLOSE_CONFIRM_OPTION_ID) {
+        const eventId = pending.candidateEventIds[0];
+        const event = eventId ? getEvent(eventsDatabase(runtime.databases), eventId) : undefined;
+        if (!event || event.scopeId !== pending.scopeId || !eventPollIsOpen(event)) {
+          messageKey = 'official.community-events.pollClose.unavailable';
+        } else {
+          const result = await closeSelectedEventPoll(runtime, event, eventEditSelectionActor(pending));
+          messageKey = result.messageKey;
+          params = result.params;
+        }
+      } else if (selected?.id === EVENT_POLL_CLOSE_CANCEL_OPTION_ID) {
+        messageKey = 'official.community-events.pollClose.cancelled';
+      } else {
+        messageKey = 'official.community-events.pollClose.unavailable';
+      }
+      await clearActiveEventEditSelection(runtime, pending);
+      await activeTransport.sendText(
+        pending.responseChatId,
+        t(messageKey, params),
+        { idempotencyKey: `community-events:event-poll-close-confirm:${pending.id}:terminal` }
+      );
+      await context.flowEngine.acknowledgePromptLock(lock.flowPromptId);
+      return true;
+    }
     if (selected?.id === EVENT_EDIT_FREE_TEXT_OPTION_ID) {
       const query = selected.label.trim();
       if (!query || isCommandLikeLocationReply(query)) {
@@ -3315,8 +3448,31 @@ async function completeEventEditSelection(input: {
     if (!event || event.scopeId !== input.pending.scopeId || !input.pending.candidateEventIds.includes(event.id)) {
       return terminal('official.community-events.pollClose.noEvents');
     }
-    const result = await closeSelectedEventPoll(input.runtime, event, actor);
-    return terminal(result.messageKey, result.params);
+    await clearActiveEventEditSelection(input.runtime, input.pending);
+    await input.context.flowEngine.acknowledgePromptLock(input.lockFlowPromptId);
+    const pending: PendingEventEditSelection = {
+      ...input.pending,
+      operation: 'poll_close_confirm',
+      id: randomUUID(),
+      candidateEventIds: [event.id],
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await promptEventPollCloseConfirmation({
+        context: input.context,
+        runtime: input.runtime,
+        pending,
+        event,
+        t: input.t
+      });
+    } catch {
+      await input.activeTransport.sendText(
+        input.pending.responseChatId,
+        input.t('official.community-events.pollClose.confirmStartFailed'),
+        { idempotencyKey: `community-events:event-poll-close-confirm:${pending.id}:failed` }
+      );
+    }
+    return true;
   }
 
   if (
@@ -3799,18 +3955,28 @@ async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Pro
           closeAt: formatEventDateTime(materialized.closeAt, input.draft.timezone, input.draft.locale)
         }), { idempotencyKey: `community-events:event-creation:${eventId}:poll-deadline-notice` });
       }
-      const result = await createUnplannedEventLifecycle({
-        context: input.context,
-        runtime: input.runtime,
-        activeTransport: input.activeTransport,
-        db,
-        eventId,
-        draft: input.draft,
-        profile: input.profile,
-        announcementGroupWid: input.announcementGroupWid,
-        materialized,
-        now
-      });
+      let pendingNotice: Promise<void> | undefined;
+      const pendingTimer = setTimeout(() => {
+        pendingNotice = sendUnplannedEventProgressNotice(input, eventDb, eventId);
+      }, 60_000);
+      let result: CreateUnplannedEventLifecycleResult;
+      try {
+        result = await createUnplannedEventLifecycle({
+          context: input.context,
+          runtime: input.runtime,
+          activeTransport: input.activeTransport,
+          db,
+          eventId,
+          draft: input.draft,
+          profile: input.profile,
+          announcementGroupWid: input.announcementGroupWid,
+          materialized,
+          now
+        });
+      } finally {
+        clearTimeout(pendingTimer);
+        await pendingNotice;
+      }
       if (
         result.status !== 'completed' &&
         result.creatorMembershipPauseKind &&
@@ -3884,7 +4050,11 @@ async function publishConfirmedEvent(input: ConfirmedEventPublicationInput): Pro
                   title: result.subgroupTitle,
                   eventId: result.eventId
                 })
-            : input.t('official.community-events.unplannedPublished')
+            : result.status === 'finalization_pending'
+              ? input.t('official.community-events.unplannedFinalizationPending', {
+                  eventId: result.eventId
+                })
+              : input.t('official.community-events.unplannedPublished')
         );
       }
       return;
@@ -4400,7 +4570,7 @@ async function eventProfileSnapshotIsCurrent(input: {
 type CreateUnplannedEventLifecycleResult =
   | { status: 'completed' }
   | {
-      status: 'recovery_scheduled' | 'operator_required';
+      status: 'recovery_scheduled' | 'operator_required' | 'finalization_pending';
       eventId: string;
       subgroupChatId?: string | undefined;
       subgroupTitle: string;
@@ -4511,7 +4681,7 @@ async function createUnplannedEventLifecycle(input: {
     }
   });
 
-  await attemptUnplannedEventFinalization({
+  const finalization = await attemptUnplannedEventFinalization({
     context: input.context,
     runtime: input.runtime,
     activeTransport: input.activeTransport,
@@ -4523,7 +4693,37 @@ async function createUnplannedEventLifecycle(input: {
     trigger: 'unplanned_created',
     now: input.now
   });
-  return { status: 'completed' };
+  return finalization.status === 'completed' || finalization.status === 'already_completed'
+    ? { status: 'completed' }
+    : { status: 'finalization_pending', eventId: event.id, subgroupTitle: event.subgroupTitle || event.groupTitle };
+}
+
+async function sendUnplannedEventProgressNotice(
+  input: ConfirmedEventPublicationInput,
+  db: ReturnType<typeof eventsDatabase>,
+  eventId: string
+): Promise<void> {
+  try {
+    const event = getEvent(db, eventId);
+    if (!event || event.origin !== 'unplanned') return;
+    const finalization = getUnplannedEventFinalization(db, eventId);
+    if (event.eventStatus === 'active' && finalization?.status === 'completed') return;
+    const key = !event.subgroupChatId
+      ? 'official.community-events.unplannedStillWorkingCreate'
+      : event.eventStatus === 'active'
+        ? 'official.community-events.unplannedStillWorkingAnnouncement'
+        : event.groupLifecycleStatus === 'poll_closed'
+          ? 'official.community-events.unplannedStillWorkingLink'
+          : 'official.community-events.unplannedStillWorkingSetup';
+    await input.activeTransport.sendText(input.responseChatId, input.t(key, { title: event.groupTitle, eventId }), { idempotencyKey: `community-events:event-creation:${eventId}:60-second-progress` });
+    appendEventLog(db, {
+      eventId,
+      action: 'events.unplanned.progress_notice_sent',
+      metadata: { key, elapsedThresholdMs: 60_000 }
+    });
+  } catch (error) {
+    input.context.logger?.warn({ error, eventId }, 'Unable to deliver event creation progress notice');
+  }
 }
 
 type ProvisionUnplannedEventSubgroupResult =
@@ -4779,7 +4979,9 @@ async function provisionUnplannedEventSubgroup(input: {
       : created;
     const recoveryDisposition = isManagedCommunitySubgroupProvisioningError(error)
       ? error.recoveryDisposition
-      : undefined;
+      : knownChild && isKnownChildCompletionTimeout(error)
+        ? 'verify_only'
+        : undefined;
     const creatorMembershipPauseKind = eventCreatorMembershipPauseKindForFailure(error);
     const retryableLinkDisposition = recoveryDisposition === 'verify_only' ||
       recoveryDisposition === 'creator_membership_verify_only' ||
@@ -4962,6 +5164,7 @@ async function provisionUnplannedEventSubgroup(input: {
     try {
       await input.runtime.enqueuePluginJob({
         jobName: EVENTS_JOBS.provisioningRecovery,
+        executionClass: 'interactive',
         scopeId: failedEvent.scopeId,
         ...(failedEvent.groupId ? { groupId: failedEvent.groupId } : {}),
         ...(failedEvent.groupWid ? { groupWid: failedEvent.groupWid } : {}),

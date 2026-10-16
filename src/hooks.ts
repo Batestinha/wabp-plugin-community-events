@@ -280,6 +280,7 @@ export function createEventsHooks(context: PluginRuntimeContext, options: Events
   if (context.flowEngine) {
     registerEventPublicationRecovery(context);
     registerEventCreationFlowDefinitionResolver({
+      services: context.services, ephemeralStore: context.ephemeralStore,
       flowEngine: context.flowEngine,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,

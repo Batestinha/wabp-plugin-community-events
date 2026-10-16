@@ -1,3 +1,4 @@
+import { eventFlowLocation, eventLocationStepId } from './flow';
 import { beginFinalEventCreation, registerFinalEventCreationFlow } from './creationDecision';
 import { resolveEventBody } from './announcements';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
@@ -487,6 +488,7 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
+    services: context.services, ephemeralStore: runtime.ephemeralStore,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
       resolveIdentityAddress: context.resolveIdentityAddress,
@@ -1079,7 +1081,10 @@ async function beginEventUpdateFlow(
     now: startedAt,
     allowPast: !replacesOpenPoll
   });
+  if (input.event.eventLocation) initialData[eventLocationStepId(profile)] = input.event.eventLocation;
   const definition = createEventFlowDefinition({
+    locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
+      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid },
     templateMentions: { context, scopeId: input.event.scopeId, chatId: input.actor.deliveryChatId,
       currentGroupId: input.event.groupWid, creatorIdentityId: input.actor.identityId },
     t: input.t,
@@ -1174,6 +1179,8 @@ function registerEventEditRecovery(context: PluginOperationContext): void {
       const replacesOpenPoll = draft.replacesOpenPoll ?? (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open');
       const startedAt = new Date(draft.createdAt);
       const definition = createEventFlowDefinition({
+        locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid },
         templateMentions: { context, scopeId: draft.scopeId, chatId: session.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         t, profiles: [draft.profile], prefill: draft.prefill, timezone: draft.timezone, locale: draft.locale,
@@ -1265,12 +1272,13 @@ function registerEventUpdateFlowCompletionHandler(
       await activeTransport.sendText(responseChatId, t('official.community-events.update.invalid'));
       return true;
     }
+    const earlyLocation = eventFlowLocation(snapshot.state.data, draft.profile);
     const lifecycleCompleteAt = eventLifecycleCompleteAt({
       localDate: answers.localDate,
       ...(answers.localTime ? { localTime: answers.localTime } : {}),
       endsAt: answers.endsAt,
       spanKind: answers.spanKind,
-      timezone: draft.timezone
+      timezone: earlyLocation?.timezone ?? draft.timezone
     });
     const startsInPast = Boolean(lifecycleCompleteAt && lifecycleCompleteAt.getTime() <= Date.now());
     const pastCompletionConfirmed = eventFlowPastCompletionConfirmed(snapshot, draft.profile);
@@ -1282,6 +1290,11 @@ function registerEventUpdateFlowCompletionHandler(
       return true;
     }
 
+    if (earlyLocation) {
+      await applyEventUpdate({ context, runtime, activeTransport, responseChatId, draft,
+        eventId: event.id, answers, eventLocation: earlyLocation, pastCompletionConfirmed, t });
+      return true;
+    }
     await beginEventUpdateLocationSelection({
       context,
       runtime,
@@ -3244,6 +3257,13 @@ export function registerEventFlowCompletionHandlers(
       const announcementGroupWid = profile.announcementGroupWid || draft.defaultAnnouncementGroupWid;
       if (!announcementGroupWid) {
         await activeTransport.sendText(responseChatId, t('official.community-events.notConfigured'));
+        return true;
+      }
+      const earlyLocation = eventFlowLocation(snapshot.state.data, profile);
+      if (earlyLocation) {
+        await beginFinalEventCreation({ context, runtime, activeTransport, responseChatId,
+          draft: { ...draft, actorWid: actor.canonicalWid }, profile, answers, announcementGroupWid,
+          eventLocation: earlyLocation, t }, publishConfirmedEvent);
         return true;
       }
       await beginEventLocationSelection({

@@ -1,3 +1,4 @@
+import type { EventLocationResolution } from './eventLocationFlow';
 import { resolvePluginTemplateMentions, combineResolvedTemplate } from '@wabs/plugin-sdk/templates';
 import { renderEventConditionalFragment } from './template';
 import type { PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
@@ -117,6 +118,8 @@ export const eventDraftSchema = z.object({
 
 export interface EventCreationFlowStarterContext extends PluginTemplateMentionContext {
   flowEngine: FlowEngine;
+  services?: EventLocationResolution['services'];
+  ephemeralStore?: EventLocationResolution['ephemeralStore'];
   dataStore: PluginDataStore;
   i18n: Pick<I18nService, 'resolveIdentityLocale' | 'translator'>;
   configFor(scopeId: string, actorIdentityId?: string | undefined): Promise<Record<string, unknown>>;
@@ -375,6 +378,8 @@ export class EventCreationFlowStarter {
       now: startedAt
     });
     const definition = createEventFlowDefinition({
+      locationResolution: { services: this.context.services, ephemeralStore: this.context.ephemeralStore,
+        scopeId: input.scopeId, actorIdentityId: input.actorIdentityId, groupId: input.groupId, groupWid: input.groupWid },
       templateMentions: { context: this.context, scopeId: input.scopeId, chatId: input.prepared.actor.deliveryChatId,
         currentGroupId: input.groupWid, creatorIdentityId: input.actorIdentityId },
       t: input.prepared.t,
@@ -473,7 +478,7 @@ export class EventCreationFlowStarter {
 const eventCreationResolverRegistrations = new WeakSet<FlowEngine>();
 
 export function registerEventCreationFlowDefinitionResolver(
-  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n'> & PluginTemplateMentionContext,
+  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n' | 'services' | 'ephemeralStore'> & PluginTemplateMentionContext,
   registerCompletionHandlers: RegisterEventCreationCompletionHandlers
 ): void {
   if (eventCreationResolverRegistrations.has(context.flowEngine)) {
@@ -504,6 +509,8 @@ export function registerEventCreationFlowDefinitionResolver(
       }
       const t = await translatorForEventDraft(context.i18n, draft);
       const definition = restoreEventFlowDefinition({
+        locationResolution: { services: context.services, ephemeralStore: context.ephemeralStore,
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupId: draft.groupId, groupWid: draft.groupWid },
         templateMentions: { context, scopeId: draft.scopeId, chatId: draft.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         flowType: draft.flowType,

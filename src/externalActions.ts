@@ -14,6 +14,7 @@ import { replaceRejectedEventChildFromOperator } from './legacyChildReplacement'
 import { eventsDatabase, getEvent, getEventRequiredCreatorReference, retryEventArtifactDeletionCleanup } from './store';
 import { requireOfficialCommandRuntime } from './runtime';
 import { eventOperatorActionSchemas, eventOperatorActionDeclarations } from './operatorActions';
+import { editEventFromOperator, eventOperatorEditInputSchema } from './operatorEdit';
 
 const OPERATOR_CONSOLE_ACTOR_WID = 'operator-console@system';
 
@@ -44,6 +45,15 @@ export function registerEventsExternalActions(registration: ManagedGroupExternal
       adoption: parsed
     });
   };
+  const officialEventsEdit = async (body: unknown): Promise<unknown> => editEventFromOperator({
+    context: commandContext(),
+    transport: { sendText: (chatId, text, options) => sendText(chatId, text, options), deleteMessage: (messageId) => deleteMessage(messageId),
+      setGroupSubject: (chatId, subject) => {
+        if (!registration.setGroupSubject) throw new Error('Host group renaming is unavailable.');
+        return registration.setGroupSubject(chatId, subject);
+      } },
+    request: eventOperatorEditInputSchema.parse(body)
+  });
   const officialEventsTerminate = async (body: unknown): Promise<unknown> => {
     const parsed = eventOperatorActionSchemas.officialEventsTerminate.parse(body);
     const context = commandContext();
@@ -185,6 +195,7 @@ export function registerEventsExternalActions(registration: ManagedGroupExternal
   const handlers: Record<string, (body: unknown) => Promise<unknown>> = {
     'official.community-events.adopt': officialEventsAdopt,
     'official.community-events.terminate': officialEventsTerminate,
+    'official.community-events.edit': officialEventsEdit,
     'official.community-events.retryCancellationCleanup': officialEventsRetryCancellationCleanup,
     'official.community-events.calendarHintReplay': officialEventsCalendarHintReplay,
     'official.community-events.publishCalendar': officialEventsPublishCalendar,

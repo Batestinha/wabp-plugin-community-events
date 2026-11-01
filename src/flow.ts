@@ -1,4 +1,14 @@
 import { createEventLocationStep, type EventLocationResolution } from './eventLocationFlow';
+import {
+  effectiveEventFlowData,
+  eventStepsAnsweredBySplit,
+  normalizedPlaceText,
+  normalizeNumberWords,
+  withResilientReplies,
+  type AnswerAheadTarget
+} from './answerResilience';
+import { eventTimeRangeProblem } from './datetime';
+import { GEOCODER_GEOCODE_METHOD, GEOCODER_SERVICE_ID, geocodeOutputSchema } from './contracts/geocoder/serviceApi';
 import type { StoredEventLocation } from './store';
 import { EVENT_DATE_TEMPLATE_TOKENS, EVENT_PROFILE_TEMPLATE_TOKENS, EVENT_SPAN_TEMPLATE_TOKENS } from './config';
 import { renderValueTemplate, renderValueTemplateText, previewTemplateFragment, trimTemplateFragment, joinTemplateFragments, textTemplateFragment, resolvePluginTemplateMentions, combineResolvedTemplate, type TemplateFragment, type PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
@@ -116,6 +126,10 @@ export function createEventFlowDefinition(input: {
   completeMessageKey?: string | false | undefined;
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
+  /** Places this community already used; a reply equal to one is never split. */
+  knownPlaces?: string[] | undefined;
+  /** Edit flows only: fields chosen before the flow starts ("/event edit hora"). */
+  editFields?: string[] | undefined;
 }): FlowDefinition {
   const flowType = input.flowTypePrefix
     ? `${input.flowTypePrefix}.${input.flowInstanceId?.trim() || randomUUID()}`
@@ -134,6 +148,7 @@ export function restoreEventFlowDefinition(input: {
   timezone?: string | undefined;
   locale?: string | undefined;
   initialData: Record<string, unknown>;
+  knownPlaces?: string[] | undefined;
 }): FlowDefinition {
   const flowType = input.flowType.trim();
   if (!isEventCreationFlowType(flowType)) {
@@ -148,6 +163,7 @@ export function restoreEventFlowDefinition(input: {
     timezone: input.timezone,
     locale: input.locale,
     initialData: input.initialData,
+    knownPlaces: input.knownPlaces,
     completeMessageKey: false,
     flowVersion: input.flowVersion ?? (input.initialData[EVENT_FLOW_VERSION_KEY] === 2 ? 2 : 1)
   }, flowType);
@@ -174,14 +190,18 @@ function buildEventFlowDefinition(input: {
   completeMessageKey?: string | false | undefined;
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
+  /** Places this community already used; a reply equal to one is never split. */
+  knownPlaces?: string[] | undefined;
+  /** Edit flows only: fields chosen before the flow starts ("/event edit hora"). */
+  editFields?: string[] | undefined;
 }, flowType: string): FlowDefinition {
   const sharedNavigation = input.flowVersion === 2;
   const isCreation = isEventCreationFlowType(flowType);
   const askPollPhase = isCreation && !sharedNavigation;
-  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, data, askPollPhase, Boolean(input.locationResolution));
+  const creationStepId = (data: Record<string, unknown>) => firstCreationStepId(input.profiles, effectiveEventFlowData(data), askPollPhase, Boolean(input.locationResolution));
   const durationFirst = isCreation || input.askPrefilledQuestions === true;
   const nextQuestionStepId = (state: FlowState) => input.askPrefilledQuestions
-    ? nextReviewQuestionStepId(input.profiles, state)
+    ? nextReviewQuestionStepId(input.profiles, state, sharedNavigation)
     : creationStepId(state.data);
   const timezone = canonicalTimezone(input.timezone ?? 'UTC');
   const timezoneForData = (data: Record<string, unknown>) => {
@@ -452,7 +472,7 @@ function buildEventFlowDefinition(input: {
       if (!placeStep) continue;
       const id = eventLocationStepId(profile);
       const continueQuestionnaire = (state: FlowState) => input.askPrefilledQuestions
-        ? nextReviewQuestionStepId(input.profiles, { ...state, currentStepId: placeStepId })
+        ? nextReviewQuestionStepId(input.profiles, { ...state, currentStepId: placeStepId }, sharedNavigation)
         : creationStepId(state.data);
       placeStep.nextStepIdForState = state => input.askPrefilledQuestions && eventFlowLocation(state.data, profile)
         ? continueQuestionnaire(state) : id;
@@ -481,11 +501,21 @@ function buildEventFlowDefinition(input: {
     keepAnswer(endTimeStepId(initialProfile), initialData[endTimeStepId(initialProfile)], input.prefill?.endLocalTime, true);
   }
 
+  if (input.askPrefilledQuestions && initialProfile && sharedNavigation) {
+    steps[EVENT_EDIT_FIELDS_STEP_ID] = eventEditFieldsStep(input.t, initialProfile, initialData, input.profiles);
+  }
+  applyResilientReplies({
+    steps, profiles: input.profiles, t: input.t, locale, timezoneForState, now: input.now,
+    allowPast: input.allowPastStartsAt, locationResolution: input.locationResolution, knownPlaces: input.knownPlaces ?? []
+  });
+
   return {
     flowType,
     ...(sharedNavigation ? { navigationControls: true as const } : {}),
     t: input.t,
-    initialStepId: input.askPrefilledQuestions ? EVENT_CREATION_SPAN_STEP_ID
+    initialStepId: input.askPrefilledQuestions && initialProfile && sharedNavigation
+      ? editInitialStepId(input.profiles, initialData, input.editFields)
+      : input.askPrefilledQuestions ? EVENT_CREATION_SPAN_STEP_ID
       : isCreation ? creationStepId(initialData) : initialProfile
         ? firstMissingQuestionStepId(initialProfile, initialData)
           ?? firstMissingSpanStepId(initialProfile, initialData, askPollPhase)
@@ -675,7 +705,7 @@ export function eventFlowAnswers(
   timezone: string,
   locale = 'en'
 ): EventFlowAnswers | undefined {
-  return eventFlowAnswersFromData(snapshot.state.data, profile, eventFlowLocation(snapshot.state.data, profile)?.timezone
+  return eventFlowAnswersFromData(effectiveEventFlowData(snapshot.state.data), profile, eventFlowLocation(snapshot.state.data, profile)?.timezone
     ?? (isEventCreationFlowType(snapshot.flowType ?? '') && profile.location.source === 'fixed' ? profile.location.timezone : timezone), locale);
 }
 
@@ -954,16 +984,79 @@ function firstCreationStepId(profiles: EventProfile[], data: Record<string, unkn
   return firstMissingSpanStepId(profile, data) ?? confirmStepId(profile);
 }
 
-function nextReviewQuestionStepId(profiles: EventProfile[], state: FlowState): string {
+function nextReviewQuestionStepId(profiles: EventProfile[], state: FlowState, sharedNavigation = false): string {
   const profile = profiles.find((candidate) => candidate.id === singleChoiceValue(state.data[EVENT_PROFILE_STEP_ID]));
   if (!profile) return EVENT_PROFILE_STEP_ID;
   const spanKind = eventSpanKind(state.data, profile);
-  // Review every applicable question, even when the stored event has an answer.
+  const selected = sharedNavigation ? selectedEditFields(state.data) : undefined;
+  const answeredBySplit = eventStepsAnsweredBySplit(state.data);
+  // Review every applicable (selected) question, even when the stored event has an answer.
   const currentQuestionIndex = profile.questions.findIndex((question) => questionStepId(profile, question) === state.currentStepId);
   const nextQuestion = profile.questions.slice(currentQuestionIndex + 1)
-    .find((question) => questionAppliesToSpan(profile, question, spanKind));
+    .find((question) => questionAppliesToSpan(profile, question, spanKind)
+      && (!selected || selected.has(question.key))
+      && !answeredBySplit.has(questionStepId(profile, question)));
   if (nextQuestion) return questionStepId(profile, nextQuestion);
-  return spanKind === 'multi_day' ? endDateStepId(profile) : confirmStepId(profile);
+  if (spanKind !== 'multi_day') return confirmStepId(profile);
+  if (selected && !selected.has(EDIT_FIELD_SPAN) && !selected.has(EDIT_FIELD_END)
+    && !selected.has(profile.startsAtDateQuestionKey) && isEventDateAnswer(state.data[endDateStepId(profile)])) {
+    return confirmStepId(profile);
+  }
+  return endDateStepId(profile);
+}
+
+export const EVENT_EDIT_FIELDS_STEP_ID = 'edit-fields';
+const EDIT_FIELD_SPAN = '__span';
+const EDIT_FIELD_END = '__end';
+const EDIT_FIELD_ALL = '__all';
+
+/** The fields an edit reviews; undefined means every field (older sessions and "All"). */
+function selectedEditFields(data: Record<string, unknown>): Set<string> | undefined {
+  const raw = data[EVENT_EDIT_FIELDS_STEP_ID];
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const values = raw.filter((value): value is string => typeof value === 'string');
+  return values.includes(EDIT_FIELD_ALL) ? undefined : new Set(values);
+}
+
+function editInitialStepId(profiles: EventProfile[], data: Record<string, unknown>, preset?: string[] | undefined): string {
+  if (!preset?.length) return EVENT_EDIT_FIELDS_STEP_ID;
+  return firstSelectedEditStepId(profiles, { ...data, [EVENT_EDIT_FIELDS_STEP_ID]: preset });
+}
+
+function firstSelectedEditStepId(profiles: EventProfile[], data: Record<string, unknown>): string {
+  const selected = selectedEditFields(data);
+  if (!selected || selected.has(EDIT_FIELD_SPAN)) return EVENT_CREATION_SPAN_STEP_ID;
+  return nextReviewQuestionStepId(profiles, { currentStepId: EVENT_EDIT_FIELDS_STEP_ID, history: [], data }, true);
+}
+
+export function eventEditFieldIds(): { span: string; end: string; all: string } {
+  return { span: EDIT_FIELD_SPAN, end: EDIT_FIELD_END, all: EDIT_FIELD_ALL };
+}
+
+function plainQuestionLabel(question: EventQuestion): string {
+  const text = question.prompt.replace(/\{\{[^}]*\}\}/g, ' ').replace(/\{[^}]*\}/g, ' ').replace(/\s+/g, ' ').trim();
+  return text || question.key;
+}
+
+function eventEditFieldsStep(t: TranslateFn, profile: EventProfile, data: Record<string, unknown>, profiles: EventProfile[]): FlowStep {
+  const spanKind = eventSpanKind(data, profile);
+  const options: FlowOption[] = [
+    { label: t('official.community-events.edit.field.span'), value: EDIT_FIELD_SPAN },
+    ...profile.questions
+      .filter(question => questionAppliesToSpan(profile, question, spanKind))
+      .map(question => ({ label: plainQuestionLabel(question), value: question.key })),
+    ...(spanKind === 'multi_day' ? [{ label: t('official.community-events.edit.field.end'), value: EDIT_FIELD_END }] : []),
+    { label: t('official.community-events.edit.field.all'), value: EDIT_FIELD_ALL, exclusive: true as const }
+  ];
+  return {
+    id: EVENT_EDIT_FIELDS_STEP_ID,
+    kind: 'choice',
+    prompt: t('official.community-events.edit.fields'),
+    options,
+    minSelections: 1,
+    maxSelections: options.length,
+    nextStepIdForState: state => firstSelectedEditStepId(profiles, state.data)
+  };
 }
 
 function questionAppliesToSpan(profile: EventProfile, question: EventQuestion, spanKind: EventSpanKind | undefined): boolean {
@@ -1255,7 +1348,12 @@ function resolveDateQuestionInput(input: {
     now: input.now?.(),
     allowPast: input.allowPast
   };
-  const parsed = parseEventDateInput(input.input.input, options);
+  let parsed = parseEventDateInput(input.input.input, options);
+  const spelled = normalizeNumberWords(input.input.input);
+  if (parsed.status !== 'ok' && spelled !== input.input.input) {
+    const retried = parseEventDateInput(spelled, options);
+    if (retried.status === 'ok') parsed = retried;
+  }
   if (parsed.status === 'ok') {
     return {
       status: 'use-value',
@@ -1285,7 +1383,7 @@ function resolveTimeQuestionInput(input: {
   const result = parseEventTimeInput(input.input.input);
   if (result.status === 'ok') {
     const value = eventTimeAnswer(result);
-    const dateRaw = input.input.state.data[questionStepId(input.profile, startDateQuestion(input.profile))];
+    const dateRaw = effectiveEventFlowData(input.input.state.data)[questionStepId(input.profile, startDateQuestion(input.profile))];
     const date = eventDatePartsFromRaw(dateRaw);
     if (date) {
       const combined = combineEventDateAndTime(date, value, {
@@ -1303,9 +1401,12 @@ function resolveTimeQuestionInput(input: {
       value
     };
   }
+  const problem = eventTimeRangeProblem(input.input.input);
   return {
     status: 'error',
-    reply: input.t('official.community-events.flow.timeInvalid')
+    reply: problem
+      ? input.t(`official.community-events.flow.time${problem === 'minute' ? 'Minute' : 'Hour'}OutOfRange`, { input: input.input.input.trim() })
+      : input.t('official.community-events.flow.timeInvalid')
   };
 }
 
@@ -1326,7 +1427,7 @@ function resolveEventEndTimeInput(input: {
     return { status: 'error', reply: input.t('official.community-events.flow.timeInvalid') };
   }
   const candidateData = {
-    ...input.input.state.data,
+    ...effectiveEventFlowData(input.input.state.data),
     [endTimeStepId(input.profile)]: eventTimeAnswer(parsed)
   };
   const answers = eventFlowAnswersFromData(candidateData, input.profile, input.timezone, input.locale);
@@ -1349,7 +1450,7 @@ function resolveSkippedEventEndTime(input: {
   };
 }): ReturnType<NonNullable<FlowStep['resolveSkippedInput']>> {
   const candidateData = {
-    ...input.input.state.data,
+    ...effectiveEventFlowData(input.input.state.data),
     [endTimeStepId(input.profile)]: null
   };
   const answers = eventFlowAnswersFromData(candidateData, input.profile, input.timezone, input.locale);
@@ -1472,7 +1573,7 @@ function eventFlowStartsInPast(
   locale: string,
   now: Date
 ): boolean {
-  const answers = eventFlowAnswersFromData(state.data, profile, timezone, locale);
+  const answers = eventFlowAnswersFromData(effectiveEventFlowData(state.data), profile, timezone, locale);
   const completion = answers ? eventLifecycleCompleteAt({
     localDate: answers.localDate,
     ...(answers.localTime ? { localTime: answers.localTime } : {}),
@@ -1500,9 +1601,18 @@ function initialChoiceValue(
 }
 
 function eventConfirmationSummary(state: FlowState, profile: EventProfile, timezone: string, locale: string, t: TranslateFn): string {
-  const answers = eventFlowAnswersFromData(state.data, profile, timezone, locale);
+  const answers = eventFlowAnswersFromData(effectiveEventFlowData(state.data), profile, timezone, locale);
   if (!answers) {
     return profile.label;
+  }
+  // Show the title the event will get, so a misplaced answer is visible before confirming.
+  let title = '';
+  try {
+    title = renderEventTemplate({ template: profile.group.titleTemplate, profile, answers: answers.answers,
+      rawAnswers: answers.rawAnswers, startsAt: answers.startsAt, endsAt: answers.endsAt, spanKind: answers.spanKind,
+      timezone, locale, creatorDisplayName: '' }).trim();
+  } catch {
+    title = '';
   }
   const summary = t('official.community-events.flow.confirmSummary', {
     timezone,
@@ -1513,11 +1623,12 @@ function eventConfirmationSummary(state: FlowState, profile: EventProfile, timez
       ? 'official.community-events.span.dayTrip'
       : 'official.community-events.span.multiDay')
   });
+  const body = title ? `*${title}*\n${summary}` : summary;
   return eventPollPhase(state.data, profile)
-    ? `${summary}\n${t(answers.pollPhase === 'unplanned'
+    ? `${body}\n${t(answers.pollPhase === 'unplanned'
       ? 'official.community-events.flow.pollPhase.unplanned'
       : 'official.community-events.flow.pollPhase.poll')}`
-    : summary;
+    : body;
 }
 
 function dateErrorMessage(t: TranslateFn, reason: string): string {
@@ -1547,4 +1658,74 @@ function dateTimeErrorMessage(t: TranslateFn, reason: string): string {
     return t('official.community-events.flow.datetimeUnsupportedLocale');
   }
   return t('official.community-events.flow.datetimeInvalid');
+}
+
+function applyResilientReplies(input: {
+  steps: FlowDefinition['steps'];
+  profiles: EventProfile[];
+  t: TranslateFn;
+  locale: string;
+  timezoneForState(state: FlowState): string;
+  now?: (() => Date) | undefined;
+  allowPast?: boolean | undefined;
+  locationResolution?: EventLocationResolution | undefined;
+  knownPlaces: string[];
+}): void {
+  const known = new Set(input.knownPlaces.map(normalizedPlaceText).filter(Boolean));
+  const services = input.locationResolution?.services;
+  const placeEvidence = async (evidence: { text: string; remainder: string; fragments: { text: string }[]; strong: boolean }) => {
+    if (known.has(normalizedPlaceText(evidence.text))) return 'name' as const;
+    if (known.has(normalizedPlaceText(evidence.remainder))) return 'remainder' as const;
+    if (!services || !input.locationResolution) return 'unknown' as const;
+    const { services: _services, ephemeralStore: _store, ...actor } = input.locationResolution;
+    const search = async (query: string) => geocodeOutputSchema.parse(await services.call({ ...actor, serviceId: GEOCODER_SERVICE_ID,
+      method: GEOCODER_GEOCODE_METHOD, input: { query, language: input.locale, limit: 5 } })).results;
+    const full = await search(evidence.text);
+    const fragmentTexts = evidence.fragments.map(fragment => normalizedPlaceText(fragment.text)).filter(Boolean);
+    const wholeText = normalizedPlaceText(evidence.text);
+    // A clearly appended date ("dia 4 de novembro") needs a place with exactly that name;
+    // a bare one ("25 de Abril") only needs a place whose name contains it.
+    const isName = (candidate: { name?: string | undefined; label: string }) => {
+      const names = [candidate.name, candidate.label.split(',')[0]].filter((name): name is string => Boolean(name)).map(normalizedPlaceText);
+      return evidence.strong ? names.includes(wholeText) : names.some(name => fragmentTexts.some(fragment => name.includes(fragment)));
+    };
+    if (full.some(isName)) return 'name' as const;
+    if (full.length === 0 && (await search(evidence.remainder)).length > 0) return 'remainder' as const;
+    return 'unknown' as const;
+  };
+  const wrapped = new Set<string>();
+  for (const profile of input.profiles) {
+    const dateIndex = profile.questions.findIndex(question => question.key === profile.startsAtDateQuestionKey);
+    const dateQuestion = profile.questions[dateIndex];
+    const timeQuestion = profile.questions.find(question => question.key === profile.startsAtTimeQuestionKey);
+    const targetsForState = (state: FlowState): AnswerAheadTarget[] => {
+      const spanKind = eventSpanKind(state.data, profile);
+      return [
+        ...(dateQuestion?.type === EVENT_DATE_QUESTION_TYPE ? [{ kind: 'date' as const, stepId: questionStepId(profile, dateQuestion) }] : []),
+        ...(timeQuestion?.type === EVENT_TIME_QUESTION_TYPE && questionAppliesToSpan(profile, timeQuestion, spanKind)
+          ? [{ kind: 'time' as const, stepId: questionStepId(profile, timeQuestion) }] : [])
+      ];
+    };
+    for (const [index, question] of profile.questions.entries()) {
+      const stepId = questionStepId(profile, question);
+      const step = input.steps[stepId];
+      if (!step || step.kind !== 'text') continue;
+      // Only questions asked before the date can receive a date typed too early.
+      const ahead = question.type === 'text' && dateIndex > index;
+      const isPlace = profile.location.source === 'question' && profile.location.questionKey === question.key;
+      input.steps[stepId] = withResilientReplies(step, {
+        t: input.t,
+        asyncEvidence: ahead && isPlace,
+        ...(ahead ? { answerAhead: {
+          t: input.t, locale: input.locale, timezoneForState: input.timezoneForState, now: input.now, allowPast: input.allowPast,
+          targetsForState, stepForId: (id: string) => input.steps[id],
+          ...(isPlace ? { placeEvidence } : {})
+        } } : {})
+      });
+      wrapped.add(stepId);
+    }
+  }
+  for (const [stepId, step] of Object.entries(input.steps)) {
+    if (!wrapped.has(stepId) && step.kind === 'text') input.steps[stepId] = withResilientReplies(step, { t: input.t });
+  }
 }

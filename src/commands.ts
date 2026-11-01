@@ -38,6 +38,8 @@ import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
 import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
+import { eventPlaceHints } from './placeHints';
+import { eventEditStart, parseEventEditRequest, type EventEditRequest } from './editRequest';
 import {
   createEventFlowDefinition,
   eventConfirmPurpose,
@@ -227,6 +229,8 @@ interface PendingEventEditSelection {
   originChatId: string;
   originContext: 'private' | 'group';
   privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
+  /** "/event edit <event> hora 15h": the fields (and value) named in the command. */
+  editRequest?: EventEditRequest | undefined;
   createdAt: string;
 }
 
@@ -488,7 +492,7 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
-    services: context.services, ephemeralStore: runtime.ephemeralStore,
+    services: context.services, ephemeralStore: runtime.ephemeralStore, databases: runtime.databases,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
       resolveIdentityAddress: context.resolveIdentityAddress,
@@ -568,7 +572,9 @@ async function startEventEditFlow(context: PluginOperationContext, ctx: CommandC
   }
 
   const db = eventsDatabase(runtime.databases);
-  const query = ctx.command.args.join(' ').trim();
+  const parsedRequest = parseEventEditRequest(ctx.command.args);
+  let query = parsedRequest.query;
+  let editRequest = parsedRequest.request;
   const originSubgroupChatId = ctx.message.context === 'group' ? ctx.message.chatId : undefined;
   const scopeEvents = listScopeEvents(db, scopeId);
   const originSubgroupEvents = originSubgroupChatId
@@ -588,11 +594,21 @@ async function startEventEditFlow(context: PluginOperationContext, ctx: CommandC
   if (subgroupMatches.length > 1) {
     return { handled: true, text: ctx.t('official.community-events.update.ambiguous') };
   }
-  const rawMatches = subgroupMatches.length === 1
+  let rawMatches = subgroupMatches.length === 1
     ? subgroupMatches
     : query
       ? findEventMatches(allEditable, query, ctx.locale)
       : discoveryMatches;
+  if (rawMatches.length === 0 && editRequest && query) {
+    // The words were part of the event name after all ("/event edit Sintra dia 4").
+    const fullQuery = ctx.command.args.join(' ').trim();
+    const fullMatches = findEventMatches(allEditable, fullQuery, ctx.locale);
+    if (fullMatches.length > 0) {
+      rawMatches = fullMatches;
+      query = fullQuery;
+      editRequest = undefined;
+    }
+  }
 
   if (rawMatches.length === 0) {
     return { handled: true, text: ctx.t('official.community-events.edit.noEvents') };
@@ -606,7 +622,8 @@ async function startEventEditFlow(context: PluginOperationContext, ctx: CommandC
       scopeId,
       actor,
       query,
-      candidates: matches
+      candidates: matches,
+      ...(editRequest ? { editRequest } : {})
     });
   }
 
@@ -619,6 +636,7 @@ async function startEventEditFlow(context: PluginOperationContext, ctx: CommandC
     sourcePluginId: EVENTS_PLUGIN_ID,
     actor,
     creatorIdentityId,
+    ...(editRequest ? { editRequest } : {}),
     externalIdempotencyKey: eventUpdateCommandIdempotencyKey(
       scopeId,
       actor.identityId,
@@ -783,12 +801,14 @@ async function startEventEditSelection(
     query: string;
     candidates: StoredEventRecord[];
     operation?: 'edit' | 'poll_close' | undefined;
+    editRequest?: EventEditRequest | undefined;
   }
 ) {
   const runtime = requireOfficialCommandRuntime(context);
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, input.actor);
   const pending: PendingEventEditSelection = {
     ...(input.operation ? { operation: input.operation } : {}),
+    ...(input.editRequest ? { editRequest: input.editRequest } : {}),
     id: randomUUID(),
     responseChatId: input.actor.deliveryChatId,
     scopeId: input.scopeId,
@@ -1006,6 +1026,7 @@ async function startEventUpdateFlow(
     actor: EventAuthorizationActor;
     creatorIdentityId?: string | undefined;
     externalIdempotencyKey: string;
+    editRequest?: EventEditRequest | undefined;
   }
 ) {
   let started: Awaited<ReturnType<typeof beginEventUpdateFlow>>;
@@ -1058,6 +1079,7 @@ async function beginEventUpdateFlow(
     actorLabel: string;
     origin: { chatId: string; context: 'private' | 'group' };
     privateDeliveryFallback?: PrivateDeliveryFallback | undefined;
+    editRequest?: EventEditRequest | undefined;
   }
 ): Promise<
   | { status: 'started'; flowSessionId: string; usedPrivateDeliveryFallback: boolean }
@@ -1082,9 +1104,13 @@ async function beginEventUpdateFlow(
     allowPast: !replacesOpenPoll
   });
   if (input.event.eventLocation) initialData[eventLocationStepId(profile)] = input.event.eventLocation;
+  const edit = eventEditStart(profile, initialData, input.editRequest, { timezone, locale: input.locale, now: startedAt, allowPast: !replacesOpenPoll });
+  const hints = eventPlaceHints(runtime.databases, input.event.scopeId);
   const definition = createEventFlowDefinition({
     locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
-      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid },
+      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid,
+      ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
+    knownPlaces: hints.knownPlaces,
     templateMentions: { context, scopeId: input.event.scopeId, chatId: input.actor.deliveryChatId,
       currentGroupId: input.event.groupWid, creatorIdentityId: input.actor.identityId },
     t: input.t,
@@ -1104,7 +1130,8 @@ async function beginEventUpdateFlow(
       : 'official.community-events.update.confirm',
     allowPastStartsAt: !replacesOpenPoll,
     now: () => startedAt,
-    completeMessageKey: false
+    completeMessageKey: false,
+    ...(edit.fields ? { editFields: edit.fields } : {})
   });
   registerEventUpdateFlowCompletionHandler(context, definition.flowType, profile, input.t);
 
@@ -1114,7 +1141,8 @@ async function beginEventUpdateFlow(
       externalIdempotencyKey: input.externalIdempotencyKey,
       origin: input.origin,
       scopeId: input.event.scopeId,
-      initialData,
+      // The draft keeps the stored answers; only the live session starts with the command's choices.
+      initialData: edit.data,
       ...(input.privateDeliveryFallback ? { privateDeliveryFallback: input.privateDeliveryFallback } : {}),
       onSessionCreated: async (session) => {
         await runtime.dataStore.set(eventUpdateDraftKey(input.event.scopeId, session.id), {
@@ -1178,9 +1206,12 @@ function registerEventEditRecovery(context: PluginOperationContext): void {
       const event = getEvent(eventsDatabase(runtime.databases), draft.eventId);
       const replacesOpenPoll = draft.replacesOpenPoll ?? (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open');
       const startedAt = new Date(draft.createdAt);
+      const hints = eventPlaceHints(runtime.databases, draft.scopeId);
       const definition = createEventFlowDefinition({
         locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
-          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid },
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid,
+          ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
+        knownPlaces: hints.knownPlaces,
         templateMentions: { context, scopeId: draft.scopeId, chatId: session.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         t, profiles: [draft.profile], prefill: draft.prefill, timezone: draft.timezone, locale: draft.locale,
@@ -3033,9 +3064,30 @@ function findEventMatches(events: StoredEventRecord[], query: string, locale = '
   if (exactTitle.length > 0) {
     return uniqueEvents(exactTitle);
   }
-  return uniqueEvents(events.filter((event) => eventSearchFields(event, locale).some((field) =>
+  const substring = uniqueEvents(events.filter((event) => eventSearchFields(event, locale).some((field) =>
     normalizeEventSearchText(field).includes(normalizedQuery)
   )));
+  if (substring.length > 0) return substring;
+  // "Albarracín dezembro": every word must appear somewhere in the event, month names included.
+  const words = normalizedQuery.split(' ').filter((word) => word.length >= 2);
+  if (words.length < 2) return substring;
+  return uniqueEvents(events.filter((event) => {
+    const haystack = ` ${[...eventSearchFields(event, locale), ...eventMonthSearchFields(event, locale)]
+      .map(normalizeEventSearchText).join(' ')} `;
+    return words.every((word) => haystack.includes(` ${word}`));
+  }));
+}
+
+function eventMonthSearchFields(event: StoredEventRecord, locale: string): string[] {
+  const dates = [new Date(event.startsAt), ...(event.endsAt ? [new Date(event.endsAt)] : [])].filter((date) => Number.isFinite(date.getTime()));
+  return dates.flatMap((date) => [locale, 'en'].flatMap((language) => {
+    try {
+      return [new Intl.DateTimeFormat(language, { timeZone: event.timezone, month: 'long' }).format(date),
+        new Intl.DateTimeFormat(language, { timeZone: event.timezone, weekday: 'long' }).format(date)];
+    } catch {
+      return [];
+    }
+  }));
 }
 
 function eventCancelFlowConfirmed(snapshot: { state: FlowState }): boolean {
@@ -3087,24 +3139,29 @@ function eventChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], loca
 }
 
 function eventEditChoiceLabel(event: StoredEventRecord, t: CommandContext['t'], locale: string): string {
-  const params = {
+  return fitChoiceLabel('official.community-events.edit.choiceLabel', {
     title: eventDisplayTitle(event),
     startsAt: eventStartsAtLabel(event, locale),
     range: eventRangeLabel(event, locale),
     status: eventLifecycleLabel(event, t),
     eventId: event.id
-  };
-  const rendered = t('official.community-events.edit.choiceLabel', params).trim();
-  if (Array.from(rendered).length <= WHATSAPP_POLL_MAX_OPTION_CODEPOINTS) {
-    return rendered;
-  }
-  const suffix = ` · ${event.id}`;
-  const suffixLength = Array.from(suffix).length;
-  const prefix = t('official.community-events.edit.choiceLabel', {
-    ...params,
-    eventId: ''
-  }).replace(/[\s·|:/-]+$/u, '').trim();
-  const available = Math.max(1, WHATSAPP_POLL_MAX_OPTION_CODEPOINTS - suffixLength - 1);
+  }, t);
+}
+
+/**
+ * Poll options are capped; shorten the title first so the date and id that
+ * tell similar events apart stay visible ("Albarracín" twice in one list).
+ */
+function fitChoiceLabel(key: string, params: Record<string, string>, t: CommandContext['t']): string {
+  const render = (title: string) => t(key, { ...params, title }).trim();
+  const full = render(params.title ?? '');
+  if (Array.from(full).length <= WHATSAPP_POLL_MAX_OPTION_CODEPOINTS) return full;
+  const title = Array.from(params.title ?? '');
+  const overflow = Array.from(full).length - WHATSAPP_POLL_MAX_OPTION_CODEPOINTS;
+  if (title.length - overflow - 1 >= 8) return render(`${title.slice(0, title.length - overflow - 1).join('').trimEnd()}…`);
+  const suffix = ` · ${params.eventId ?? ''}`;
+  const prefix = t(key, { ...params, eventId: '' }).replace(/[\s·|:/-]+$/u, '').trim();
+  const available = Math.max(1, WHATSAPP_POLL_MAX_OPTION_CODEPOINTS - Array.from(suffix).length - 1);
   return `${truncateCodePoints(prefix, available)}…${suffix}`;
 }
 
@@ -3520,7 +3577,8 @@ async function completeEventEditSelection(input: {
     },
     ...(input.pending.privateDeliveryFallback
       ? { privateDeliveryFallback: input.pending.privateDeliveryFallback }
-      : {})
+      : {}),
+    ...(input.pending.editRequest ? { editRequest: input.pending.editRequest } : {})
   });
   if (started.status === 'not_configured') {
     return terminal('official.community-events.notConfigured');

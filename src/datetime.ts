@@ -331,6 +331,18 @@ function parseTimeOnly(input: string, options: EventDateTimeParseOptions, draft:
     : undefined;
 }
 
+/** Explains a clock-shaped answer whose numbers are out of range, such as 13:90 or 25h00. */
+export function eventTimeRangeProblem(input: string): 'minute' | 'hour' | undefined {
+  const direct = input.trim().match(/^(?:at|as|a|às)?\s*(\d{1,2})(?::|h)(\d{2})?\s*(am|pm)?$/i)
+    ?? input.trim().match(/^(?:at|as|a|às)?\s*(\d{1,3})(?::|h)?(\d{2,3})?\s*(am|pm)?$/i);
+  if (!direct) return undefined;
+  const hour = Number(direct[1]);
+  const minute = Number(direct[2] ?? '0');
+  if (minute > 59) return 'minute';
+  if (hour > (direct[3] ? 12 : 23)) return 'hour';
+  return undefined;
+}
+
 function parseDirectTimeOnly(raw: string): EventTimeParts | undefined {
   const direct = raw.match(/^(?:at|as|a|às)?\s*(\d{1,2})(?::|h)?(\d{2})?\s*(am|pm)?$/i);
   if (direct) {
@@ -474,6 +486,10 @@ function strictLocalDateParts(value: string): EventDateParts | undefined {
     && canonical.getUTCDate() === parts.day
     ? parts
     : undefined;
+}
+
+export function eventLocalDateTimeParts(date: Date, timezone: string): (EventDateParts & EventTimeParts) | undefined {
+  return localDateTimeParts(date, timezone);
 }
 
 function localDateTimeParts(date: Date, timezone: string): (EventDateParts & EventTimeParts) | undefined {

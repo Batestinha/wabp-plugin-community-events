@@ -21,6 +21,7 @@ import { renderCurrentScopeCalendarDocument } from './calendarStatus';
 import { calendarPublicationTarget, type CalendarPublicationOutcome } from './calendarPublication';
 import { eventsCalendarSubscriptionUrl } from './calendarSubscription';
 import { eventCalendarHintReplayResultSchema } from './operatorActions';
+import { eventActionLocationSchema } from './workflowActionApi';
 import { eventAttendanceVotesFromSnapshot } from './attendanceLifecycle';
 import { scopeCalendarPathInPluginDirectory } from './ics';
 import {
@@ -90,6 +91,16 @@ const eventTerminateInputSchema = eventScopeRuntimeParamsSchema.extend({
   reason: z.string().trim().min(1).max(500).optional(),
   calendarDisposition: z.enum(['cancelled', 'hidden']).default('hidden'),
   deleteAnnouncementMessages: z.boolean().default(true)
+}).strict();
+
+const eventEditOperatorInputSchema = eventScopeRuntimeParamsSchema.extend({
+  eventId: z.string().trim().min(1),
+  expectedUpdatedAt: z.string().trim().min(1),
+  answers: z.record(z.string().max(12000)).default({}),
+  location: z.union([z.literal('keep-coordinates'), eventActionLocationSchema]).optional(),
+  confirmPastCompletion: z.boolean().default(false),
+  confirm: z.literal(true),
+  reason: z.string().trim().min(1).max(1000)
 }).strict();
 
 const eventCalendarHintReplayOperatorInputSchema = eventScopeRuntimeParamsSchema.extend({
@@ -853,6 +864,18 @@ async terminateOfficialEvent(input: unknown = {}) {
     };
   }
 
+async editOfficialEvent(input: unknown = {}) {
+    const { runtimeBindingId, confirm: _confirm, ...request } = eventEditOperatorInputSchema.parse(input ?? {});
+    const result = await this.executeRuntimeBridgeActionForBinding('official.community-events.edit', request, runtimeBindingId,
+      { requireWhatsappReady: true });
+    await this.auditOperatorConsoleAction('official.community-events.event.edited', {
+      scopeId: request.scopeId, eventId: request.eventId, runtimeBindingId, fields: Object.keys(request.answers),
+      location: request.location === 'keep-coordinates' ? 'keep-coordinates' : request.location ? 'replaced' : 'unchanged',
+      reason: request.reason, resultStatus: isRecord(result) ? result.status : undefined
+    });
+    return { scopeId: request.scopeId, eventId: request.eventId, runtimeBindingId, ...(isRecord(result) ? result : { result }) };
+  }
+
 async retryOfficialEventCancellationCleanup(input: unknown = {}) {
     const parsed = eventCalendarHintReplayOperatorInputSchema.parse(input ?? {});
     const result = await this.executeRuntimeBridgeActionForBinding(
@@ -1376,6 +1399,7 @@ export function registerEventsConsoleOperations(context: PluginConsoleContext): 
   { operationId: 'official.community-events.renameOfficialEventProfileQuestion', handler: input => operations.renameOfficialEventProfileQuestion(input) },
   { operationId: 'official.community-events.officialEventsForScope', handler: input => operations.officialEventsForScope(input) },
   { operationId: 'official.community-events.terminateOfficialEvent', handler: input => operations.terminateOfficialEvent(input) },
+  { operationId: 'official.community-events.editOfficialEvent', handler: input => operations.editOfficialEvent(input) },
   { operationId: 'official.community-events.retryOfficialEventCancellationCleanup', handler: input => operations.retryOfficialEventCancellationCleanup(input) },
   { operationId: 'official.community-events.replayOfficialEventCalendarHint', handler: input => operations.replayOfficialEventCalendarHint(input) },
   { operationId: 'official.community-events.setOfficialEventCalendarDisposition', handler: input => operations.setOfficialEventCalendarDisposition(input) },

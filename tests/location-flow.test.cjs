@@ -55,10 +55,10 @@ test('disambiguates immediately after place, survives restart and parses later d
   assert.equal(f.state.currentStepId, 'q-climbing-startDate');
   assert.equal(f.state.data['q-climbing-place'], 'Praia');
   assert.equal(eventFlowLocation(f.state.data, f.profile).timezone, 'Asia/Tokyo');
-  await f.answer('2026-10-20'); await f.answer('09:30'); await f.answer('Bouldering');
+  await f.answer('2027-10-20'); await f.answer('09:30'); await f.answer('Bouldering');
   assert.equal(f.state.currentStepId, 'confirm-climbing');
   const answers = eventFlowAnswers({ state: f.state, flowType: f.definition.flowType }, f.profile, 'UTC');
-  assert.equal(answers.startsAt.toISOString(), '2026-10-20T00:30:00.000Z');
+  assert.equal(answers.startsAt.toISOString(), '2027-10-20T00:30:00.000Z');
   assert.equal(answers.answers.place, 'Praia');
   assert.equal(f.calls.filter(call => call.method === 'geocode').length, 1);
   assert(f.calls.every(call => call.scopeId === 'scope' && call.actorIdentityId === 'creator'));

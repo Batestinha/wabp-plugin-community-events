@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { eventActionLocationSchema } from './workflowActionApi';
 
 export const eventCalendarHintReplayInputSchema = z.object({
   scopeId: z.string().trim().min(1),
@@ -43,6 +44,20 @@ export type EventCalendarHintReplayInput = z.infer<typeof eventCalendarHintRepla
 export type EventCalendarHintReplayResult = z.infer<typeof eventCalendarHintReplayResultSchema>;
 
 const runtimeGroupChatIdSchema = z.string().trim().regex(/^[^\s@]+@g\.us$/i).transform((value) => value.toLowerCase());
+export const eventOperatorEditInputSchema = z.object({
+  scopeId: z.string().trim().min(1),
+  eventId: z.string().trim().min(1),
+  /** Guards against editing a version the operator has not seen. */
+  expectedUpdatedAt: z.string().trim().min(1),
+  answers: z.record(z.string().max(12000)).default({}),
+  /**
+   * 'keep-coordinates' keeps the confirmed coordinates under the new place
+   * name, for wording fixes such as removing a date from the place.
+   */
+  location: z.union([z.literal('keep-coordinates'), eventActionLocationSchema]).optional(),
+  confirmPastCompletion: z.boolean().default(false),
+  reason: z.string().trim().min(1).max(1000)
+}).strict();
 export const eventOperatorActionSchemas = {
   officialEventsAdopt: z.object({
     eventId: z.string().trim().min(1).optional(),
@@ -115,8 +130,10 @@ export const eventOperatorActionSchemas = {
   }).strict(),
   officialEventsCalendarHintReplay: eventCalendarHintReplayInputSchema,
   officialEventsPublishCalendar: z.object({ scopeId: z.string().trim().min(1), calendarId: z.string().trim().min(1) }).strict(),
-  officialEventsRecoverJobs: z.object({}).strict()
+  officialEventsRecoverJobs: z.object({}).strict(),
+  officialEventsEdit: eventOperatorEditInputSchema
 };
+
 
 // Account recovery actions remain available for owned persisted events when a scope is disabled.
 // The authenticated runtime admin endpoint and the host-owned account database retain ownership.
@@ -130,4 +147,5 @@ export const eventOperatorActionDeclarations = [
   { actionId: 'official.community-events.retryPreCreateProvisioning', access: 'mutation' as const, scope: 'account' as const, timeoutMs: 120_000 },
   { actionId: 'official.community-events.replaceRejectedChild', access: 'mutation' as const, scope: 'account' as const, timeoutMs: 120_000 },
   { actionId: 'official.community-events.recoverJobs', access: 'mutation' as const, scope: 'account' as const, timeoutMs: 120_000 },
+  { actionId: 'official.community-events.edit', access: 'mutation' as const, scope: 'scope' as const, timeoutMs: 120_000 },
 ];

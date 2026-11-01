@@ -173,7 +173,7 @@ export async function reconcileEventSuggestionsForScope(
   const starter = input.starter ?? new EventCreationFlowStarter(
     {
       flowEngine: capabilities.flowEngine,
-      services: context.services, ephemeralStore: context.ephemeralStore,
+      services: context.services, ephemeralStore: context.ephemeralStore, databases: context.databases,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
       resolveIdentityAddress: context.resolveIdentityAddress,

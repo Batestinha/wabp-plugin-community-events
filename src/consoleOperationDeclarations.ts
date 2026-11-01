@@ -8,6 +8,7 @@ export const eventConsoleOperationDeclarations: PluginConsoleOperationDeclaratio
   { operationId: 'official.community-events.renameOfficialEventProfileQuestion', access: 'mutation', authorization: 'operator', description: 'rename Official Event Profile Question' },
   { operationId: 'official.community-events.officialEventsForScope', access: 'read', authorization: 'operator', description: 'official Events For Scope' },
   { operationId: 'official.community-events.terminateOfficialEvent', access: 'mutation', authorization: 'operator', description: 'terminate Official Event' },
+  { operationId: 'official.community-events.editOfficialEvent', access: 'mutation', authorization: 'operator', description: 'edit Official Event' },
   { operationId: 'official.community-events.retryOfficialEventCancellationCleanup', access: 'mutation', authorization: 'operator', description: 'retry Official Event Cancellation Cleanup' },
   { operationId: 'official.community-events.replayOfficialEventCalendarHint', access: 'mutation', authorization: 'operator', description: 'replay Official Event Calendar Hint' },
   { operationId: 'official.community-events.setOfficialEventCalendarDisposition', access: 'mutation', authorization: 'operator', description: 'set Official Event Calendar Disposition' },

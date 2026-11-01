@@ -621,6 +621,23 @@ export const eventTextDefinitions = [
     }
   },
   {
+    "key": "official.community-events.location.chooseNumber",
+    "label": "Location / choose number",
+    "topic": "General replies",
+    "destination": "Command or workflow reply",
+    "order": 435,
+    "variables": [
+      "count"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "location",
+      "groupId": "location",
+      "groupLabel": "Location replies"
+    }
+  },
+  {
     "key": "official.community-events.location.wrongRequester",
     "label": "Location / wrong requester",
     "topic": "General replies",
@@ -2440,11 +2457,180 @@ export const eventTextDefinitions = [
     }
   },
   {
+    "key": "official.community-events.flow.answerAheadSaved",
+    "label": "Flow / answerAheadSaved",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1631,
+    "variables": [
+      "answers"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.answerSplitProposal",
+    "label": "Flow / answerSplitProposal",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1632,
+    "variables": [
+      "answers",
+      "original",
+      "place"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.carriedSuggestion",
+    "label": "Flow / carriedSuggestion",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1633,
+    "variables": [
+      "value"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.cancelHint",
+    "label": "Flow / cancelHint",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1634,
+    "variables": [],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.backHint",
+    "label": "Flow / backHint",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1635,
+    "variables": [],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.timeMinuteOutOfRange",
+    "label": "Flow / timeMinuteOutOfRange",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1636,
+    "variables": [
+      "input"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.flow.timeHourOutOfRange",
+    "label": "Flow / timeHourOutOfRange",
+    "topic": "Event creation",
+    "destination": "Command or workflow reply",
+    "order": 1637,
+    "variables": [
+      "input"
+    ],
+    "placement": {
+      "sectionId": "event-profiles",
+      "controlId": "plugin.official.community-events.eventProfiles",
+      "slotId": "questions",
+      "groupId": "questions",
+      "groupLabel": "Question replies and validation"
+    }
+  },
+  {
+    "key": "official.community-events.edit.fields",
+    "label": "Edit / fields",
+    "topic": "General replies",
+    "destination": "Command or workflow reply",
+    "order": 1638,
+    "variables": [],
+    "placement": {
+      "sectionId": "events-recovery",
+      "groupId": "editing",
+      "groupLabel": "Event editing replies"
+    }
+  },
+  {
+    "key": "official.community-events.edit.field.span",
+    "label": "Edit / field / span",
+    "topic": "General replies",
+    "destination": "Command or workflow reply",
+    "order": 1639,
+    "variables": [],
+    "placement": {
+      "sectionId": "events-recovery",
+      "groupId": "editing",
+      "groupLabel": "Event editing replies"
+    }
+  },
+  {
+    "key": "official.community-events.edit.field.end",
+    "label": "Edit / field / end",
+    "topic": "General replies",
+    "destination": "Command or workflow reply",
+    "order": 1640,
+    "variables": [],
+    "placement": {
+      "sectionId": "events-recovery",
+      "groupId": "editing",
+      "groupLabel": "Event editing replies"
+    }
+  },
+  {
+    "key": "official.community-events.edit.field.all",
+    "label": "Edit / field / all",
+    "topic": "General replies",
+    "destination": "Command or workflow reply",
+    "order": 1641,
+    "variables": [],
+    "placement": {
+      "sectionId": "events-recovery",
+      "groupId": "editing",
+      "groupLabel": "Event editing replies"
+    }
+  },
+  {
     "key": "official.community-events.flow.datetimeInvalid",
     "label": "Flow / datetime invalid",
     "topic": "Event creation",
     "destination": "Command or workflow reply",
-    "order": 1640,
+    "order": 1660,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2459,7 +2645,7 @@ export const eventTextDefinitions = [
     "label": "Flow / datetime past",
     "topic": "Event creation",
     "destination": "Command or workflow reply",
-    "order": 1650,
+    "order": 1670,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2474,7 +2660,7 @@ export const eventTextDefinitions = [
     "label": "Flow / datetime too far",
     "topic": "Event creation",
     "destination": "Command or workflow reply",
-    "order": 1660,
+    "order": 1680,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2489,7 +2675,7 @@ export const eventTextDefinitions = [
     "label": "Flow / datetime unsupported locale",
     "topic": "Event creation",
     "destination": "Command or workflow reply",
-    "order": 1670,
+    "order": 1690,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2504,7 +2690,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / band / question",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1680,
+    "order": 1700,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2519,7 +2705,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / organizer band / question",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1690,
+    "order": 1710,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2534,7 +2720,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / exact / question",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1700,
+    "order": 1720,
     "variables": [
       "band"
     ],
@@ -2551,7 +2737,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / organizer time / question",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1710,
+    "order": 1730,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2566,7 +2752,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / band / morning",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1720,
+    "order": 1740,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2581,7 +2767,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / band / afternoon",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1730,
+    "order": 1750,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2596,7 +2782,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / band / evening",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1740,
+    "order": 1760,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -2611,7 +2797,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / applied",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1750,
+    "order": 1770,
     "variables": [
       "time"
     ],
@@ -2628,7 +2814,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / manual required",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1760,
+    "order": 1780,
     "variables": [
       "eventId"
     ],
@@ -2645,7 +2831,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / event day manual required",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1770,
+    "order": 1790,
     "variables": [
       "eventId"
     ],
@@ -2662,7 +2848,7 @@ export const eventTextDefinitions = [
     "label": "Start time agreement / blocked",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1780,
+    "order": 1800,
     "variables": [
       "eventId"
     ],
@@ -2679,7 +2865,7 @@ export const eventTextDefinitions = [
     "label": "Update / started private",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1790,
+    "order": 1810,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2692,7 +2878,7 @@ export const eventTextDefinitions = [
     "label": "Update / started in group fallback",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1800,
+    "order": 1820,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2705,7 +2891,7 @@ export const eventTextDefinitions = [
     "label": "Update / private start failed",
     "topic": "Recovery & status",
     "destination": "Command or workflow reply",
-    "order": 1810,
+    "order": 1830,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2718,7 +2904,7 @@ export const eventTextDefinitions = [
     "label": "Update / start failed",
     "topic": "Recovery & status",
     "destination": "Command or workflow reply",
-    "order": 1820,
+    "order": 1840,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2731,7 +2917,7 @@ export const eventTextDefinitions = [
     "label": "Update / confirm",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1830,
+    "order": 1850,
     "variables": [
       "summary"
     ],
@@ -2746,7 +2932,7 @@ export const eventTextDefinitions = [
     "label": "Update / confirm open poll",
     "topic": "Attendance & polls",
     "destination": "Command or workflow reply",
-    "order": 1840,
+    "order": 1860,
     "variables": [
       "summary"
     ],
@@ -2763,7 +2949,7 @@ export const eventTextDefinitions = [
     "label": "Update / confirm past completion",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1850,
+    "order": 1870,
     "variables": [
       "summary"
     ],
@@ -2778,7 +2964,7 @@ export const eventTextDefinitions = [
     "label": "Update / complete",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1860,
+    "order": 1880,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2791,7 +2977,7 @@ export const eventTextDefinitions = [
     "label": "Update / cancelled",
     "topic": "Recovery & status",
     "destination": "Command or workflow reply",
-    "order": 1870,
+    "order": 1890,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2804,7 +2990,7 @@ export const eventTextDefinitions = [
     "label": "Update / invalid",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1880,
+    "order": 1900,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2817,7 +3003,7 @@ export const eventTextDefinitions = [
     "label": "Update / ambiguous",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1890,
+    "order": 1910,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2830,7 +3016,7 @@ export const eventTextDefinitions = [
     "label": "Update / past completion confirmation required",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1900,
+    "order": 1920,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2843,7 +3029,7 @@ export const eventTextDefinitions = [
     "label": "Update / converted to unplanned",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1910,
+    "order": 1930,
     "variables": [
       "endsAt",
       "eventId",
@@ -2861,7 +3047,7 @@ export const eventTextDefinitions = [
     "label": "Update / converted notice",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1920,
+    "order": 1940,
     "variables": [
       "endsAt",
       "eventId",
@@ -2880,7 +3066,7 @@ export const eventTextDefinitions = [
     "label": "Update / converted notice pending",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1930,
+    "order": 1950,
     "variables": [
       "endsAt",
       "eventId",
@@ -2898,7 +3084,7 @@ export const eventTextDefinitions = [
     "label": "Update / permission denied",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1940,
+    "order": 1960,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -2911,7 +3097,7 @@ export const eventTextDefinitions = [
     "label": "Update / done",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1950,
+    "order": 1970,
     "variables": [
       "eventId",
       "title"
@@ -2927,7 +3113,7 @@ export const eventTextDefinitions = [
     "label": "Update / done repair pending",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1960,
+    "order": 1980,
     "variables": [
       "eventId",
       "title"
@@ -2943,7 +3129,7 @@ export const eventTextDefinitions = [
     "label": "Update / no changes",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1970,
+    "order": 1990,
     "variables": [
       "eventId",
       "title"
@@ -2959,7 +3145,7 @@ export const eventTextDefinitions = [
     "label": "Update / done past completion",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1980,
+    "order": 2000,
     "variables": [
       "cleanupAt",
       "eventId",
@@ -2976,7 +3162,7 @@ export const eventTextDefinitions = [
     "label": "Update / done past completion repair pending",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 1990,
+    "order": 2010,
     "variables": [
       "cleanupAt",
       "eventId",
@@ -2993,7 +3179,7 @@ export const eventTextDefinitions = [
     "label": "Update / failed",
     "topic": "Recovery & status",
     "destination": "Command or workflow reply",
-    "order": 2000,
+    "order": 2020,
     "variables": [],
     "placement": {
       "sectionId": "events-recovery",
@@ -3006,7 +3192,7 @@ export const eventTextDefinitions = [
     "label": "Update / replacement queued",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 2010,
+    "order": 2030,
     "variables": [
       "eventId",
       "title"
@@ -3022,7 +3208,7 @@ export const eventTextDefinitions = [
     "label": "Update / replacement expired",
     "topic": "General replies",
     "destination": "Command or workflow reply",
-    "order": 2020,
+    "order": 2040,
     "variables": [
       "eventId",
       "title"
@@ -3038,7 +3224,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / label",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2030,
+    "order": 2050,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3051,7 +3237,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / question / place",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2040,
+    "order": 2060,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3064,7 +3250,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / question / start date",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2050,
+    "order": 2070,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3077,7 +3263,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / question / start time",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2060,
+    "order": 2080,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3090,7 +3276,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / question / style",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2070,
+    "order": 2090,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3103,7 +3289,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / poll / title template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2080,
+    "order": 2100,
     "variables": [
       "creatorDisplayName",
       "dd",
@@ -3127,7 +3313,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / group / title template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2090,
+    "order": 2110,
     "variables": [
       "dd",
       "hour",
@@ -3150,7 +3336,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / event group hint / template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2100,
+    "order": 2120,
     "variables": [
       "creatorDisplayName",
       "groupDisplayName",
@@ -3167,7 +3353,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / event edit announcement / template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2110,
+    "order": 2130,
     "variables": [
       "editorDisplayName",
       "groupDisplayName"
@@ -3183,7 +3369,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / calendar / title template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2120,
+    "order": 2140,
     "variables": [
       "place",
       "style"
@@ -3199,7 +3385,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / calendar / hint / template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2130,
+    "order": 2150,
     "variables": [
       "calendarDisplayName",
       "calendarSubscriptionUrl",
@@ -3216,7 +3402,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / weather / template",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2140,
+    "order": 2160,
     "variables": [
       "groupDisplayName",
       "weatherDate",
@@ -3233,7 +3419,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / response class / event_group_member",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2150,
+    "order": 2170,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3246,7 +3432,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / poll / option / going",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2160,
+    "order": 2180,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3259,7 +3445,7 @@ export const eventTextDefinitions = [
     "label": "Profile / climbing / poll / option / ride",
     "topic": "Profile defaults",
     "destination": "Command or workflow reply",
-    "order": 2170,
+    "order": 2190,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3272,7 +3458,7 @@ export const eventTextDefinitions = [
     "label": "Weather / section / temperature",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2180,
+    "order": 2200,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3287,7 +3473,7 @@ export const eventTextDefinitions = [
     "label": "Weather / section / relative humidity",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2190,
+    "order": 2210,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3302,7 +3488,7 @@ export const eventTextDefinitions = [
     "label": "Weather / section / precipitation",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2200,
+    "order": 2220,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3317,7 +3503,7 @@ export const eventTextDefinitions = [
     "label": "Weather / section / wind",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2210,
+    "order": 2230,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3332,7 +3518,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / temperature max",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2220,
+    "order": 2240,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3347,7 +3533,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / temperature min",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2230,
+    "order": 2250,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3362,7 +3548,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / relative humidity max",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2240,
+    "order": 2260,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3377,7 +3563,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / relative humidity min",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2250,
+    "order": 2270,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3392,7 +3578,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / relative humidity mean",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2260,
+    "order": 2280,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3407,7 +3593,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / precipitation",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2270,
+    "order": 2290,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3422,7 +3608,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / precipitation probability",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2280,
+    "order": 2300,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3437,7 +3623,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / wind speed",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2290,
+    "order": 2310,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3452,7 +3638,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / wind gust",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2300,
+    "order": 2320,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3467,7 +3653,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / wind direction",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2310,
+    "order": 2330,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3482,7 +3668,7 @@ export const eventTextDefinitions = [
     "label": "Weather / metric / weather code",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2320,
+    "order": 2340,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3497,7 +3683,7 @@ export const eventTextDefinitions = [
     "label": "Weather / none",
     "topic": "Calendar & weather",
     "destination": "Command or workflow reply",
-    "order": 2330,
+    "order": 2350,
     "variables": [],
     "placement": {
       "sectionId": "event-profiles",
@@ -3512,7 +3698,7 @@ export const eventTextDefinitions = [
     "label": "Help / family",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2340,
+    "order": 2360,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3525,7 +3711,7 @@ export const eventTextDefinitions = [
     "label": "Help / command",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2350,
+    "order": 2370,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3538,7 +3724,7 @@ export const eventTextDefinitions = [
     "label": "Help / status",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2360,
+    "order": 2380,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3551,7 +3737,7 @@ export const eventTextDefinitions = [
     "label": "Help / cancel",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2370,
+    "order": 2390,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3564,7 +3750,7 @@ export const eventTextDefinitions = [
     "label": "Help / edit",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2380,
+    "order": 2400,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3577,7 +3763,7 @@ export const eventTextDefinitions = [
     "label": "Help / edit / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2390,
+    "order": 2410,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3590,7 +3776,7 @@ export const eventTextDefinitions = [
     "label": "Help / list",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2400,
+    "order": 2420,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3603,7 +3789,7 @@ export const eventTextDefinitions = [
     "label": "Help / list / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2410,
+    "order": 2430,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3616,7 +3802,7 @@ export const eventTextDefinitions = [
     "label": "Help / feature / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2420,
+    "order": 2440,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3629,7 +3815,7 @@ export const eventTextDefinitions = [
     "label": "Help / feature / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2430,
+    "order": 2450,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3642,7 +3828,7 @@ export const eventTextDefinitions = [
     "label": "Help / overview / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2440,
+    "order": 2460,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3655,7 +3841,7 @@ export const eventTextDefinitions = [
     "label": "Help / create / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2450,
+    "order": 2470,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3668,7 +3854,7 @@ export const eventTextDefinitions = [
     "label": "Help / create / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2460,
+    "order": 2480,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3681,7 +3867,7 @@ export const eventTextDefinitions = [
     "label": "Help / create / instruction",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2470,
+    "order": 2490,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3694,7 +3880,7 @@ export const eventTextDefinitions = [
     "label": "Help / create / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2480,
+    "order": 2500,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3707,7 +3893,7 @@ export const eventTextDefinitions = [
     "label": "Help / edit / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2490,
+    "order": 2510,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3720,7 +3906,7 @@ export const eventTextDefinitions = [
     "label": "Help / edit / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2500,
+    "order": 2520,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3733,7 +3919,7 @@ export const eventTextDefinitions = [
     "label": "Help / edit / instruction",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2510,
+    "order": 2530,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3746,7 +3932,7 @@ export const eventTextDefinitions = [
     "label": "Help / list / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2520,
+    "order": 2540,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3759,7 +3945,7 @@ export const eventTextDefinitions = [
     "label": "Help / list / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2530,
+    "order": 2550,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3772,7 +3958,7 @@ export const eventTextDefinitions = [
     "label": "Help / list / instruction",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2540,
+    "order": 2560,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3785,7 +3971,7 @@ export const eventTextDefinitions = [
     "label": "Help / inspect / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2550,
+    "order": 2570,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3798,7 +3984,7 @@ export const eventTextDefinitions = [
     "label": "Help / inspect / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2560,
+    "order": 2580,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3811,7 +3997,7 @@ export const eventTextDefinitions = [
     "label": "Help / status / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2570,
+    "order": 2590,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3824,7 +4010,7 @@ export const eventTextDefinitions = [
     "label": "Help / cancel / title",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2580,
+    "order": 2600,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3837,7 +4023,7 @@ export const eventTextDefinitions = [
     "label": "Help / cancel / summary",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2590,
+    "order": 2610,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3850,7 +4036,7 @@ export const eventTextDefinitions = [
     "label": "Help / cancel / instruction",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2600,
+    "order": 2620,
     "variables": [],
     "placement": {
       "sectionId": "general",
@@ -3863,7 +4049,7 @@ export const eventTextDefinitions = [
     "label": "Help / cancel / example",
     "topic": "Help & commands",
     "destination": "Command or workflow reply",
-    "order": 2610,
+    "order": 2630,
     "variables": [],
     "placement": {
       "sectionId": "general",

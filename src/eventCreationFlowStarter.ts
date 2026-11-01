@@ -25,6 +25,8 @@ import {
   type EventCalendarResource,
   type EventProfile
 } from './config';
+import type { PluginDatabaseRegistry } from '@wabs/plugin-sdk/database';
+import { eventPlaceHints } from './placeHints';
 import {
   createEventFlowDefinition,
   EVENT_CREATION_FLOW_TYPE_PREFIX,
@@ -118,6 +120,8 @@ export const eventDraftSchema = z.object({
 
 export interface EventCreationFlowStarterContext extends PluginTemplateMentionContext {
   flowEngine: FlowEngine;
+  /** Optional: past places of the scope sharpen place parsing and location search. */
+  databases?: PluginDatabaseRegistry | undefined;
   services?: EventLocationResolution['services'];
   ephemeralStore?: EventLocationResolution['ephemeralStore'];
   dataStore: PluginDataStore;
@@ -377,9 +381,12 @@ export class EventCreationFlowStarter {
       locale: input.prepared.locale,
       now: startedAt
     });
+    const hints = eventPlaceHints(this.context.databases, input.scopeId);
     const definition = createEventFlowDefinition({
       locationResolution: { services: this.context.services, ephemeralStore: this.context.ephemeralStore,
-        scopeId: input.scopeId, actorIdentityId: input.actorIdentityId, groupId: input.groupId, groupWid: input.groupWid },
+        scopeId: input.scopeId, actorIdentityId: input.actorIdentityId, groupId: input.groupId, groupWid: input.groupWid,
+        ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
+      knownPlaces: hints.knownPlaces,
       templateMentions: { context: this.context, scopeId: input.scopeId, chatId: input.prepared.actor.deliveryChatId,
         currentGroupId: input.groupWid, creatorIdentityId: input.actorIdentityId },
       t: input.prepared.t,
@@ -478,7 +485,7 @@ export class EventCreationFlowStarter {
 const eventCreationResolverRegistrations = new WeakSet<FlowEngine>();
 
 export function registerEventCreationFlowDefinitionResolver(
-  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n' | 'services' | 'ephemeralStore'> & PluginTemplateMentionContext,
+  context: Pick<EventCreationFlowStarterContext, 'flowEngine' | 'dataStore' | 'i18n' | 'services' | 'ephemeralStore' | 'databases'> & PluginTemplateMentionContext,
   registerCompletionHandlers: RegisterEventCreationCompletionHandlers
 ): void {
   if (eventCreationResolverRegistrations.has(context.flowEngine)) {
@@ -508,9 +515,12 @@ export function registerEventCreationFlowDefinitionResolver(
         throw new Error(`Event creation flow ${session.id} durable draft does not match its session.`);
       }
       const t = await translatorForEventDraft(context.i18n, draft);
+      const hints = eventPlaceHints(context.databases, draft.scopeId);
       const definition = restoreEventFlowDefinition({
         locationResolution: { services: context.services, ephemeralStore: context.ephemeralStore,
-          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupId: draft.groupId, groupWid: draft.groupWid },
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupId: draft.groupId, groupWid: draft.groupWid,
+          ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
+        knownPlaces: hints.knownPlaces,
         templateMentions: { context, scopeId: draft.scopeId, chatId: draft.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         flowType: draft.flowType,

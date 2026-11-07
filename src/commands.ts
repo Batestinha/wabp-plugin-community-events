@@ -528,7 +528,8 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
       prefillArgs: ctx.remainingArgs ?? ctx.command.args,
       ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
-  } catch {
+  } catch (error) {
+    context.logger?.warn({ error, chatId: ctx.message.chatId }, 'Event creation flow failed to start');
     return {
       handled: true,
       text: ctx.message.context === 'group'
@@ -1042,7 +1043,8 @@ async function startEventUpdateFlow(
       },
       privateDeliveryFallback: privateFlowDeliveryFallback(ctx, input.actor)
     });
-  } catch {
+  } catch (error) {
+    context.logger?.warn({ error, eventId: input.event.id, chatId: ctx.message.chatId }, 'Event update flow failed to start');
     return {
       handled: true,
       text: ctx.message.context === 'group'

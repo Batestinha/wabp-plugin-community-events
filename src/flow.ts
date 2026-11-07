@@ -1054,7 +1054,8 @@ function eventEditFieldsStep(t: TranslateFn, profile: EventProfile, data: Record
     prompt: t('official.community-events.edit.fields'),
     options,
     minSelections: 1,
-    maxSelections: options.length,
+    // The core counts only non-exclusive options as selectable; "all" is exclusive.
+    maxSelections: options.filter((option) => !option.exclusive).length,
     nextStepIdForState: state => firstSelectedEditStepId(profiles, state.data)
   };
 }

@@ -227,6 +227,16 @@ test('edits ask what to change and review only those questions', async () => {
   assert.equal(f.answers().localDate, '2026-11-04');
 });
 
+test('the what-to-change step never allows more selections than its non-exclusive options', () => {
+  // 2026-11-07: the core rejected maxSelections=6 with 5 selectable options and every /event edit failed to start.
+  const answers = { place: 'Sintra', startDate: '2026-11-04', startTime: '13:00', style: 'Bouldering' };
+  const step = fixture({ edit: true, answers }).definition.steps['edit-fields'];
+  const selectable = step.options.filter(option => !option.exclusive);
+  assert.ok(step.options.some(option => option.exclusive));
+  assert.equal(step.minSelections, 1);
+  assert.equal(step.maxSelections, selectable.length);
+});
+
 test('"/event edit Albarracín hora 15h" selects the time and offers 15:00', async () => {
   const parsed = parseEventEditRequest(['Albarracín', 'hora', '15h']);
   assert.deepEqual(parsed, { query: 'Albarracín', request: { roles: ['time'], value: '15h' } });

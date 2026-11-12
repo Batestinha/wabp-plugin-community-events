@@ -206,7 +206,7 @@ test('all migrations and translations are retained and vendored artifacts recons
   for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key]?.trim(), key);
   assert.deepEqual(Object.keys(plugin.lifecycle), ['migrateData']);
   const provenance = require('../contracts/provenance.json');
-  assert.equal(provenance.contracts.length, 14);
+  assert.equal(provenance.contracts.length, 13);
   for (const item of provenance.contracts) {
     const original = fs.readFileSync(path.join('contracts', item.upstreamPath));
     assert.equal(crypto.createHash('sha256').update(original).digest('hex'), item.upstreamSha256);

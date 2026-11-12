@@ -34,6 +34,8 @@ export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'weatherDate',
   'weatherLocation',
   'weatherSummary',
+  'weatherCondition',
+  'weatherEmoji',
   'temperatureMax',
   'temperatureMin',
   'precipitation',

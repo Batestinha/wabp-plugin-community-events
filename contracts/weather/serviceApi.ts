@@ -1,12 +1,15 @@
 import { z } from 'zod';
 import {
   WEATHER_PRECIPITATION_UNITS,
+  WEATHER_PRESENTATION_STYLES,
   WEATHER_TEMPERATURE_UNITS,
   WEATHER_WIND_SPEED_UNITS
 } from './config';
 
 export const WEATHER_SERVICE_ID = 'official.weather.v2';
 export const WEATHER_QUERY_METHOD = 'query';
+/** Same query, plus the chat text every consumer sends (/weather, the assistant, Community Events). */
+export const WEATHER_PRESENT_METHOD = 'present';
 export const WEATHER_MAX_FORECAST_DAYS = 16;
 export const WEATHER_MAX_DAY_OFFSET = WEATHER_MAX_FORECAST_DAYS - 1;
 export const WEATHER_MARINE_MODES = ['auto'] as const;
@@ -75,6 +78,22 @@ export const weatherTideEventSchema = z.object({
   height: weatherMetricValueSchema
 }).strict();
 
+export const weatherTideContextSchema = z.object({
+  forecastSource: z.enum(['fcul', 'open-meteo']),
+  datum: z.enum(['zh-portugal', 'mean-sea-level', 'ih-anchored-approximate-zh']),
+  quality: z.enum(['calibrated-prediction', 'modelled', 'crude-current-anchor']),
+  station: z.object({ id: z.string(), name: z.string(), distanceKm: z.number() }).strict().optional(),
+  observation: z.object({ time: z.string(), height: weatherMetricValueSchema }).strict().optional(),
+  current: z.object({ time: z.string(), height: weatherMetricValueSchema, estimated: z.boolean() }).strict().optional(),
+  calibration: z.object({ method: z.literal('fixed-station-offset'), offset: weatherMetricValueSchema }).strict().optional(),
+  adjustment: z.object({
+    at: z.string(),
+    ihHeight: weatherMetricValueSchema,
+    openMeteoHeight: weatherMetricValueSchema,
+    offset: weatherMetricValueSchema
+  }).strict().optional()
+}).strict();
+
 export const weatherReportLocationSchema = weatherServiceLocationSchema;
 
 export const weatherReportUnitsSchema = z.object({
@@ -92,7 +111,8 @@ export const weatherCurrentConditionsSchema = z.object({
   weatherCode: z.number().int().optional(),
   windSpeed10m: weatherMetricValueSchema.optional(),
   windDirection10m: weatherMetricValueSchema.optional(),
-  windGusts10m: weatherMetricValueSchema.optional()
+  windGusts10m: weatherMetricValueSchema.optional(),
+  isDay: z.boolean().optional()
 }).strict();
 
 export const weatherCurrentReportSchema = z.object({
@@ -136,6 +156,7 @@ export const weatherForecastReportSchema = z.object({
   fetchedAt: z.string(),
   location: weatherReportLocationSchema,
   units: weatherReportUnitsSchema,
+  tideContext: weatherTideContextSchema.optional(),
   days: z.array(weatherForecastDaySchema)
 }).strict();
 
@@ -151,6 +172,51 @@ export const weatherQueryOutputSchema = z.discriminatedUnion('kind', [
   }).strict()
 ]);
 
+export const weatherPresentInputSchema = weatherQueryInputSchema.extend({
+  style: z.enum(WEATHER_PRESENTATION_STYLES).optional()
+}).strict();
+
+export const weatherPresentedConditionSchema = z.object({
+  code: z.number().int(),
+  text: z.string(),
+  emoji: z.string()
+}).strict();
+
+export const weatherPresentedDaySchema = z.object({
+  date: z.string(),
+  /** Localized short day label, e.g. "sáb, 14 nov". */
+  label: z.string(),
+  condition: weatherPresentedConditionSchema.optional(),
+  /** Condition and atmospheric lines, without a heading. */
+  weatherText: z.string(),
+  /** Tide and other marine lines, without a heading. */
+  marineText: z.string().optional(),
+  /** weatherText and marineText together. */
+  text: z.string()
+}).strict();
+
+export const weatherPresentationSchema = z.object({
+  locale: z.string(),
+  style: z.enum(WEATHER_PRESENTATION_STYLES),
+  title: z.string(),
+  current: z.object({
+    condition: weatherPresentedConditionSchema.optional(),
+    weatherText: z.string(),
+    marineText: z.string().optional(),
+    text: z.string()
+  }).strict().optional(),
+  days: z.array(weatherPresentedDaySchema),
+  /** Data-source notes for the whole message (tide source and datum, update time). */
+  footnote: z.string().optional(),
+  /** The complete chat message, as /weather sends it. */
+  text: z.string()
+}).strict();
+
+export const weatherPresentOutputSchema = z.object({
+  output: weatherQueryOutputSchema,
+  presentation: weatherPresentationSchema
+}).strict();
+
 export type WeatherServiceLocation = z.infer<typeof weatherServiceLocationSchema>;
 export type WeatherDaySelection = z.infer<typeof weatherDaySelectionSchema>;
 export type WeatherQueryInput = z.infer<typeof weatherQueryInputSchema>;
@@ -158,6 +224,12 @@ export type WeatherMarineMode = WeatherQueryInput['includeMarine'];
 export type WeatherMetricValue = z.infer<typeof weatherMetricValueSchema>;
 export type WeatherMarineMetricKey = z.infer<typeof weatherMarineMetricKeySchema>;
 export type WeatherTideEvent = z.infer<typeof weatherTideEventSchema>;
+export type WeatherTideContext = z.infer<typeof weatherTideContextSchema>;
 export type WeatherCurrentOutput = z.infer<typeof weatherCurrentReportSchema>;
 export type WeatherForecastOutput = z.infer<typeof weatherForecastReportSchema>;
 export type WeatherQueryOutput = z.infer<typeof weatherQueryOutputSchema>;
+export type WeatherPresentInput = z.infer<typeof weatherPresentInputSchema>;
+export type WeatherPresentedCondition = z.infer<typeof weatherPresentedConditionSchema>;
+export type WeatherPresentedDay = z.infer<typeof weatherPresentedDaySchema>;
+export type WeatherPresentation = z.infer<typeof weatherPresentationSchema>;
+export type WeatherPresentOutput = z.infer<typeof weatherPresentOutputSchema>;

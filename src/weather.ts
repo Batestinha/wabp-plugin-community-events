@@ -1,6 +1,5 @@
 import { previewTemplateFragment, joinTemplateFragments, textTemplateFragment, type TemplateFragment } from '@wabs/plugin-sdk/templates';
 import { resolveEventBody } from './announcements';
-import type { TranslateFn } from './runtime';
 import type { PluginServiceCallInput } from '@wabs/plugin-sdk/services';
 import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type { PluginRuntimeContext } from './runtime';
@@ -9,14 +8,15 @@ import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import type {
   WeatherForecastOutput,
   WeatherMetricValue,
-  WeatherQueryOutput
+  WeatherPresentation,
+  WeatherPresentedDay,
+  WeatherPresentOutput
 } from './contracts/weather/serviceApi';
 import {
   WEATHER_MAX_DAY_OFFSET,
-  WEATHER_QUERY_METHOD,
+  WEATHER_PRESENT_METHOD,
   WEATHER_SERVICE_ID
 } from './contracts/weather/serviceApi';
-import { renderMarineForecast } from './contracts/weather/marineForecast';
 import { eventDateAndTimeToUtc } from './datetime';
 import { eventDateTemplateTokens } from './templateDates';
 import { renderEventTemplateFragment } from './flow';
@@ -430,28 +430,34 @@ async function prepareWeatherDeliveryIntent(
   if (!context.services) {
     throw new Error('plugin_services_unavailable');
   }
-  const result = await context.services.call<WeatherQueryOutput>(weatherForecastServiceInput(event, now));
-  if (result.kind !== 'forecast') {
+  const resolvedLocale = await context.i18n.resolveScopeLocale(event.scopeId);
+  // The weather plugin renders the day blocks, so event forecasts read exactly like /weather.
+  const result = await context.services.call<WeatherPresentOutput>(weatherForecastServiceInput(event, now, resolvedLocale.locale));
+  if (result.output.kind !== 'forecast') {
     throw new Error('weather query returned current conditions for a forecast request');
   }
   const postQueryFenceReason = weatherEventSnapshotFenceReason(db, event, schedule);
   if (postQueryFenceReason) {
     throw new WeatherDeliveryFenceError(postQueryFenceReason);
   }
-  const report = result.report;
+  const report = result.output.report;
   const forecastDays = selectEventWeatherForecastDays(report, event, now);
-  if (forecastDays.length === 0) {
+  if (presentedEventWeatherDays(result.presentation, forecastDays).length === 0) {
     throw new Error('event_day_forecast_unavailable');
   }
   const t = await context.i18n.translatorForScope(event.scopeId);
-  const resolvedLocale = await context.i18n.resolveScopeLocale(event.scopeId);
   const localizedProfile = localizeDefaultEventProfiles([profile], t)[0] ?? profile;
-  const days = forecastDays.map(forecastDay => renderEventWeatherForecastFragment({ event, profile: localizedProfile, report, forecastDay, t, locale: resolvedLocale.locale }));
-  const { text: meteorologicalText, ...mentions } = await resolveEventBody(joinTemplateFragments(days.flatMap((day, index) =>
-    index ? [textTemplateFragment('\n\n'), day.meteorologicalFragment] : [day.meteorologicalFragment])), context, event, event.subgroupChatId!);
-  const messages = { meteorologicalText, marineText: days.map(day => day.marineText).filter(Boolean).join('\n\n') };
-
-  if (!messages.meteorologicalText.trim() && !messages.marineText?.trim()) {
+  const { text: meteorologicalText, ...mentions } = await resolveEventBody(renderEventWeatherMessageFragment({
+    event,
+    profile: localizedProfile,
+    report,
+    presentation: result.presentation,
+    forecastDays,
+    locale: resolvedLocale.locale
+  }), context, event, event.subgroupChatId!);
+  // One message per delivery: each day's template block with its tides, then one source note.
+  // Deliveries prepared by older versions may still carry a separate marineText; delivery sends both.
+  if (!meteorologicalText.trim()) {
     await markWeatherSkipped(
       context,
       db,
@@ -480,28 +486,13 @@ async function prepareWeatherDeliveryIntent(
     scheduledAt: schedule.scheduledAt.toISOString(),
     chatId: event.subgroupChatId!,
     mentions,
-    ...(messages.meteorologicalText.trim()
-      ? {
-          meteorologicalText: messages.meteorologicalText,
-          meteorologicalIdempotencyKey: eventWeatherTransportIdempotencyKey(
-            event.id,
-            event.updatedAt,
-            schedule.deliveryKind,
-            'meteorological'
-          )
-        }
-      : {}),
-    ...(messages.marineText?.trim()
-      ? {
-          marineText: messages.marineText,
-          marineIdempotencyKey: eventWeatherTransportIdempotencyKey(
-            event.id,
-            event.updatedAt,
-            schedule.deliveryKind,
-            'marine'
-          )
-        }
-      : {})
+    meteorologicalText,
+    meteorologicalIdempotencyKey: eventWeatherTransportIdempotencyKey(
+      event.id,
+      event.updatedAt,
+      schedule.deliveryKind,
+      'meteorological'
+    )
   });
   appendEventLog(db, {
     eventId: event.id,
@@ -795,23 +786,10 @@ function terminateFencedWeatherDelivery(
   })];
 }
 
-export function renderEventWeatherForecastDays(input: {
-  event: StoredEventRecord;
-  profile: EventProfile;
-  report: WeatherForecastOutput;
-  forecastDays: WeatherForecastDay[];
-  t: TranslateFn;
-  locale: string;
-}): { meteorologicalText: string; marineText?: string | undefined } {
-  const rendered = input.forecastDays.map((forecastDay) => renderEventWeatherForecast({
-    ...input,
-    forecastDay
-  }));
-  const marineText = rendered.map((day) => day.marineText).filter(Boolean).join('\n\n');
-  return {
-    meteorologicalText: rendered.map((day) => day.meteorologicalText).filter(Boolean).join('\n\n'),
-    ...(marineText ? { marineText } : {})
-  };
+export function renderEventWeatherForecastDays(input: EventWeatherMessageInput): { meteorologicalText: string } {
+  const fragment = renderEventWeatherMessageFragment(input);
+  if (fragment.segments.some(segment => segment.kind === 'mention')) throw new Error('Resolve weather mentions before delivery.');
+  return { meteorologicalText: previewTemplateFragment(fragment) };
 }
 
 export function eventWeatherForecastRecoverySkipReason(input: {
@@ -830,22 +808,48 @@ export function eventWeatherForecastRecoverySkipReason(input: {
   return weatherRuntimeSkipReason(input.event, schedule.scheduledAt, input.now);
 }
 
+interface EventWeatherMessageInput {
+  event: StoredEventRecord;
+  profile: EventProfile;
+  report: WeatherForecastOutput;
+  presentation: WeatherPresentation;
+  forecastDays: WeatherForecastDay[];
+  locale: string;
+}
+
+/** The whole delivery: every event day through the profile template, its tides, then the weather plugin's source note. */
+export function renderEventWeatherMessageFragment(input: EventWeatherMessageInput): TemplateFragment {
+  const days = presentedEventWeatherDays(input.presentation, input.forecastDays);
+  const fragments = days.map(({ forecastDay, presentedDay }) => renderEventWeatherForecastFragment({ ...input, forecastDay, presentedDay }));
+  const footnote = days.some(({ presentedDay }) => presentedDay.marineText) ? input.presentation.footnote : undefined;
+  return joinTemplateFragments([
+    ...fragments.flatMap((fragment, index) => index ? [textTemplateFragment('\n\n'), fragment] : [fragment]),
+    ...(footnote ? [textTemplateFragment(`\n\n${footnote}`)] : [])
+  ]);
+}
+
+function presentedEventWeatherDays(
+  presentation: WeatherPresentation,
+  forecastDays: WeatherForecastDay[]
+): Array<{ forecastDay: WeatherForecastDay; presentedDay: WeatherPresentedDay }> {
+  return forecastDays.flatMap((forecastDay) => {
+    const presentedDay = presentation.days.find((day) => day.date === forecastDay.date);
+    return presentedDay ? [{ forecastDay, presentedDay }] : [];
+  });
+}
+
 export function renderEventWeatherForecastFragment(input: {
   event: StoredEventRecord;
   profile: EventProfile;
   report: WeatherForecastOutput;
   forecastDay: WeatherForecastDay;
-  t: TranslateFn;
+  presentedDay: WeatherPresentedDay;
   locale: string;
-}): {
-  meteorologicalFragment: TemplateFragment;
-  marineText?: string | undefined;
-} {
-  const summary = weatherSummary(input.forecastDay, input.t, input.locale);
+}): TemplateFragment {
   const forecastDate = parseLocalDate(input.forecastDay.date);
   const forecastNoon = forecastDate && eventDateAndTimeToUtc(forecastDate, { hour: 12, minute: 0 }, input.event.timezone);
   const forecastDateTokens = forecastNoon ? eventDateTemplateTokens(forecastNoon, input.event.timezone, input.locale) : {};
-  const meteorologicalFragment = renderEventTemplateFragment({
+  const templateFragment = renderEventTemplateFragment({
     template: input.profile.weather.template,
     profile: input.profile,
     answers: input.event.answers,
@@ -863,14 +867,16 @@ export function renderEventWeatherForecastFragment(input: {
       windDirection: input.forecastDay.windDirectionDominant?.value, weatherCode: input.forecastDay.weatherCode
     },
     extraTokens: {
-      // Existing weather templates use these date tokens instead of weatherDate.
+      // Existing weather templates use these date tokens; weatherDate is the weather plugin's day label.
       ...Object.fromEntries(['weekday', 'dd', 'mm', 'yy', 'yyyy'].map((key) => [key, forecastDateTokens[key]])),
       eventId: input.event.id,
       groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       subgroupChatId: input.event.subgroupChatId,
-      weatherDate: input.forecastDay.date,
+      weatherDate: input.presentedDay.label,
       weatherLocation: input.report.location.label,
-      weatherSummary: summary,
+      weatherSummary: input.presentedDay.weatherText,
+      weatherCondition: input.presentedDay.condition?.text,
+      weatherEmoji: input.presentedDay.condition?.emoji,
       temperatureMax: formatMetric(input.forecastDay.temperatureMax, input.locale),
       temperatureMin: formatMetric(input.forecastDay.temperatureMin, input.locale),
       precipitation: formatMetric(input.forecastDay.precipitationSum, input.locale),
@@ -881,34 +887,27 @@ export function renderEventWeatherForecastFragment(input: {
       weatherCode: input.forecastDay.weatherCode !== undefined ? String(input.forecastDay.weatherCode) : undefined
     }
   });
-  const marineText = renderMarineForecast({
-    ...input.report,
-    location: {
-      ...input.report.location,
-      label: input.event.eventLocation?.displayLabel ?? input.report.location.label
-    },
-    days: [input.forecastDay]
-  }, input.t, input.locale);
-  return {
-    meteorologicalFragment,
-    ...(marineText ? { marineText } : {})
-  };
+  return input.presentedDay.marineText
+    ? joinTemplateFragments([templateFragment, textTemplateFragment(`\n${input.presentedDay.marineText}`)])
+    : templateFragment;
 }
 
-function weatherForecastServiceInput(event: StoredEventRecord, now: Date): PluginServiceCallInput {
+function weatherForecastServiceInput(event: StoredEventRecord, now: Date, locale: string): PluginServiceCallInput {
   if (!event.eventLocation) {
     throw new Error('event location is unresolved');
   }
   return {
     serviceId: WEATHER_SERVICE_ID,
-    method: WEATHER_QUERY_METHOD,
+    method: WEATHER_PRESENT_METHOD,
     scopeId: event.scopeId,
     actorIdentityId: requireWeatherEventActorIdentityId(event),
     ...(event.groupId ? { groupId: event.groupId } : {}),
     ...(event.groupWid ? { groupWid: event.groupWid } : {}),
     input: {
       selection: eventWeatherForecastDaySelection(event, now),
-      includeMarine: true,
+      // Tides only where the weather plugin finds the coast, so indoor or inland events get no "unavailable" line.
+      includeMarine: 'auto',
+      language: locale,
       location: {
         label: event.eventLocation.displayLabel,
         latitude: event.eventLocation.latitude,
@@ -939,50 +938,6 @@ export function selectEventWeatherForecastDays(
   const end = datePartsKey(occupied.end);
   return report.days.filter((day) => day.date >= start && day.date <= end)
     .sort((left, right) => left.date.localeCompare(right.date));
-}
-
-function weatherSummary(day: WeatherForecastDay, t: TranslateFn, locale: string): string {
-  const sections = [
-    weatherMetricSection(t, 'official.community-events.weather.section.temperature', [
-      labeledMetric(t, locale, 'official.community-events.weather.metric.temperatureMax', day.temperatureMax),
-      labeledMetric(t, locale, 'official.community-events.weather.metric.temperatureMin', day.temperatureMin)
-    ]),
-    weatherMetricSection(t, 'official.community-events.weather.section.relativeHumidity', [
-      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMax', day.relativeHumidityMax),
-      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMin', day.relativeHumidityMin),
-      labeledMetric(t, locale, 'official.community-events.weather.metric.relativeHumidityMean', day.relativeHumidityMean)
-    ]),
-    weatherMetricSection(t, 'official.community-events.weather.section.precipitation', [
-      formatMetric(day.precipitationSum, locale),
-      labeledMetric(
-        t,
-        locale,
-        'official.community-events.weather.metric.precipitationProbability',
-        day.precipitationProbabilityMax
-      )
-    ]),
-    weatherMetricSection(t, 'official.community-events.weather.section.wind', [
-      labeledMetric(t, locale, 'official.community-events.weather.metric.windSpeed', day.windSpeedMax),
-      labeledMetric(t, locale, 'official.community-events.weather.metric.windGust', day.windGustsMax),
-      labeledMetric(t, locale, 'official.community-events.weather.metric.windDirection', day.windDirectionDominant)
-    ])
-  ].filter((value): value is string => Boolean(value));
-  return sections.join('\n') || t('official.community-events.weather.none');
-}
-
-function weatherMetricSection(t: TranslateFn, key: string, metrics: Array<string | undefined>): string | undefined {
-  const values = metrics.filter((value): value is string => Boolean(value));
-  return values.length > 0 ? `*${t(key)}*: ${values.join(', ')}` : undefined;
-}
-
-function labeledMetric(
-  t: TranslateFn,
-  locale: string,
-  key: string,
-  metric?: WeatherMetricValue | undefined
-): string | undefined {
-  const formatted = formatMetric(metric, locale);
-  return formatted ? `${t(key)}: ${formatted}` : undefined;
 }
 
 function formatMetric(metric?: WeatherMetricValue | undefined, locale?: string | undefined): string | undefined {
@@ -1500,8 +1455,3 @@ function audit(action: string, metadataJson: unknown): PluginAction {
   };
 }
 
-export function renderEventWeatherForecast(input: Parameters<typeof renderEventWeatherForecastFragment>[0]) {
-  const { meteorologicalFragment, ...other } = renderEventWeatherForecastFragment(input);
-  if (meteorologicalFragment.segments.some(segment => segment.kind === 'mention')) throw new Error('Resolve weather mentions before delivery.');
-  return { ...other, meteorologicalText: previewTemplateFragment(meteorologicalFragment) };
-}

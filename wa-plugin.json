@@ -4,7 +4,7 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.20.2",
+  "version": "0.21.0",
   "coreApiRange": "^0.3.14",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -401,7 +401,7 @@
     },
     {
       "pluginId": "official.weather",
-      "versionRange": ">=0.4.0",
+      "versionRange": ">=0.6.0",
       "optional": true
     },
     {
@@ -442,7 +442,7 @@
       "The bot must be an admin of the announcement and community groups.",
       "The caller needs the configured profile-specific events.create.* permission to create events.",
       "The event creator or an events.manage actor can cancel active events.",
-      "Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent."
+      "Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent, and its message style control chooses emoji or plain text."
     ],
     "workflows": [
       {
@@ -4348,7 +4348,9 @@
               "variables": [
                 "groupDisplayName",
                 "weatherDate",
-                "weatherSummary"
+                "weatherSummary",
+                "weatherCondition",
+                "weatherEmoji"
               ],
               "placement": {
                 "sectionId": "event-profiles",
@@ -4393,246 +4395,6 @@
                 "sectionId": "event-profiles",
                 "groupId": "profile-defaults",
                 "groupLabel": "Default profile wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.section.temperature",
-              "label": "Weather / section / temperature",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2200,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.section.relativeHumidity",
-              "label": "Weather / section / relative humidity",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2210,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.section.precipitation",
-              "label": "Weather / section / precipitation",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2220,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.section.wind",
-              "label": "Weather / section / wind",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2230,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.temperatureMax",
-              "label": "Weather / metric / temperature max",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2240,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.temperatureMin",
-              "label": "Weather / metric / temperature min",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2250,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.relativeHumidityMax",
-              "label": "Weather / metric / relative humidity max",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2260,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.relativeHumidityMin",
-              "label": "Weather / metric / relative humidity min",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2270,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.relativeHumidityMean",
-              "label": "Weather / metric / relative humidity mean",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2280,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.precipitation",
-              "label": "Weather / metric / precipitation",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2290,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.precipitationProbability",
-              "label": "Weather / metric / precipitation probability",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2300,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.windSpeed",
-              "label": "Weather / metric / wind speed",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2310,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.windGust",
-              "label": "Weather / metric / wind gust",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2320,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.windDirection",
-              "label": "Weather / metric / wind direction",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2330,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.metric.weatherCode",
-              "label": "Weather / metric / weather code",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2340,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
-              }
-            },
-            {
-              "key": "official.community-events.weather.none",
-              "label": "Weather / none",
-              "topic": "Calendar & weather",
-              "destination": "Command or workflow reply",
-              "order": 2350,
-              "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "weather",
-                "groupId": "weather",
-                "groupLabel": "Weather wording"
               }
             },
             {

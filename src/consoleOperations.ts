@@ -645,9 +645,7 @@ async renameOfficialEventProfileQuestion(input: unknown = {}) {
       }
       const currentProfile = currentConfig.eventProfiles[profileIndex]!;
       const expectedProfile = eventProfileSchema.parse(parsed.expectedProfile);
-      const { textVersion: _expectedTextVersion, ...expectedFields } = expectedProfile;
-      const { textVersion: _currentTextVersion, ...currentFields } = currentProfile;
-      if (JSON.stringify(expectedFields) !== JSON.stringify(currentFields)) {
+      if (!sameEventProfileContent(expectedProfile, currentProfile)) {
         throw httpError(409, 'The event profile changed while the question rename was being prepared. Refresh and try again.');
       }
       if (!currentProfile.questions.some((question) => question.key === parsed.oldKey)) {
@@ -721,7 +719,7 @@ async renameOfficialEventProfileQuestion(input: unknown = {}) {
               const authoritativeProfile = currentConfig.eventProfiles.find((profile) => profile.id === parsed.profileId);
               recoveredCommittedMutation = authority === 'new' && Boolean(
                 renamedProfile && authoritativeProfile &&
-                JSON.stringify(authoritativeProfile) === JSON.stringify(renamedProfile)
+                sameEventProfileContent(authoritativeProfile, renamedProfile)
               );
             }
           }
@@ -1408,4 +1406,18 @@ export function registerEventsConsoleOperations(context: PluginConsoleContext): 
   { operationId: 'official.community-events.adoptOfficialEvent', handler: input => operations.adoptOfficialEvent(input) },
   { operationId: 'official.community-events.eventsCalendarSubscriptionDocument', handler(input) { const request = z.object({params:z.unknown(),query:z.unknown()}).parse(input); return operations.eventsCalendarSubscriptionDocument(request.params, request.query); } }
  ];
+}
+
+/**
+ * Two copies of one event profile are the same when everything but the saved-text marker
+ * matches. A stored profile carries `textVersion` once its wording has been saved as
+ * localized text; the profile a rename plans from the operator's copy may not. Comparing the
+ * marker made a committed rename whose response was lost look like a failure.
+ */
+export function sameEventProfileContent(left: unknown, right: unknown): boolean {
+  const content = (value: unknown): string => {
+    const { textVersion: _textVersion, ...rest } = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+    return JSON.stringify(rest);
+  };
+  return content(left) === content(right);
 }

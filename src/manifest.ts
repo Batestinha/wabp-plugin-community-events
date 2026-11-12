@@ -50,7 +50,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.20.2',
+  version: '0.21.0',
   coreApiRange: '^0.3.14',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -270,7 +270,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '^0.2.0' },
     { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
-    { pluginId: 'official.weather', versionRange: '>=0.4.0', optional: true },
+    { pluginId: 'official.weather', versionRange: '>=0.6.0', optional: true },
     { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
@@ -295,7 +295,7 @@ export const eventsManifest: PluginManifest = {
       'The bot must be an admin of the announcement and community groups.',
       'The caller needs the configured profile-specific events.create.* permission to create events.',
       'The event creator or an events.manage actor can cancel active events.',
-      'Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent.'
+      'Event-day weather forecasts require official.weather to be installed, enabled, and configured for the same scope. The weather plugin metric controls determine which atmospheric and marine values are sent, and its message style control chooses emoji or plain text.'
     ],
     workflows: [
       {

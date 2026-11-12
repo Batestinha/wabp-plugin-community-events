@@ -113,13 +113,13 @@
     },
     {
       "id": "weather/serviceApi.ts",
-      "repository": "https://github.com/Batestinha/wabp",
-      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
-      "path": "src/plugins/official/weather/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp-plugin-weather",
+      "commit": "b63b927837db34b2eed636bb89049d269ed84e0e",
+      "path": "src/serviceApi.ts",
       "upstreamPath": "upstream/weather/serviceApi.ts.source",
-      "upstreamSha256": "67a73b979fce9453b23bfd1c79eaecdec30b7a28e9747d10b6629d4c0c117941",
+      "upstreamSha256": "3f8a2a9a8510f24df361b1219c7fd7a864f86f57d9dd6654a3122e212530c532",
       "vendoredPath": "weather/serviceApi.ts",
-      "vendoredSha256": "67a73b979fce9453b23bfd1c79eaecdec30b7a28e9747d10b6629d4c0c117941",
+      "vendoredSha256": "3f8a2a9a8510f24df361b1219c7fd7a864f86f57d9dd6654a3122e212530c532",
       "patches": [],
       "license": "MIT",
       "licenseFile": "LICENSE.wabp",
@@ -127,37 +127,17 @@
     },
     {
       "id": "weather/config.ts",
-      "repository": "https://github.com/Batestinha/wabp",
-      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
-      "path": "src/plugins/official/weather/config.ts",
+      "repository": "https://github.com/Batestinha/wabp-plugin-weather",
+      "commit": "b63b927837db34b2eed636bb89049d269ed84e0e",
+      "path": "src/config.ts",
       "upstreamPath": "upstream/weather/config.ts.source",
-      "upstreamSha256": "45c37336b4f84da3c5bf5945cf46767d18af649eadbd8be424586efa9c2caa1a",
+      "upstreamSha256": "18af04248ffbb969b72997638684d94659923d582cdc808b244502c2f227cc8c",
       "vendoredPath": "weather/config.ts",
-      "vendoredSha256": "45c37336b4f84da3c5bf5945cf46767d18af649eadbd8be424586efa9c2caa1a",
+      "vendoredSha256": "18af04248ffbb969b72997638684d94659923d582cdc808b244502c2f227cc8c",
       "patches": [],
       "license": "MIT",
       "licenseFile": "LICENSE.wabp",
       "artifactKind": "connection-configuration-helper"
-    },
-    {
-      "id": "weather/marineForecast.ts",
-      "repository": "https://github.com/Batestinha/wabp",
-      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
-      "path": "src/plugins/official/weather/marineForecast.ts",
-      "upstreamPath": "upstream/weather/marineForecast.ts.source",
-      "upstreamSha256": "6387272b272b8eb00ee230a579f1387b14f331f19e20723d88ba3fd727e77f83",
-      "vendoredPath": "weather/marineForecast.ts",
-      "vendoredSha256": "c6e8f3800a9c56c38270af700e95f1f5daaf125fc4a7de0eeb32212715d9e445",
-      "patches": [
-        {
-          "operation": "replace-import",
-          "before": "'../../../../packages/plugin-sdk/src/i18n'",
-          "after": "'@wabs/plugin-sdk/i18n'"
-        }
-      ],
-      "license": "MIT",
-      "licenseFile": "LICENSE.wabp",
-      "artifactKind": "presentation-helper"
     },
     {
       "id": "workspace-connector/config.ts",

@@ -9114,6 +9114,11 @@ function assignUnassignedEventCalendarOwnershipInTransaction(db: PluginDatabase,
   return true;
 }
 
+/** Scopes that have events, for imports that run once per scope. */
+export function listEventScopeIds(db: PluginDatabase): string[] {
+  return db.all<{ scope_id: string }>('SELECT DISTINCT scope_id FROM event_records ORDER BY scope_id').map(row => row.scope_id);
+}
+
 export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEventRecord[] {
   return db.all<EventRow>(
     `SELECT * FROM event_records

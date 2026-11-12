@@ -31,20 +31,14 @@
     },
     {
       "id": "geocoder/serviceApi.ts",
-      "repository": "https://github.com/Batestinha/wabp",
-      "commit": "ce6988c1e0e8f59d5660c5b7382c7cad25b2f1b9",
-      "path": "src/plugins/official/geocoder/serviceApi.ts",
+      "repository": "https://github.com/Batestinha/wabp-plugin-geocoder",
+      "commit": "9532d909d34eb302bc42a7fab988be4680880eae",
+      "path": "src/serviceApi.ts",
       "upstreamPath": "upstream/geocoder/serviceApi.ts.source",
-      "upstreamSha256": "32a6e419a31989eeeb92ebc632e16d9b3f20a57904f7c3f9c664b9a77d85ef73",
+      "upstreamSha256": "7fe9342c0514e7be151ba4b482aa66e4995af1cc79266c397a651214e8335317",
       "vendoredPath": "geocoder/serviceApi.ts",
-      "vendoredSha256": "47bf9dac9dcbc01f5437b3b8d059578c125d5e57143b1d6c840f163c1efdf2a9",
-      "patches": [
-        {
-          "operation": "replace-import",
-          "before": "'../../../../packages/plugin-sdk/src/clock'",
-          "after": "'@wabs/plugin-sdk/clock'"
-        }
-      ],
+      "vendoredSha256": "7fe9342c0514e7be151ba4b482aa66e4995af1cc79266c397a651214e8335317",
+      "patches": [],
       "license": "MIT",
       "licenseFile": "LICENSE.wabp",
       "artifactKind": "service-contract"

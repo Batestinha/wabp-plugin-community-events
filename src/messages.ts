@@ -45,7 +45,6 @@ export const eventsMessages: MessageCatalog = {
   'official.community-events.location.failed': 'I could not resolve the event place. Try again in a moment.',
   'official.community-events.location.promptFailed': 'I found possible places but could not send the selection list. Start the request again in a moment.',
   'official.community-events.location.invalid': 'That event place selection is no longer valid. Start again.',
-  'official.community-events.location.chooseNumber': "These are the results for that search. Reply with the number of the right one (1 to {count}), or type a more specific search.",
   'official.community-events.location.wrongRequester': 'The event place was not confirmed by the original requester.',
   'official.community-events.pollPublished': 'Event poll published.',
   'official.community-events.pollLifecycleQueued': 'Event recorded. Poll Assistant is publishing the attendance poll and will recover it automatically if delivery is delayed.',

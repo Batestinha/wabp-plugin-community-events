@@ -3,11 +3,10 @@ import type { PluginEphemeralStore } from '@wabs/plugin-sdk/ephemeral-store';
 import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import type { TranslateFn } from './runtime';
-import { GEOCODER_SERVICE_ID, GEOCODER_GEOCODE_METHOD, GEOCODER_TIMEZONE_METHOD,
-  geocodeOutputSchema, geocoderTimezoneOutputSchema, type GeocodeOutput } from './contracts/geocoder/serviceApi';
+import { GEOCODER_SERVICE_ID, GEOCODER_TIMEZONE_METHOD, geocoderTimezoneOutputSchema,
+  type ResolveOutput } from './contracts/geocoder/serviceApi';
 import { geocodedEventLocation } from './eventLocation';
-import { eventReplyControl, normalizedPlaceText } from './answerResilience';
-import type { GeocoderBoundingBox } from './contracts/geocoder/serviceApi';
+import { chooseEventPlace, rememberEventPlace, resolveEventPlace } from './places';
 
 export interface EventLocationResolution {
   services?: PluginServiceCaller | undefined;
@@ -16,30 +15,15 @@ export interface EventLocationResolution {
   actorIdentityId: string;
   groupId?: string | undefined;
   groupWid?: string | undefined;
-  /** Area this community usually meets in; ranks nearby results first without excluding others. */
-  biasBounds?: GeocoderBoundingBox | undefined;
 }
 
-const HEDGES = /\b(?:maybe|perhaps|tbd|talvez|por decidir|a decidir|a confirmar|por confirmar|ou outro|ou outra|or other|or so)\b/giu;
+interface Search { displayPlace: string; output: ResolveOutput }
 
-/** The search text for a place answer: notes such as "(maybe?)" and alternatives stay out of the query. */
-export function eventPlaceSearchQuery(place: string): string {
-  const first = place.replace(/\([^)]*\)/g, ' ').split(/\s*\/\s*|\s+(?:ou|or)\s+/iu)[0] ?? place;
-  const cleaned = first.replace(HEDGES, ' ').replace(/[?¿!]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return cleaned.length >= 2 ? cleaned : place.trim();
-}
-
-/** A typed reply that names exactly one listed result selects it. */
-export function typedLocationChoice(results: { label: string; name?: string | undefined }[], reply: string): number | undefined {
-  const wanted = normalizedPlaceText(reply);
-  if (!wanted) return undefined;
-  const matches = results.flatMap((place, index) => [place.name, place.label.split(',')[0], place.label]
-    .filter((name): name is string => Boolean(name)).map(normalizedPlaceText).includes(wanted) ? [index] : []);
-  return matches.length === 1 ? matches[0] : undefined;
-}
-interface Search { displayPlace: string; query: string; output: GeocodeOutput }
-
-/** Keep numbered results stable across process restarts; the answer lives in FlowState. */
+/**
+ * The geocoder decides which places to list, in what order, and what a reply means; this step shows the
+ * event's own wording around its lines. Numbered results stay stable across restarts: the list lives in
+ * the ephemeral store and a number is never read against a list the person has not seen.
+ */
 export function createEventLocationStep(input: {
   id: string; flowType: string; resolution: EventLocationResolution; locale: string; t: TranslateFn;
   placeForState(state: FlowState): string | undefined;
@@ -47,30 +31,28 @@ export function createEventLocationStep(input: {
 }): FlowStep {
   const { services, ephemeralStore, ...actor } = input.resolution;
   const key = `event-flow-location:${input.flowType}:${input.id}`;
-  const prompt = (search: Search) => [input.t(search.output.results.length
+  const prompt = (search: Search) => [input.t(search.output.candidates.length
     ? 'official.community-events.location.select' : 'official.community-events.location.noResults',
-  { displayPlace: search.displayPlace, searchQuery: search.query }),
-  ...search.output.results.map((place, index) => `${index + 1}. ${place.label}`)].join('\n');
+  { displayPlace: search.displayPlace, searchQuery: search.output.searchQuery }),
+  ...search.output.presentation.optionLines].join('\n');
   const search = async (displayPlace: string, query = displayPlace): Promise<Search> => {
     if (!services || !ephemeralStore) throw new Error('Location service unavailable');
-    const output = geocodeOutputSchema.parse(await services.call({ ...actor, serviceId: GEOCODER_SERVICE_ID,
-      method: GEOCODER_GEOCODE_METHOD, input: { query, language: input.locale, limit: 5,
-        ...(input.resolution.biasBounds ? { bounds: input.resolution.biasBounds } : {}) } }));
-    const value = { displayPlace, query, output };
+    const output = await resolveEventPlace(services, actor, { query, language: input.locale });
+    const value = { displayPlace, output };
     // Longer than the 30-minute questionnaire; expires even after cancellation.
     await ephemeralStore.set(key, value, 3600);
     return value;
   };
   const cached = async (displayPlace: string) => {
     const value = await ephemeralStore?.get<Search>(key);
-    return value?.displayPlace === displayPlace ? value : undefined;
+    return value?.displayPlace === displayPlace && value.output?.presentation ? value : undefined;
   };
   return {
     id: input.id, kind: 'text', prompt: input.t('official.community-events.location.failed'),
     promptMessageForState: async state => {
       const place = input.placeForState(state);
       if (!place) return { text: input.t('official.community-events.location.missing') };
-      try { return { text: prompt(await cached(place) ?? await search(place, eventPlaceSearchQuery(place))) }; }
+      try { return { text: prompt(await cached(place) ?? await search(place)) }; }
       catch { return { text: input.t('official.community-events.location.failed') }; }
     },
     resolveInputAsync: async ({ state, input: reply }) => {
@@ -79,30 +61,28 @@ export function createEventLocationStep(input: {
       try {
         const previous = await cached(displayPlace);
         // Never reinterpret a number against refreshed results the user has not seen.
-        if (!previous) return { status: 'error', reply: prompt(await search(displayPlace, eventPlaceSearchQuery(displayPlace))) };
-        const results = previous.output.results;
-        // "ok" with a single result, or typing the name of one listed result, selects it.
-        const typed = /^\d+$/.test(reply) ? undefined
-          : eventReplyControl(reply) === 'accept' && results.length === 1 ? 0 : typedLocationChoice(results, reply);
-        if (!/^\d+$/.test(reply) && typed === undefined) {
-          if (reply.startsWith('/')) return { status: 'error', reply: input.t('official.community-events.location.invalid') };
-          // Retyping the same search would show the same list again: ask for the number instead.
-          if (results.length > 0 && normalizedPlaceText(reply) === normalizedPlaceText(previous.query)) {
-            return { status: 'error', reply: [input.t('official.community-events.location.chooseNumber', { count: results.length }),
-              ...results.map((place, index) => `${index + 1}. ${place.label}`)].join('\n') };
-          }
-          return { status: 'error', reply: prompt(await search(displayPlace, reply)) };
-        }
-        const place = results[typed ?? Number(reply) - 1];
-        if (!place) return { status: 'error', reply: input.t('official.community-events.location.invalid') };
+        if (!previous) return { status: 'error', reply: prompt(await search(displayPlace)) };
+        const listed = previous.output;
+        const choice = await chooseEventPlace(services!, actor, {
+          searchQuery: listed.searchQuery,
+          status: listed.status,
+          candidates: listed.candidates.map(candidate => candidate.place),
+          reply,
+          language: input.locale
+        });
+        if (choice.status === 'invalid') return { status: 'error', reply: input.t('official.community-events.location.invalid') };
+        if (choice.status === 'ask_number') return { status: 'error', reply: choice.text };
+        if (choice.status === 'search') return { status: 'error', reply: prompt(await search(displayPlace, choice.query)) };
+        const place = choice.place;
         let timezone: string;
         try {
           timezone = scopeTimezoneSchema.parse(place.timezone ?? geocoderTimezoneOutputSchema.parse(await services!.call({
             ...actor, serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_TIMEZONE_METHOD, input: place.point
           })).timezone);
         } catch { return { status: 'error', reply: input.t('official.community-events.location.timezoneUnavailable') }; }
-        return { status: 'use-value', value: geocodedEventLocation({ query: previous.query, displayLabel: displayPlace,
-          timezone, provider: previous.output.provider, place }) };
+        await rememberEventPlace(services, actor, { queries: [displayPlace, listed.searchQuery], place });
+        return { status: 'use-value', value: geocodedEventLocation({ query: listed.searchQuery, displayLabel: displayPlace,
+          timezone, provider: listed.provider, place }) };
       } catch { return { status: 'error', reply: input.t('official.community-events.location.failed') }; }
     },
     nextStepIdForState: input.nextStepIdForState

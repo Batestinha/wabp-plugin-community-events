@@ -26,7 +26,6 @@ import {
   type EventProfile
 } from './config';
 import type { PluginDatabaseRegistry } from '@wabs/plugin-sdk/database';
-import { eventPlaceHints } from './placeHints';
 import {
   createEventFlowDefinition,
   EVENT_CREATION_FLOW_TYPE_PREFIX,
@@ -381,12 +380,9 @@ export class EventCreationFlowStarter {
       locale: input.prepared.locale,
       now: startedAt
     });
-    const hints = eventPlaceHints(this.context.databases, input.scopeId);
     const definition = createEventFlowDefinition({
       locationResolution: { services: this.context.services, ephemeralStore: this.context.ephemeralStore,
-        scopeId: input.scopeId, actorIdentityId: input.actorIdentityId, groupId: input.groupId, groupWid: input.groupWid,
-        ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
-      knownPlaces: hints.knownPlaces,
+        scopeId: input.scopeId, actorIdentityId: input.actorIdentityId, groupId: input.groupId, groupWid: input.groupWid },
       templateMentions: { context: this.context, scopeId: input.scopeId, chatId: input.prepared.actor.deliveryChatId,
         currentGroupId: input.groupWid, creatorIdentityId: input.actorIdentityId },
       t: input.prepared.t,
@@ -515,12 +511,9 @@ export function registerEventCreationFlowDefinitionResolver(
         throw new Error(`Event creation flow ${session.id} durable draft does not match its session.`);
       }
       const t = await translatorForEventDraft(context.i18n, draft);
-      const hints = eventPlaceHints(context.databases, draft.scopeId);
       const definition = restoreEventFlowDefinition({
         locationResolution: { services: context.services, ephemeralStore: context.ephemeralStore,
-          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupId: draft.groupId, groupWid: draft.groupWid,
-          ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
-        knownPlaces: hints.knownPlaces,
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupId: draft.groupId, groupWid: draft.groupWid },
         templateMentions: { context, scopeId: draft.scopeId, chatId: draft.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         flowType: draft.flowType,

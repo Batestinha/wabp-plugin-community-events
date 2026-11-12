@@ -10,8 +10,8 @@ import { cancelEventLifecycle } from './cancellation';
 import { localizeDefaultEventProfiles, parseEventsConfig } from './config';
 import { eventFlowAnswersFromRaw } from './flow';
 import { eventLocationQuery, fixedEventLocation, geocodedEventLocation } from './eventLocation';
-import { GEOCODER_SERVICE_ID, GEOCODER_GEOCODE_METHOD, GEOCODER_TIMEZONE_METHOD,
-  geocodeOutputSchema, geocoderTimezoneOutputSchema } from './contracts/geocoder/serviceApi';
+import { GEOCODER_SERVICE_ID, GEOCODER_TIMEZONE_METHOD, geocoderTimezoneOutputSchema } from './contracts/geocoder/serviceApi';
+import { resolveEventPlace } from './places';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
 import { materializeEventLifecycle } from './materialize';
 import { eventsDatabase, getEvent, getEventEditRepair, getEventPollReplacement, listScopeEvents, listEventAnnouncementMessages, type StoredEventRecord } from './store';
@@ -110,13 +110,13 @@ async function describeLocations(context: PluginServiceRegistrationContext, targ
   if (!context.services) throw new Error(target.t('official.community-events.workflow.locationRequired'));
   const principal = { scopeId: call.scopeId, actorIdentityId: call.actorIdentityId, groupId: call.groupId,
     groupWid: call.groupWid, signal: call.signal };
-  const output = geocodeOutputSchema.parse(await context.services.call({ ...principal,
-    serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_GEOCODE_METHOD, input: { query, language: target.locale, limit: 5 } }));
-  return Promise.all(output.results.map(async place => {
+  // The geocoder ranks the places (this community's first) and leaves notes out of the search.
+  const output = await resolveEventPlace(context.services, principal, { query, language: target.locale });
+  return Promise.all(output.candidates.map(async ({ place }) => {
     const timezone = scopeTimezoneSchema.parse(place.timezone ?? geocoderTimezoneOutputSchema.parse(await context.services!.call({
       ...principal, serviceId: GEOCODER_SERVICE_ID, method: GEOCODER_TIMEZONE_METHOD, input: place.point
     })).timezone);
-    return { location: geocodedEventLocation({ query, displayLabel: query, timezone, provider: output.provider, place }),
+    return { location: geocodedEventLocation({ query: output.searchQuery, displayLabel: query, timezone, provider: output.provider, place }),
       attribution: place.attribution };
   }));
 }

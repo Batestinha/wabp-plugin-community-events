@@ -4,19 +4,17 @@ const { createEventFlowDefinition, restoreEventFlowDefinition, eventInitialFlowD
 const { resolveFlowStepInputForEngine } = require('@wabs/plugin-sdk/flow-input');
 const { parseEventsConfig } = require('../dist/config');
 const { eventsMessages } = require('../dist/messages');
+const { fakeGeocoder } = require('./fakeGeocoder.cjs');
 const t = (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), eventsMessages[key] ?? key);
 function fixture(overrides = {}) {
   const profile = structuredClone(parseEventsConfig({}).eventProfiles[0]);
   Object.assign(profile, overrides.profile);
-  const values = new Map(), calls = [];
-  const services = { call: async input => {
-    calls.push(input);
-    if (input.method === 'timezoneForPoint') return { timezone: 'Asia/Tokyo', candidates: ['Asia/Tokyo'] };
-    return { provider: 'fixture', fetchedAt: '2026-10-16T09:00:00.000Z', results: [
-      { label: `${input.input.query}, Tokyo`, point: { latitude: 35, longitude: 139 }, address: {}, attribution: { text: 'fixture', url: 'https://example.test' } },
-      { label: `${input.input.query}, Lisbon`, point: { latitude: 38, longitude: -9 }, timezone: 'Europe/Lisbon', address: {}, attribution: { text: 'fixture', url: 'https://example.test' } }
-    ] };
-  }};
+  const values = new Map();
+  const services = fakeGeocoder(query => [
+    { label: `${query}, Tokyo`, point: { latitude: 35, longitude: 139 }, address: {}, attribution: { text: 'fixture', url: 'https://example.test' } },
+    { label: `${query}, Lisbon`, point: { latitude: 38, longitude: -9 }, timezone: 'Europe/Lisbon', address: {}, attribution: { text: 'fixture', url: 'https://example.test' } }
+  ], { timezone: { timezone: 'Asia/Tokyo', candidates: ['Asia/Tokyo'] } });
+  const calls = services.calls;
   const ephemeralStore = { get: async key => values.get(key), set: async (key, value, ttl) => {
     assert.equal(ttl, 3600); values.set(key, structuredClone(value));
   }};
@@ -60,7 +58,9 @@ test('disambiguates immediately after place, survives restart and parses later d
   const answers = eventFlowAnswers({ state: f.state, flowType: f.definition.flowType }, f.profile, 'UTC');
   assert.equal(answers.startsAt.toISOString(), '2027-10-20T00:30:00.000Z');
   assert.equal(answers.answers.place, 'Praia');
-  assert.equal(f.calls.filter(call => call.method === 'geocode').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'resolve').length, 1);
+  // The confirmed pick is taught to the geocoder with the words typed for it.
+  assert.deepEqual(f.services.remembered.map(item => [item.query, item.place.label]), [['Praia', 'Praia, Tokyo']]);
   assert(f.calls.every(call => call.scopeId === 'scope' && call.actorIdentityId === 'creator'));
 });
 

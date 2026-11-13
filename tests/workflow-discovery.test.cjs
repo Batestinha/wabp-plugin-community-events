@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { fakeGeocoder } = require('./fakeGeocoder.cjs');
 const { test } = require('node:test');
 const store = require('../dist/store');
 const commands = require('../dist/commands');
@@ -13,14 +14,13 @@ function fixture(t, events) {
   t.mock.method(commands, 'eventUpdateAllowed', async (_ctx, { event }) => event.allowed !== false);
   t.mock.method(commands, 'eventIsEditable', event => event.eventStatus === 'active');
   t.mock.method(commands, 'eventUpdatePrefill', () => ({}));
-  const calls = [];
   const context = { pluginId: 'official.community-events', enabledFor: async () => true, configFor: async () => config,
     resolveStableIdentityById: async id => ({ identityId: id }), flowEngine: {}, enqueuePluginJob: async () => {},
     databases: { open: () => ({}) }, platform: { transport: {} },
     i18n: { resolveScopeLocale: async () => ({ locale: 'pt-PT' }), translatorForIdentity: async () => key => key },
-    services: { call: async input => { calls.push(input); return { provider: 'fixture', fetchedAt: '2026-10-04T00:00:00Z',
-      results: [{ label: 'Éden, Sintra', point: { latitude: 38.8, longitude: -9.4 }, timezone: 'Europe/Lisbon',
-        address: {}, providerRef: 'eden', attribution: { text: 'Fixture', url: 'https://example.test' } }] }; } } };
+    services: fakeGeocoder(() => [{ label: 'Éden, Sintra', point: { latitude: 38.8, longitude: -9.4 }, timezone: 'Europe/Lisbon',
+      address: {}, providerRef: 'eden', attribution: { text: 'Fixture', url: 'https://example.test' } }]) };
+  const calls = context.services.calls;
   const methods = registerEventWorkflowServices(context)[0].methods;
   const describe = async (input = {}, overrides = {}) => {
     const method = methods.find(m => m.name === 'editDescribe');
@@ -65,7 +65,7 @@ test('explicit event selection is preserved and place lookup returns authoritati
     query: 'Éden', provider: 'fixture', providerRef: 'eden' });
   assert.equal(f.calls[0].actorIdentityId, 'requester');
   assert.equal(f.calls[0].scopeId, 'scope');
-  assert.equal(f.calls[0].method, 'geocode');
+  assert.equal(f.calls[0].method, 'resolve');
   assert.ok(result.describeInputSchema.properties.locationQuery);
 });
 
@@ -75,9 +75,8 @@ test('authorization precedes geocoding and timezone lookup never invents a fallb
   await assert.rejects(f.describe({ eventId: 'event', locationQuery: 'Éden' }), /permissionDenied/);
   assert.equal(f.calls.length, 0);
   events[0].allowed = true;
-  f.context.services.call = async input => input.method === 'geocode'
-    ? { provider: 'fixture', fetchedAt: '2026-10-04T00:00:00Z', results: [{ label: 'Ambiguous place',
-      point: { latitude: 1, longitude: 1 }, address: {}, attribution: { text: 'Fixture', url: 'https://example.test' } }] }
-    : { timezone: null, candidates: [] };
+  f.context.services = fakeGeocoder(() => [{ label: 'Ambiguous place',
+    point: { latitude: 1, longitude: 1 }, address: {}, attribution: { text: 'Fixture', url: 'https://example.test' } }],
+  { timezone: { timezone: null, candidates: [] } });
   await assert.rejects(f.describe({ eventId: 'event', locationQuery: 'Éden' }));
 });

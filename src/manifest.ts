@@ -50,7 +50,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.21.0',
+  version: '0.22.0',
   coreApiRange: '^0.3.14',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -268,7 +268,7 @@ export const eventsManifest: PluginManifest = {
   dependencies: [
     { pluginId: 'official.doas', versionRange: '>=0.3.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
-    { pluginId: 'official.geocoder', versionRange: '^0.2.0' },
+    { pluginId: 'official.geocoder', versionRange: '^0.3.0' },
     { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
     { pluginId: 'official.weather', versionRange: '>=0.6.0', optional: true },
     { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }

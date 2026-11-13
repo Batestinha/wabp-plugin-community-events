@@ -272,3 +272,29 @@ test('weather intent freezes text, people, native all, and group mentions in one
     assert.equal(retry.meteorologicalText, original.meteorologicalText); assert.deepEqual(retry.mentions, input.mentions);
   } finally { db.close(); closeDirectory(directory); }
 });
+
+test('past event places are shared with the geocoder once per start, cancelled events excluded', async () => {
+  const { importEventPlacesToGeocoder } = require('../dist/places');
+  const { fakeGeocoder } = require('./fakeGeocoder.cjs');
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    const location = (label, latitude) => ({ source: 'question', displayLabel: label, resolvedLabel: `${label}, Lisboa, Portugal`,
+      latitude, longitude: -9.4, timezone: 'Europe/Lisbon', query: label, provider: 'nominatim', providerRef: `node:${label}` });
+    insertEvent(db, { ...fixture(), id: 'sintra', eventLocation: location('Sintra', 38.8) });
+    insertEvent(db, { ...fixture(), id: 'cascais', eventLocation: location('Cascais', 38.7) });
+    insertEvent(db, { ...fixture(), id: 'gone', eventStatus: 'cancelled', eventLocation: location('Nowhere', 38.6) });
+    insertEvent(db, { ...fixture(), id: 'fixed', eventLocation: { ...location('Gym', 38.5), source: 'fixed' } });
+    const geocoder = fakeGeocoder(() => []);
+    assert.equal(await importEventPlacesToGeocoder({ services: geocoder, databases: { open: () => db } }), 2);
+    assert.equal(geocoder.calls.length, 1);
+    assert.equal(geocoder.calls[0].method, 'remember');
+    assert.equal(geocoder.calls[0].scopeId, 'fixture-scope');
+    assert.equal(geocoder.calls[0].input.source, 'import');
+    assert.deepEqual(geocoder.calls[0].input.places.map(item => [item.query, item.place.label, item.place.providerRef]).sort(),
+      [['Cascais', 'Cascais, Lisboa, Portugal', 'node:Cascais'], ['Sintra', 'Sintra, Lisboa, Portugal', 'node:Sintra']]);
+    // A geocoder that cannot take them (older, disabled) never blocks startup.
+    const failing = { call: async () => { throw new Error('unknown method remember'); } };
+    assert.equal(await importEventPlacesToGeocoder({ services: failing, databases: { open: () => db }, logger: { warn() {} } }), 0);
+  } finally { db.close(); }
+});

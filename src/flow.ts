@@ -8,7 +8,7 @@ import {
   type AnswerAheadTarget
 } from './answerResilience';
 import { eventTimeRangeProblem } from './datetime';
-import { GEOCODER_GEOCODE_METHOD, GEOCODER_SERVICE_ID, geocodeOutputSchema } from './contracts/geocoder/serviceApi';
+import { resolveEventPlace } from './places';
 import type { StoredEventLocation } from './store';
 import { EVENT_DATE_TEMPLATE_TOKENS, EVENT_PROFILE_TEMPLATE_TOKENS, EVENT_SPAN_TEMPLATE_TOKENS } from './config';
 import { renderValueTemplate, renderValueTemplateText, previewTemplateFragment, trimTemplateFragment, joinTemplateFragments, textTemplateFragment, resolvePluginTemplateMentions, combineResolvedTemplate, type TemplateFragment, type PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
@@ -127,7 +127,6 @@ export function createEventFlowDefinition(input: {
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
   /** Places this community already used; a reply equal to one is never split. */
-  knownPlaces?: string[] | undefined;
   /** Edit flows only: fields chosen before the flow starts ("/event edit hora"). */
   editFields?: string[] | undefined;
 }): FlowDefinition {
@@ -148,7 +147,6 @@ export function restoreEventFlowDefinition(input: {
   timezone?: string | undefined;
   locale?: string | undefined;
   initialData: Record<string, unknown>;
-  knownPlaces?: string[] | undefined;
 }): FlowDefinition {
   const flowType = input.flowType.trim();
   if (!isEventCreationFlowType(flowType)) {
@@ -163,7 +161,6 @@ export function restoreEventFlowDefinition(input: {
     timezone: input.timezone,
     locale: input.locale,
     initialData: input.initialData,
-    knownPlaces: input.knownPlaces,
     completeMessageKey: false,
     flowVersion: input.flowVersion ?? (input.initialData[EVENT_FLOW_VERSION_KEY] === 2 ? 2 : 1)
   }, flowType);
@@ -191,7 +188,6 @@ function buildEventFlowDefinition(input: {
   allowPastStartsAt?: boolean | undefined;
   now?: (() => Date) | undefined;
   /** Places this community already used; a reply equal to one is never split. */
-  knownPlaces?: string[] | undefined;
   /** Edit flows only: fields chosen before the flow starts ("/event edit hora"). */
   editFields?: string[] | undefined;
 }, flowType: string): FlowDefinition {
@@ -506,7 +502,7 @@ function buildEventFlowDefinition(input: {
   }
   applyResilientReplies({
     steps, profiles: input.profiles, t: input.t, locale, timezoneForState, now: input.now,
-    allowPast: input.allowPastStartsAt, locationResolution: input.locationResolution, knownPlaces: input.knownPlaces ?? []
+    allowPast: input.allowPastStartsAt, locationResolution: input.locationResolution
   });
 
   return {
@@ -1670,17 +1666,18 @@ function applyResilientReplies(input: {
   now?: (() => Date) | undefined;
   allowPast?: boolean | undefined;
   locationResolution?: EventLocationResolution | undefined;
-  knownPlaces: string[];
 }): void {
-  const known = new Set(input.knownPlaces.map(normalizedPlaceText).filter(Boolean));
   const services = input.locationResolution?.services;
   const placeEvidence = async (evidence: { text: string; remainder: string; fragments: { text: string }[]; strong: boolean }) => {
-    if (known.has(normalizedPlaceText(evidence.text))) return 'name' as const;
-    if (known.has(normalizedPlaceText(evidence.remainder))) return 'remainder' as const;
     if (!services || !input.locationResolution) return 'unknown' as const;
     const { services: _services, ephemeralStore: _store, ...actor } = input.locationResolution;
-    const search = async (query: string) => geocodeOutputSchema.parse(await services.call({ ...actor, serviceId: GEOCODER_SERVICE_ID,
-      method: GEOCODER_GEOCODE_METHOD, input: { query, language: input.locale, limit: 5 } })).results;
+    // Places this community confirmed before (the geocoder's memory) settle it without a search.
+    const remembered = async (query: string) =>
+      (await resolveEventPlace(services, actor, { query, language: input.locale, memoryOnly: true })).candidates.length > 0;
+    if (await remembered(evidence.text)) return 'name' as const;
+    if (await remembered(evidence.remainder)) return 'remainder' as const;
+    const search = async (query: string) =>
+      (await resolveEventPlace(services, actor, { query, language: input.locale })).candidates.map(candidate => candidate.place);
     const full = await search(evidence.text);
     const fragmentTexts = evidence.fragments.map(fragment => normalizedPlaceText(fragment.text)).filter(Boolean);
     const wholeText = normalizedPlaceText(evidence.text);

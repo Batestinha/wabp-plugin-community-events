@@ -38,7 +38,6 @@ import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
 import { isKnownChildCompletionTimeout } from './completionRecovery';
 import { eventCleanupJobRequest } from './cleanupScheduling';
-import { eventPlaceHints } from './placeHints';
 import { eventEditStart, parseEventEditRequest, type EventEditRequest } from './editRequest';
 import {
   createEventFlowDefinition,
@@ -104,13 +103,13 @@ import {
 } from './provisioningRecovery';
 import { eventWeatherForecastJobRequests } from './weather';
 import {
-  GEOCODER_GEOCODE_METHOD,
   GEOCODER_TIMEZONE_METHOD,
   geocoderTimezoneOutputSchema,
   GEOCODER_SERVICE_ID,
-  type GeocodeOutput,
-  type GeocoderPlace
+  type GeocoderPlace,
+  type ResolveOutput
 } from './contracts/geocoder/serviceApi';
+import { rememberEventPlace, resolveEventPlace } from './places';
 import {
   appendEventLog,
   beginEventPollReplacement,
@@ -273,6 +272,8 @@ interface PendingCreateEventLocationSelection {
   searchQuery: string;
   provider: string;
   candidates: GeocoderPlace[];
+  /** The geocoder's labels for the candidates, same order; absent on selections started by older versions. */
+  candidateLabels?: string[] | undefined;
 }
 
 interface PendingUpdateEventLocationSelection {
@@ -287,6 +288,8 @@ interface PendingUpdateEventLocationSelection {
   searchQuery: string;
   provider: string;
   candidates: GeocoderPlace[];
+  /** The geocoder's labels for the candidates, same order; absent on selections started by older versions. */
+  candidateLabels?: string[] | undefined;
 }
 
 type PendingEventLocationSelection =
@@ -1107,12 +1110,9 @@ async function beginEventUpdateFlow(
   });
   if (input.event.eventLocation) initialData[eventLocationStepId(profile)] = input.event.eventLocation;
   const edit = eventEditStart(profile, initialData, input.editRequest, { timezone, locale: input.locale, now: startedAt, allowPast: !replacesOpenPoll });
-  const hints = eventPlaceHints(runtime.databases, input.event.scopeId);
   const definition = createEventFlowDefinition({
     locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
-      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid,
-      ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
-    knownPlaces: hints.knownPlaces,
+      scopeId: input.event.scopeId, actorIdentityId: input.actor.identityId, groupWid: input.event.groupWid },
     templateMentions: { context, scopeId: input.event.scopeId, chatId: input.actor.deliveryChatId,
       currentGroupId: input.event.groupWid, creatorIdentityId: input.actor.identityId },
     t: input.t,
@@ -1208,12 +1208,9 @@ function registerEventEditRecovery(context: PluginOperationContext): void {
       const event = getEvent(eventsDatabase(runtime.databases), draft.eventId);
       const replacesOpenPoll = draft.replacesOpenPoll ?? (event?.eventStatus === 'active' && event.groupLifecycleStatus === 'poll_open');
       const startedAt = new Date(draft.createdAt);
-      const hints = eventPlaceHints(runtime.databases, draft.scopeId);
       const definition = createEventFlowDefinition({
         locationResolution: { services: context.services, ephemeralStore: runtime.ephemeralStore,
-          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid,
-          ...(hints.biasBounds ? { biasBounds: hints.biasBounds } : {}) },
-        knownPlaces: hints.knownPlaces,
+          scopeId: draft.scopeId, actorIdentityId: draft.actorIdentityId, groupWid: draft.groupWid },
         templateMentions: { context, scopeId: draft.scopeId, chatId: session.chatId,
           currentGroupId: draft.groupWid, creatorIdentityId: draft.actorIdentityId },
         t, profiles: [draft.profile], prefill: draft.prefill, timezone: draft.timezone, locale: draft.locale,
@@ -1385,21 +1382,10 @@ async function beginEventUpdateLocationSelection(input: {
     );
     return;
   }
-  let output: GeocodeOutput;
+  let output: ResolveOutput;
   try {
-    output = await input.context.services.call<GeocodeOutput>({
-      serviceId: GEOCODER_SERVICE_ID,
-      method: GEOCODER_GEOCODE_METHOD,
-      scopeId: input.draft.scopeId,
-      actorIdentityId: input.draft.actorIdentityId,
-      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
-      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
-      input: {
-        query: place,
-        language: input.draft.locale,
-        limit: 5
-      }
-    });
+    output = await resolveEventPlace(input.context.services, { scopeId: input.draft.scopeId, actorIdentityId: input.draft.actorIdentityId,
+      groupId: input.draft.groupId, groupWid: input.draft.groupWid }, { query: place, language: input.draft.locale });
   } catch (error) {
     await recordEventLocationFailure(input.context, {
       phase: 'geocode',
@@ -1425,9 +1411,10 @@ async function beginEventUpdateLocationSelection(input: {
     eventId: input.event.id,
     pastCompletionConfirmed: input.pastCompletionConfirmed,
     displayPlace: place,
-    searchQuery: place,
+    searchQuery: output.searchQuery,
     provider: output.provider,
-    candidates: output.results
+    candidates: output.candidates.map(candidate => candidate.place),
+    candidateLabels: output.presentation.optionLabels
   };
   try {
     await promptEventLocationConfirmation({ ...input, pending });
@@ -3690,6 +3677,12 @@ function registerEventLocationSelectionHandler(context: PluginOperationContext):
       provider: pending.provider,
       place: candidate
     });
+    await rememberEventPlace(context.services, {
+      scopeId: pending.draft.scopeId,
+      actorIdentityId: pending.draft.actorIdentityId,
+      groupId: pending.draft.groupId,
+      groupWid: pending.draft.groupWid
+    }, { queries: [displayPlace, pending.searchQuery], place: candidate });
     if (pending.kind === 'create') {
       await beginFinalEventCreation({
         context,
@@ -3728,7 +3721,7 @@ async function promptEventLocationConfirmation(input: {
   pending: PendingEventLocationSelection;
   t: CommandContext['t'];
 }): Promise<void> {
-  const options = eventLocationCandidateOptions(input.pending.candidates);
+  const options = eventLocationCandidateOptions(input.pending.candidates, input.pending.candidateLabels);
   const question = options.length > 0
     ? input.t('official.community-events.location.select', {
       displayPlace: input.pending.displayPlace,
@@ -3781,21 +3774,10 @@ async function requeryEventLocationSelection(input: {
     );
     return;
   }
-  let output: GeocodeOutput;
+  let output: ResolveOutput;
   try {
-    output = await input.context.services.call<GeocodeOutput>({
-      serviceId: GEOCODER_SERVICE_ID,
-      method: GEOCODER_GEOCODE_METHOD,
-      scopeId: input.pending.draft.scopeId,
-      actorIdentityId: input.pending.draft.actorIdentityId,
-      ...(input.pending.draft.groupId ? { groupId: input.pending.draft.groupId } : {}),
-      ...(input.pending.draft.groupWid ? { groupWid: input.pending.draft.groupWid } : {}),
-      input: {
-        query: input.query,
-        language: input.pending.draft.locale,
-        limit: 5
-      }
-    });
+    output = await resolveEventPlace(input.context.services, { scopeId: input.pending.draft.scopeId, actorIdentityId: input.pending.draft.actorIdentityId,
+      groupId: input.pending.draft.groupId, groupWid: input.pending.draft.groupWid }, { query: input.query, language: input.pending.draft.locale });
   } catch (error) {
     await recordEventLocationFailure(input.context, {
       phase: 'geocode',
@@ -3822,9 +3804,10 @@ async function requeryEventLocationSelection(input: {
       pending: {
         ...input.pending,
         id: randomUUID(),
-        searchQuery: input.query,
+        searchQuery: output.searchQuery,
         provider: output.provider,
-        candidates: output.results
+        candidates: output.candidates.map(candidate => candidate.place),
+        candidateLabels: output.presentation.optionLabels
       },
       t: input.t
     });
@@ -3881,21 +3864,10 @@ async function beginEventLocationSelection(input: {
     );
     return;
   }
-  let output: GeocodeOutput;
+  let output: ResolveOutput;
   try {
-    output = await input.context.services.call<GeocodeOutput>({
-      serviceId: GEOCODER_SERVICE_ID,
-      method: GEOCODER_GEOCODE_METHOD,
-      scopeId: input.draft.scopeId,
-      actorIdentityId: input.draft.actorIdentityId,
-      ...(input.draft.groupId ? { groupId: input.draft.groupId } : {}),
-      ...(input.draft.groupWid ? { groupWid: input.draft.groupWid } : {}),
-      input: {
-        query: place,
-        language: input.draft.locale,
-        limit: 5
-      }
-    });
+    output = await resolveEventPlace(input.context.services, { scopeId: input.draft.scopeId, actorIdentityId: input.draft.actorIdentityId,
+      groupId: input.draft.groupId, groupWid: input.draft.groupWid }, { query: place, language: input.draft.locale });
   } catch (error) {
     await recordEventLocationFailure(input.context, {
       phase: 'geocode',
@@ -3920,9 +3892,10 @@ async function beginEventLocationSelection(input: {
     answers: pendingEventFlowAnswers(input.answers),
     announcementGroupWid: input.announcementGroupWid,
     displayPlace: place,
-    searchQuery: place,
+    searchQuery: output.searchQuery,
     provider: output.provider,
-    candidates: output.results
+    candidates: output.candidates.map(candidate => candidate.place),
+    candidateLabels: output.presentation.optionLabels
   };
   try {
     await promptEventLocationConfirmation({ ...input, pending });
@@ -5792,11 +5765,11 @@ function isCommandLikeLocationReply(value: string): boolean {
   return value.trim().startsWith('/');
 }
 
-function eventLocationCandidateOptions(candidates: GeocoderPlace[]): Array<{ id: string; label: string }> {
+function eventLocationCandidateOptions(candidates: GeocoderPlace[], labels: string[] = []): Array<{ id: string; label: string }> {
   const seen = new Set<string>();
   const options: Array<{ id: string; label: string }> = [];
   for (const [index, candidate] of candidates.entries()) {
-    const label = candidate.label.trim();
+    const label = (labels[index] ?? candidate.label).trim();
     const key = label.toLocaleLowerCase();
     if (!label || seen.has(key)) {
       continue;

@@ -621,23 +621,6 @@ export const eventTextDefinitions = [
     }
   },
   {
-    "key": "official.community-events.location.chooseNumber",
-    "label": "Location / choose number",
-    "topic": "General replies",
-    "destination": "Command or workflow reply",
-    "order": 435,
-    "variables": [
-      "count"
-    ],
-    "placement": {
-      "sectionId": "event-profiles",
-      "controlId": "plugin.official.community-events.eventProfiles",
-      "slotId": "location",
-      "groupId": "location",
-      "groupLabel": "Location replies"
-    }
-  },
-  {
     "key": "official.community-events.location.wrongRequester",
     "label": "Location / wrong requester",
     "topic": "General replies",

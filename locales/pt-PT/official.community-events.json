@@ -43,7 +43,6 @@
   "official.community-events.location.failed": "Nao consegui determinar o local do evento. Tenta novamente daqui a pouco.",
   "official.community-events.location.promptFailed": "Encontrei locais possiveis, mas nao consegui enviar a lista de selecao. Reinicia o pedido daqui a pouco.",
   "official.community-events.location.invalid": "A selecao do local do evento ja nao e valida. Comeca de novo.",
-  "official.community-events.location.chooseNumber": "Estes são os resultados dessa pesquisa. Responde com o número do correto (1 a {count}), ou escreve uma pesquisa mais específica.",
   "official.community-events.location.wrongRequester": "O local do evento nao foi confirmado por quem iniciou o pedido.",
   "official.community-events.pollPublished": "Sondagem do evento publicada.",
   "official.community-events.pollLifecycleQueued": "Evento registado. O Assistente de Sondagens está a publicar a sondagem de presenças e irá recuperá-la automaticamente se a entrega se atrasar.",

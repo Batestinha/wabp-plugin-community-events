@@ -4,7 +4,7 @@
   "name": "Community Events",
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "coreApiRange": "^0.3.14",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -393,7 +393,7 @@
     },
     {
       "pluginId": "official.geocoder",
-      "versionRange": "^0.2.0"
+      "versionRange": "^0.3.0"
     },
     {
       "pluginId": "official.poll-assistant",
@@ -1554,23 +1554,6 @@
               "destination": "Command or workflow reply",
               "order": 430,
               "variables": [],
-              "placement": {
-                "sectionId": "event-profiles",
-                "controlId": "plugin.official.community-events.eventProfiles",
-                "slotId": "location",
-                "groupId": "location",
-                "groupLabel": "Location replies"
-              }
-            },
-            {
-              "key": "official.community-events.location.chooseNumber",
-              "label": "Location / choose number",
-              "topic": "General replies",
-              "destination": "Command or workflow reply",
-              "order": 435,
-              "variables": [
-                "count"
-              ],
               "placement": {
                 "sectionId": "event-profiles",
                 "controlId": "plugin.official.community-events.eventProfiles",

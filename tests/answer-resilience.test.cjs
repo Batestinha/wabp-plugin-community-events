@@ -5,9 +5,8 @@ const { resolveFlowStepInputForEngine } = require('@wabs/plugin-sdk/flow-input')
 const { parseEventsConfig } = require('../dist/config');
 const { eventsMessages } = require('../dist/messages');
 const { findEmbeddedDateTime, normalizeNumberWords, eventReplyControl, EVENT_CARRIED_ANSWERS_KEY } = require('../dist/answerResilience');
-const { eventPlaceSearchQuery, typedLocationChoice } = require('../dist/eventLocationFlow');
+const { fakeGeocoder } = require('./fakeGeocoder.cjs');
 const { parseEventEditRequest, eventEditStart } = require('../dist/editRequest');
-const { eventBiasBounds } = require('../dist/placeHints');
 
 const t = (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), eventsMessages[key] ?? key);
 // 2026-11-01 19:14 UTC: the evening David created his event.
@@ -22,19 +21,17 @@ function place(label, extra = {}) {
 function fixture(options = {}) {
   const profile = structuredClone(parseEventsConfig({}).eventProfiles[0]);
   if (options.optionalTime) profile.questions.find(question => question.key === 'startTime').required = false;
-  const values = new Map(), calls = [];
+  const values = new Map();
   // Like Nominatim: nothing is named after a date, plain names resolve.
   const geocode = options.geocode ?? (query => /\d/.test(query) ? [] : [place(`${query}, Lisboa, Portugal`)]);
-  const services = { call: async input => {
-    calls.push(input);
-    if (input.method === 'timezoneForPoint') return { timezone: 'Europe/Lisbon', candidates: ['Europe/Lisbon'] };
-    return { provider: 'fixture', fetchedAt: NOW.toISOString(), results: geocode(input.input.query) };
-  } };
+  // Places the community confirmed before live in the geocoder's memory.
+  const services = fakeGeocoder(geocode, { known: (options.knownPlaces ?? []).map(name => ({ query: name, place: place(`${name}, Lisboa`) })) });
+  const calls = services.calls;
   const ephemeralStore = { get: async key => values.get(key), set: async (key, value) => { values.set(key, structuredClone(value)); } };
   const prefill = { profileId: profile.id, answers: options.answers ?? {}, spanKind: 'day_trip' };
   const initialData = options.initialData ?? eventInitialFlowData([profile], prefill, { ...lisbon });
   const definition = createEventFlowDefinition({ t, profiles: [profile], initialData, timezone: 'Europe/Lisbon', locale: 'pt-PT',
-    now: () => NOW, knownPlaces: options.knownPlaces ?? [], ...(options.edit ? {
+    now: () => NOW, ...(options.edit ? {
       askPrefilledQuestions: true, flowTypePrefix: 'official.community-events.update', prefill, allowPastStartsAt: true,
       ...(options.editFields ? { editFields: options.editFields } : {})
     } : {}),
@@ -255,17 +252,12 @@ test('"/event edit Albarracín hora 15h" selects the time and offers 15:00', asy
   assert.equal(f.state.currentStepId, 'confirm-climbing');
 });
 
-test('location replies: notes stay out of the search, a typed result name or "ok" selects it', async () => {
-  assert.equal(eventPlaceSearchQuery('Tapada (maybe?)'), 'Tapada');
-  assert.equal(eventPlaceSearchQuery('Cascais/Sintra (Por decidir)'), 'Cascais');
-  assert.equal(eventPlaceSearchQuery('Azóia ou outro pela margem sul'), 'Azóia');
-  assert.equal(eventPlaceSearchQuery('Prison Break & Talismã'), 'Prison Break & Talismã');
-  assert.equal(typedLocationChoice([{ label: 'Sintra, Lisboa' }, { label: 'Sintra, Minas Gerais' }], 'Sintra'), undefined);
-  assert.equal(typedLocationChoice([{ label: 'Sintra, Lisboa' }, { label: 'Cascais, Lisboa' }], 'sintra'), 0);
-
+test('location replies go to the geocoder: the place as typed, then its reading of each reply', async () => {
+  // Leaving "(maybe?)" out of the search is the geocoder's rule (tested there); events sends the answer as typed.
   const tapada = fixture();
   await tapada.answer('Tapada (maybe?)'); await tapada.prompt();
-  assert.equal(tapada.calls.at(-1).input.query, 'Tapada');
+  assert.equal(tapada.calls.at(-1).method, 'resolve');
+  assert.equal(tapada.calls.at(-1).input.query, 'Tapada (maybe?)');
   assert.equal((await tapada.answer('ok')).status, 'continue');
   assert.equal(eventFlowLocation(tapada.state.data, tapada.profile).displayLabel, 'Tapada (maybe?)');
 
@@ -281,9 +273,4 @@ test('location replies: notes stay out of the search, a typed result name or "ok
   assert.equal(single.state.currentStepId, 'q-climbing-startDate');
 });
 
-test('search bias covers the usual area and ignores one trip abroad', () => {
-  const bounds = eventBiasBounds([{ latitude: 38.8, longitude: -9.4 }, { latitude: 38.4, longitude: -9.1 },
-    { latitude: 38.7, longitude: -9.0 }, { latitude: 40.4, longitude: -1.4 }]);
-  assert.ok(bounds.west < -9.3 && bounds.east < -8.5 && bounds.south < 38.4 && bounds.north > 38.8);
-  assert.equal(eventBiasBounds([{ latitude: 38.8, longitude: -9.4 }]), undefined);
-});
+

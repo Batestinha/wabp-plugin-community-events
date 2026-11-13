@@ -1,3 +1,4 @@
+import { importEventPlacesToGeocoder } from './places';
 import { migrateEventText } from './savedText';
 import { backfillEventTemplateValues } from './templateMigration';
 import { registerEventsExternalActions } from './externalActions';
@@ -38,6 +39,7 @@ export const eventsPlugin: BotPlugin = {
     return { ...hooks, async onRuntimeReady(event) {
       await backfillEventTemplateValues(context);
       await recoverEventJobs(context, { startupBeforeWorker: event.startupBeforeWorker });
+      await importEventPlacesToGeocoder(context);
     } };
   },
   registerExternalActions: registerEventsExternalActions,

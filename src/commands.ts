@@ -499,7 +499,6 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   });
   await cancelActiveEventEditSelectionForActor(context, runtime, actor.identityId);
   const scopeId = requireScopeId(ctx);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
     services: context.services, ephemeralStore: runtime.ephemeralStore, databases: runtime.databases,
@@ -536,7 +535,6 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
       locale: ctx.locale,
       t: ctx.t,
       prefillArgs: ctx.remainingArgs ?? ctx.command.args,
-      ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
   } catch (error) {
     context.logger?.warn({ error, chatId: ctx.message.chatId }, 'Event creation flow failed to start');
@@ -684,7 +682,6 @@ async function startEventPollCloseConfirmation(
   actor: EventAuthorizationActor
 ) {
   const runtime = requireOfficialCommandRuntime(context);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const pending: PendingEventEditSelection = {
     operation: 'poll_close_confirm',
     id: randomUUID(),
@@ -700,7 +697,6 @@ async function startEventPollCloseConfirmation(
     candidateEventIds: [event.id],
     originChatId: ctx.message.chatId,
     originContext: ctx.message.context,
-    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     createdAt: new Date().toISOString()
   };
   try {
@@ -800,7 +796,6 @@ async function startEventEditSelection(
   }
 ) {
   const runtime = requireOfficialCommandRuntime(context);
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, input.actor);
   const pending: PendingEventEditSelection = {
     ...(input.operation ? { operation: input.operation } : {}),
     ...(input.editRequest ? { editRequest: input.editRequest } : {}),
@@ -817,7 +812,6 @@ async function startEventEditSelection(
     candidateEventIds: orderedEventEditCandidates(input.candidates).map((event) => event.id),
     originChatId: ctx.message.chatId,
     originContext: ctx.message.context,
-    ...(privateDeliveryFallback ? { privateDeliveryFallback } : {}),
     createdAt: new Date().toISOString()
   };
 
@@ -945,7 +939,6 @@ async function startEventCancelFlow(context: PluginOperationContext, ctx: Comman
   const scopeId = requireScopeId(ctx);
   const db = eventsDatabase(runtime.databases);
   const actorWid = actor.deliveryChatId;
-  const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const actorLabel = ctx.message.senderDisplayName ?? actorWid;
   const query = ctx.command.args.join(' ').trim();
   const resolution = await resolveEventCancelCandidates(context, {
@@ -980,7 +973,6 @@ async function startEventCancelFlow(context: PluginOperationContext, ctx: Comman
       message: ctx.message,
       scopeId,
       ...(preselectedEventId ? { initialData: { [EVENT_CANCEL_SELECT_STEP_ID]: preselectedEventId } } : {}),
-      ...(privateDeliveryFallback ? { privateDeliveryFallback } : {})
     });
     flowSessionId = flowStart.flowSessionId;
   } catch {
@@ -1027,7 +1019,6 @@ async function startEventUpdateFlow(
         chatId: ctx.message.chatId,
         context: ctx.message.context
       },
-      privateDeliveryFallback: privateFlowDeliveryFallback(ctx, input.actor)
     });
   } catch (error) {
     context.logger?.warn({ error, eventId: input.event.id, chatId: ctx.message.chatId }, 'Event update flow failed to start');
@@ -5393,23 +5384,6 @@ async function eventActorPermissionAllowed(
   return decision.allowed;
 }
 
-function privateFlowDeliveryFallback(
-  ctx: CommandContext,
-  actor: Pick<EventAuthorizationActor, 'mentionWid'>
-): PrivateDeliveryFallback | undefined {
-  const groupWid = ctx.groupWid?.trim() || (ctx.message.context === 'group' ? ctx.message.chatId : '');
-  if (!groupWid.endsWith('@g.us')) {
-    return undefined;
-  }
-  const mentionWid = actor.mentionWid;
-  return mentionWid
-    ? {
-        chatId: groupWid,
-        mentionedWids: [mentionWid],
-        ...(ctx.message.context === 'group' ? { quotedMessageId: ctx.message.id } : {})
-      }
-    : undefined;
-}
 
 function eventAuthorizationActor(ctx: CommandContext): EventAuthorizationActor | undefined {
   const address = requireIdentityAddress(requireEventActor(ctx));

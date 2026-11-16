@@ -50,8 +50,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.22.0',
-  coreApiRange: '^0.3.14',
+  version: '0.23.0',
+  coreApiRange: '^0.4.0',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,

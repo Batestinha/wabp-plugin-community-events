@@ -517,6 +517,7 @@ function buildEventFlowDefinition(input: {
           ?? firstMissingSpanStepId(initialProfile, initialData, askPollPhase)
           ?? confirmStepId(initialProfile)
       : EVENT_PROFILE_STEP_ID,
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     context: 'either',
     timeoutMinutes: 30,
     completionReply: input.completeMessageKey === false

@@ -35,6 +35,7 @@ function definitionFor(recipe: PublicationRecipe, t: TranslateFn): FlowDefinitio
   return {
     flowType: `${PREFIX}${recipe.draft.flowSessionId}`,
     navigationControls: true,
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     t, initialStepId: STEP, context: 'either', timeoutMinutes: 30, completionReply: false,
     steps: {
       [STEP]: {

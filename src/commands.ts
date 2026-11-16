@@ -6,7 +6,7 @@ import { eventAnswersInTimezone } from './locationTimezone';
 import { createHash, randomUUID } from 'node:crypto';
 import type { WorkflowActionResult } from '@wabs/plugin-sdk/workflows';
 import type { FlowDefinition, FlowState } from '@wabs/plugin-sdk/flow-types';
-import type { CommandMetadata, CommandTargetSpec } from '@wabs/plugin-sdk/command-metadata';
+import type { PluginCommandMetadata, CommandMetadata, CommandTargetSpec } from '@wabs/plugin-sdk/command-metadata';
 import type { CommandContext } from '@wabs/plugin-sdk/commands';
 import type { PluginCancellationRegistration, PluginCommandContext, PluginOperationContext } from './runtime';
 import type { PluginRuntimeContext } from './runtime';
@@ -322,6 +322,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   registerEventEditSelectionHandler(context);
 
   router.register('event', 'status', eventCommand({
+    interactionPolicy: { kind: 'immediate', conversationAudience: 'requester', resultAudience: 'invoking_chat' },
     mutation: 'none',
     auditAction: 'events.status',
     permission: EVENTS_PERMISSIONS.configure,
@@ -342,6 +343,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   });
 
   router.register('event', 'cancel', eventCommand({
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     auditAction: 'events.cancel',
     usage: '/event cancel [eventId|event title]',
     topicId: 'cancel-events',
@@ -359,6 +361,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => startEventCancelFlow(context, ctx));
 
   router.register('event', 'new', eventCommand({
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     auditAction: 'events.create',
     usage: '/event new [--chat groupName]',
     topicId: 'create-events',
@@ -367,6 +370,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => startEventFlow(context, ctx));
 
   router.register('event', 'edit', eventCommand({
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     auditAction: 'events.edit',
     usage: '/event edit [eventId|event title]',
     topicId: 'edit-events',
@@ -384,6 +388,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => startEventEditFlow(context, ctx));
 
   router.register('event', 'poll', eventCommand({
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     auditAction: 'events.poll.close',
     usage: '/event poll close [event ID or title]',
     topicId: 'close-event-polls',
@@ -401,6 +406,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => startEventPollClose(context, ctx));
 
   router.register('event', 'list', eventCommand({
+    interactionPolicy: { kind: 'immediate', conversationAudience: 'requester', resultAudience: 'invoking_chat' },
     mutation: 'none',
     auditAction: 'events.list',
     usage: '/event list',
@@ -418,6 +424,7 @@ export function registerEventsCommands(context: PluginCommandContext): void {
   }), async (ctx) => listFutureEvents(context, ctx));
 
   router.register('event', '*', eventCommand({
+    interactionPolicy: { kind: 'immediate', conversationAudience: 'requester', resultAudience: 'invoking_chat' },
     mutation: 'none',
     auditAction: 'events.usage',
     usage: '/event',
@@ -548,15 +555,7 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
         : 'official.community-events.notConfigured')
     };
   }
-  if (ctx.message.context !== 'group') {
-    return { handled: true, response: { kind: 'none' as const } };
-  }
-  return {
-    handled: true,
-    text: ctx.t(started.usedPrivateDeliveryFallback
-      ? 'official.community-events.startedInGroupFallback'
-      : 'official.community-events.startedPrivate')
-  };
+  return { handled: true, response: { kind: 'none' as const } };
 }
 
 async function startEventEditFlow(context: PluginOperationContext, ctx: CommandContext) {
@@ -709,15 +708,7 @@ async function startEventPollCloseConfirmation(
   } catch {
     return { handled: true, text: ctx.t('official.community-events.pollClose.confirmStartFailed') };
   }
-  if (ctx.message.context !== 'group') {
-    return { handled: true, response: { kind: 'none' as const } };
-  }
-  return {
-    handled: true,
-    text: ctx.t(pending.privateDeliveryFallback
-      ? 'official.community-events.edit.selectionStartedInGroupFallback'
-      : 'official.community-events.edit.selectionStartedPrivate')
-  };
+  return { handled: true, response: { kind: 'none' as const } };
 }
 
 async function promptEventPollCloseConfirmation(input: {
@@ -845,15 +836,7 @@ async function startEventEditSelection(
       text: ctx.t('official.community-events.edit.selectionStartFailed')
     };
   }
-  if (ctx.message.context !== 'group') {
-    return { handled: true, response: { kind: 'none' as const } };
-  }
-  return {
-    handled: true,
-    text: ctx.t(prompted.usedPrivateDeliveryFallback
-      ? 'official.community-events.edit.selectionStartedInGroupFallback'
-      : 'official.community-events.edit.selectionStartedPrivate')
-  };
+  return { handled: true, response: { kind: 'none' as const } };
 }
 
 async function promptEventEditSelection(input: {
@@ -1016,7 +999,7 @@ async function startEventCancelFlow(context: PluginOperationContext, ctx: Comman
     creatorIdentityIds: resolution.creatorIdentityIds,
     createdAt: new Date().toISOString()
   } satisfies EventCancelDraft);
-  return { handled: true, text: ctx.t('official.community-events.cancel.started') };
+  return { handled: true, response: { kind: 'none' as const } };
 }
 
 async function startEventUpdateFlow(
@@ -1058,15 +1041,7 @@ async function startEventUpdateFlow(
   if (started.status === 'not_configured') {
     return { handled: true, text: ctx.t('official.community-events.notConfigured') };
   }
-  if (ctx.message.context !== 'group') {
-    return { handled: true, response: { kind: 'none' as const } };
-  }
-  return {
-    handled: true,
-    text: ctx.t(started.usedPrivateDeliveryFallback
-      ? 'official.community-events.update.startedInGroupFallback'
-      : 'official.community-events.update.startedPrivate')
-  };
+  return { handled: true, response: { kind: 'none' as const } };
 }
 
 async function beginEventUpdateFlow(
@@ -2946,6 +2921,7 @@ function createEventCancelFlowDefinition(input: {
     t: input.t,
     initialStepId: input.preselectedEventId ? EVENT_CANCEL_CONFIRM_STEP_ID : EVENT_CANCEL_SELECT_STEP_ID,
     context: 'either',
+    interactionPolicy: { kind: 'guided', conversationAudience: 'requester', resultAudience: 'requester' },
     timeoutMinutes: 10,
     completionReply: input.t('official.community-events.cancel.complete'),
     steps
@@ -5279,6 +5255,7 @@ function eventCreatorParticipantWid(draft: EventDraft): string {
 }
 
 function eventCommand(input: {
+  interactionPolicy: PluginCommandMetadata['interactionPolicy'];
   mutation?: CommandMetadata['mutation'] | undefined;
   auditAction: string;
   permission?: string | undefined;
@@ -5291,10 +5268,12 @@ function eventCommand(input: {
   privateManagedTargetArgPosition?: number | false | undefined;
   targeting?: boolean | undefined;
   assistant?: CommandMetadata['assistant'] | undefined;
-}): CommandMetadata {
+}): PluginCommandMetadata {
   return {
+    interactionPolicy: input.interactionPolicy,
     plane: 'group_operation',
     interaction: 'either_same_chat',
+    invocation: 'either',
     pluginId: EVENTS_PLUGIN_ID,
     currentManagedGroupMembershipMode: 'effective_scope',
     ...(input.permission ? { permission: input.permission } : {}),

@@ -8,7 +8,7 @@
   },
   "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
   "kind": "managed_group",
-  "version": "0.22.1",
+  "version": "0.22.2",
   "coreApiRange": "^0.3.14",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",

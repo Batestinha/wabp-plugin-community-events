@@ -122,12 +122,15 @@ export function storedEventPlace(event: StoredEventRecord): { query: string; pla
 export async function importEventPlacesToGeocoder(context: {
   services?: PluginServiceCaller | undefined;
   databases?: PluginDatabaseRegistry | undefined;
+  /** Events of a scope this plugin no longer runs in (e.g. a deleted scope) are not shared. */
+  enabledFor?: ((scopeId: string) => Promise<boolean>) | undefined;
   logger?: { warn(details: unknown, message: string): void } | undefined;
 }): Promise<number> {
   if (!context.services || !context.databases) return 0;
   let imported = 0;
   const db = eventsDatabase(context.databases);
   for (const scopeId of listEventScopeIds(db)) {
+    if (context.enabledFor && !(await context.enabledFor(scopeId).catch(() => false))) continue;
     const places = listScopeEvents(db, scopeId)
       .filter(event => event.eventStatus !== 'cancelled')
       .flatMap(event => storedEventPlace(event) ?? [])
@@ -142,7 +145,8 @@ export async function importEventPlacesToGeocoder(context: {
       });
       imported += places.length;
     } catch (error) {
-      context.logger?.warn({ error, scopeId }, 'official.community-events could not share past event places with the geocoder');
+      context.logger?.warn({ error, reason: error instanceof Error ? error.message : String(error), scopeId },
+        'official.community-events could not share past event places with the geocoder');
     }
   }
   return imported;

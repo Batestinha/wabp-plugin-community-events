@@ -7,7 +7,7 @@ import {
   type EventCalendarResource,
   type EventsConfig
 } from './config';
-import { publishCalendarBody, type CalendarPublicationOutcome } from './calendarPublication';
+import type { CalendarPublicationOutcome } from './calendarPublication';
 import {
   publishWorkspaceCalendarProjection,
   workspaceCalendarProjectionEvent
@@ -259,54 +259,10 @@ async function publishClaimedCalendarGeneration(
       throwCalendarPublicationHeartbeatError(heartbeatError);
       return { status: 'superseded' };
     }
-    const publicationMode = input.appConfig.EVENT_CALENDAR_PUBLICATION_MODE ?? 'legacy';
-    const workspacePublication = publicationMode === 'legacy'
-      ? undefined
-      : await publishWorkspaceCalendarProjection({
-          appConfig: input.appConfig,
-          ...(input.services ? { services: input.services } : {}),
-          scopeId: input.scopeId,
-          timezone: input.config.timezone,
-          calendar: frozenCalendar,
-          icsBody: document.body,
-          events: document.events,
-          generation: claim.generation
-        }) ?? {
-          generation: claim.generation,
-          enabled: true,
-          attempted: false,
-          ok: false,
-          endpointUrl: 'workspace-connector',
-          feedId: frozenCalendar.id,
-          label: frozenCalendar.label,
-          error: 'Workspace calendar publication is required but the connector is unavailable.'
-        };
-    const legacyResult = publicationMode === 'workspace'
-      ? undefined
-      : await publishCalendarBody({
-          appConfig: input.appConfig,
-          scopeId: input.scopeId,
-          calendar: frozenCalendar,
-          icsBody: document.body,
-          generation: claim.generation
-        });
-    const legacyPublication = publicationMode === 'dual' && !legacyResult
-      ? {
-          generation: claim.generation,
-          enabled: true,
-          attempted: false,
-          ok: false,
-          endpointUrl: '',
-          feedId: frozenCalendar.id,
-          label: frozenCalendar.label,
-          error: 'Legacy Piwigo calendar publication is required in dual mode but is disabled.'
-        }
-      : legacyResult;
-    const publication = workspacePublication && !workspacePublication.ok
-      ? workspacePublication
-      : legacyPublication && !legacyPublication.ok
-        ? legacyPublication
-        : legacyPublication ?? workspacePublication;
+    const publication = await publishWorkspaceCalendarProjection({
+      services: input.services, scopeId: input.scopeId, timezone: input.config.timezone,
+      calendar: frozenCalendar, icsBody: document.body, events: document.events, generation: claim.generation
+    });
     throwCalendarPublicationHeartbeatError(heartbeatError);
     const completed = !publication || publication.ok;
     const recorded = finishEventCalendarPublicationAttempt(input.db, {

@@ -50,8 +50,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.22.3',
-  coreApiRange: '^0.3.27',
+  version: '0.23.0',
+  coreApiRange: '^0.3.28',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,
@@ -270,7 +270,7 @@ export const eventsManifest: PluginManifest = {
     { pluginId: 'official.geocoder', versionRange: '^0.3.0' },
     { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
     { pluginId: 'official.weather', versionRange: '>=0.6.0', optional: true },
-    { pluginId: 'official.workspace-connector', versionRange: '>=0.1.0', optional: true }
+    { pluginId: 'official.workspace-calendar', versionRange: '^1.0.0', optional: true }
   ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   scopeClock: { timezoneConfigPaths: ['timezone'], providesGroupTimezones: true },

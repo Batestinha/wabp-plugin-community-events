@@ -1,16 +1,12 @@
 import { createHash } from 'node:crypto';
-import type { AppConfig } from './deploymentConfig';
 import { workspaceConnectorCanonicalJson } from './contracts/workspace-protocol';
 import {
   isPluginServiceNotInvokedError,
   type PluginServiceCaller
 } from '@wabs/plugin-sdk/services';
 import {
-  WORKSPACE_CONNECTOR_PROJECTION_REPLACE_METHOD,
-  WORKSPACE_CONNECTOR_PROJECTION_SERVICE_ID,
   type WorkspaceConnectorProjectionServiceInput
 } from './contracts/workspace-connector/serviceApi';
-import { workspaceConnectorConnection } from './contracts/workspace-connector/config';
 import type { CalendarPublicationOutcome } from './calendarPublication';
 import type { EventCalendarResource, EventsConfig } from './config';
 import { calendarEventLocalDate, calendarEventSummary } from './ics';
@@ -23,7 +19,6 @@ import {
 } from './workspaceCalendarContract';
 
 export async function publishWorkspaceCalendarProjection(input: {
-  appConfig: AppConfig;
   services?: PluginServiceCaller | undefined;
   scopeId: string;
   timezone: string;
@@ -32,7 +27,7 @@ export async function publishWorkspaceCalendarProjection(input: {
   events: WorkspaceCalendarProjectionEvent[];
   generation: number;
 }): Promise<CalendarPublicationOutcome | undefined> {
-  if (!input.services || !workspaceConnectorConnection(input.appConfig)) return undefined;
+  if (!input.services) return undefined;
   const payload = WorkspaceCalendarProjectionSchema.parse({
     schemaVersion: 1,
     kind: 'workspace-calendar-projection',
@@ -50,8 +45,8 @@ export async function publishWorkspaceCalendarProjection(input: {
     .digest('hex');
   try {
     await input.services.call({
-      serviceId: WORKSPACE_CONNECTOR_PROJECTION_SERVICE_ID,
-      method: WORKSPACE_CONNECTOR_PROJECTION_REPLACE_METHOD,
+      serviceId: 'official.workspace-calendar.projection.v1',
+      method: 'replace',
       scopeId: input.scopeId,
       input: {
         capabilityId: WORKSPACE_CALENDAR_PROJECTION_CAPABILITY,
@@ -67,30 +62,22 @@ export async function publishWorkspaceCalendarProjection(input: {
       enabled: true,
       attempted: true,
       ok: true,
-      endpointUrl: 'workspace-connector',
+      endpointUrl: 'Calendar',
       feedId: input.calendar.id,
       label: input.calendar.label,
       updatedAt: new Date().toISOString()
     };
   } catch (error) {
     if (isPluginServiceNotInvokedError(error)) {
-      return {
-        generation: input.generation,
-        enabled: true,
-        attempted: false,
-        ok: false,
-        endpointUrl: 'workspace-connector',
-        feedId: input.calendar.id,
-        label: input.calendar.label,
-        error: `Workspace connector service was not invoked: ${error.message}`
-      };
+      return { generation: input.generation, enabled: true, attempted: false, ok: false,
+        endpointUrl: 'Calendar', feedId: input.calendar.id, label: input.calendar.label, error: error.message };
     }
     return {
       generation: input.generation,
       enabled: true,
       attempted: true,
       ok: false,
-      endpointUrl: 'workspace-connector',
+      endpointUrl: 'Calendar',
       feedId: input.calendar.id,
       label: input.calendar.label,
       error: error instanceof Error ? error.message : 'Workspace calendar projection failed.'

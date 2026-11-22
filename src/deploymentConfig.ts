@@ -1,5 +1,4 @@
-import type { WorkspaceConnectorDeploymentConfig } from './contracts/workspace-connector/config';
-export interface EventsDeploymentConfig extends WorkspaceConnectorDeploymentConfig {
+export interface EventsDeploymentConfig {
   PLUGIN_DATABASE_DIR: string;
   WHATSAPP_ACCOUNT_ID: string;
   RUNTIME_BINDING_ID: string;

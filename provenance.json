@@ -7,10 +7,10 @@
   "extractedHistoryCommit": "af7a58a482cd2574b84a9f6c86321720bf5103bf",
   "sdk": {
     "version": "0.3.39",
-    "path": "vendor/wabs-plugin-sdk-0.3.39-1a21ae740273.tgz",
-    "sha256": "1a21ae740273b80665dc82c98b4d1ca691e4d0f274b8f7e6e266574f26ab6418",
+    "path": "vendor/wabs-plugin-sdk-0.3.39-0c9dec433b77.tgz",
+    "sha256": "0c9dec433b775072c3e639d73a9e81c99098c508aed8ac4721121322fb329a0b",
     "sourceDirectory": "packages/plugin-sdk",
-    "sourceCommit": "3115ddf08bd58c5df3eea76f12705b98ca32b46c"
+    "sourceCommit": "41ccc1ca46e14ddaecb213515ca8b4a0e1384abb"
   },
   "vendoredContracts": "contracts/provenance.json",
   "previousStandaloneCommit": "f91906a34511244ece73c29688741ce0e431c74c",

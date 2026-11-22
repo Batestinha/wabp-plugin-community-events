@@ -293,8 +293,22 @@ test('past event places are shared with the geocoder once per start, cancelled e
     assert.equal(geocoder.calls[0].input.source, 'import');
     assert.deepEqual(geocoder.calls[0].input.places.map(item => [item.query, item.place.label, item.place.providerRef]).sort(),
       [['Cascais', 'Cascais, Lisboa, Portugal', 'node:Cascais'], ['Sintra', 'Sintra, Lisboa, Portugal', 'node:Sintra']]);
-    // A geocoder that cannot take them (older, disabled) never blocks startup.
+    // A geocoder that cannot take them (older, disabled) never blocks startup, and the warning says why.
     const failing = { call: async () => { throw new Error('unknown method remember'); } };
-    assert.equal(await importEventPlacesToGeocoder({ services: failing, databases: { open: () => db }, logger: { warn() {} } }), 0);
+    const warnings = [];
+    assert.equal(await importEventPlacesToGeocoder({ services: failing, databases: { open: () => db },
+      logger: { warn(details) { warnings.push(details); } } }), 0);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].reason, 'unknown method remember');
+    // Events of a scope the plugin no longer runs in (a deleted scope) are skipped without a call or a warning.
+    const skipped = fakeGeocoder(() => []);
+    const quiet = [];
+    assert.equal(await importEventPlacesToGeocoder({ services: skipped, databases: { open: () => db },
+      enabledFor: async scopeId => scopeId !== 'fixture-scope', logger: { warn(details) { quiet.push(details); } } }), 0);
+    assert.equal(skipped.calls.length, 0);
+    assert.equal(quiet.length, 0);
+    const enabled = fakeGeocoder(() => []);
+    assert.equal(await importEventPlacesToGeocoder({ services: enabled, databases: { open: () => db },
+      enabledFor: async () => true }), 2);
   } finally { db.close(); }
 });

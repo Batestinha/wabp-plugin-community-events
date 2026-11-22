@@ -54,6 +54,7 @@ def build_release():
                 files[member.name] = archive.extractfile(member).read()
         for required in ['package/dist/index.js', 'package/wa-plugin.json',
                          'package/node_modules/@wabs/plugin-sdk/dist/command-plugin.js',
+                         'package/node_modules/@wabs/plugin-sdk/dist/host-polls.js',
                          'package/node_modules/@wabs/plugin-sdk/LICENSE',
                          'package/node_modules/zod/LICENSE']:
             if required not in files:

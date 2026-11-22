@@ -171,6 +171,54 @@ test('persisted event snapshots survive reopening and only their live owning gro
   } finally { db?.close(); closeDirectory(directory); }
 });
 
+test('legacy replacement reconciles and publishes to the covered announcement group with one receipt key', async () => {
+  const { beginEventPollReplacement } = require('../dist/store');
+  const { runEventPollReplacement } = require('../dist/pollReplacement');
+  const db = open(':memory:');
+  try {
+    for (const name of migrations) db.exec(fs.readFileSync(path.join('migrations/events', name), 'utf8'));
+    const record = { ...fixture(), groupLifecycleStatus: 'poll_open', pollGeneration: 1, pollWaMsgId: 'old',
+      pollQuestion: 'Old question?', subgroupChatId: undefined, pollOptions: [
+        { id: 'yes', label: 'Going', responseClassId: 'attend' }, { id: 'no', label: 'No', responseClassId: 'skip' }
+      ], responseClasses: [
+        { id: 'attend', label: 'Going', includeInEventGroup: true, includeInAttendanceCount: true },
+        { id: 'skip', label: 'No', includeInEventGroup: false, includeInAttendanceCount: false }
+      ] };
+    insertEvent(db, record);
+    const event = getEvent(db, record.id);
+    const publishIdempotencyKey = 'replacement-receipt';
+    beginEventPollReplacement(db, { operationId: 'replace', eventId: event.id, scopeId: event.scopeId,
+      expectedEventUpdatedAt: event.updatedAt, expectedPollWaMsgId: 'old', expectedPollGeneration: event.pollGeneration,
+      target: { profileLabel: event.profileLabel, profileRevision: 'updated', pollQuestion: 'New question?',
+        pollOptions: event.pollOptions, responseClasses: event.responseClasses, answers: event.answers,
+        startsAt: event.startsAt, startsAtUtc: event.startsAt, timezone: event.timezone, localDate: '2026-09-14',
+        localTime: '09:30', closeAt: event.closeAt, cleanupAt: event.cleanupAt, groupTitle: event.groupTitle,
+        calendarDurationMinutes: event.calendarDurationMinutes, allowMultipleAnswers: false },
+      editorIdentityId: 'editor', editorWid: 'editor@c.us', editorLabel: 'Editor', locale: 'en',
+      sourcePluginId: plugin.manifest.pluginId, publishIdempotencyKey, createdAt: event.updatedAt });
+    const calls = [];
+    const context = { polls: {
+      reconcile: async request => { calls.push(request); return { status: 'absent', providerId: 'whatsmeow' }; },
+      publish: async request => { calls.push(request); return { messageId: 'new', acceptedAt: event.updatedAt }; }
+    }, releasePollSendReceipt: async () => true };
+    const result = await runEventPollReplacement({ db, operationId: 'replace', context,
+      now: new Date(event.updatedAt), deleteMessage: async () => undefined });
+    assert.equal(result.status, 'completed', result.error);
+    assert.equal(getEvent(db, event.id).pollWaMsgId, 'new');
+    assert.equal(calls.length, 2);
+    for (const request of calls) {
+      assert.equal(request.scopeId, event.scopeId);
+      assert.equal(request.actorIdentityId, 'editor');
+      assert.equal(request.groupWid, event.announcementGroupWid);
+      assert.equal(request.groupId, undefined);
+      assert.equal(request.input.groupWid, event.announcementGroupWid);
+      assert.equal(request.input.idempotencyKey, publishIdempotencyKey);
+    }
+    assert.equal(calls[1].input.historyHoldOwner, plugin.manifest.pluginId);
+    assert.equal(calls[1].input.notAfter, event.closeAt);
+  } finally { db.close(); }
+});
+
 test('custom event profiles, cleanup policy, calendar resources and stored timezone stay loadable', () => {
   const stored = parseEventsConfig({ enabled: true, timezone: 'Atlantic/Azores', cleanup: { retryDelaysMinutes: [3, 19] } });
   stored.eventProfiles[0].label = 'Custom profile';
@@ -206,7 +254,8 @@ test('all migrations and translations are retained and vendored artifacts recons
   for (const key of Object.keys(plugin.manifest.defaultMessages)) assert.ok(pt[key]?.trim(), key);
   assert.deepEqual(Object.keys(plugin.lifecycle), ['migrateData']);
   const provenance = require('../contracts/provenance.json');
-  assert.equal(provenance.contracts.length, 13);
+  assert.equal(provenance.contracts.length, 12);
+  assert.ok(!provenance.contracts.some(item => item.id === 'doas/serviceApi.ts'));
   for (const item of provenance.contracts) {
     const original = fs.readFileSync(path.join('contracts', item.upstreamPath));
     assert.equal(crypto.createHash('sha256').update(original).digest('hex'), item.upstreamSha256);

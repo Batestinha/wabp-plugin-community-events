@@ -2310,7 +2310,7 @@ export function renewEventPollReplacementPublicationClaim(db: PluginDatabase, in
 
 /**
  * Persists the provider-attempt anchor under the current publication claim.
- * DOAS/whatsmeow still owns cross-process provider idempotency; the local lease
+ * The host transport owns cross-process provider idempotency; the local lease
  * prevents two plugin runners from concurrently reconciling or invoking it.
  */
 export function markEventPollReplacementPublicationStarted(db: PluginDatabase, input: {

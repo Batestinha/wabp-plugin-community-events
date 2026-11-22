@@ -8,13 +8,6 @@ import {
   isDefinitelyNotSentTransportError,
   isTransportProviderUnavailableError
 } from '@wabs/plugin-sdk/transport-errors';
-import {
-  DOAS_POLL_PUBLISH_METHOD,
-  DOAS_POLL_RECONCILE_METHOD,
-  DOAS_POLL_SERVICE_ID,
-  type DoasPollPublishOutput,
-  type DoasPollReconcileOutput
-} from './contracts/doas/serviceApi';
 import { deleteEventArtifacts } from './eventArtifactDeletion';
 import {
   cancelEventAttendanceLifecycle,
@@ -96,6 +89,7 @@ export interface EventPollReceiptReleaseRetry {
 
 type EventPollReplacementContext = {
   services?: PluginOperationContext['services'] | PluginRuntimeContext['services'] | undefined;
+  polls?: PluginRuntimeContext['polls'] | undefined;
   releasePollSendReceipt?: PluginRuntimeContext['releasePollSendReceipt'] | undefined;
 };
 
@@ -229,8 +223,8 @@ export async function runEventPollReplacement(input: {
         // The claim-scoped, never-attempted deadline abort completed without
         // requiring mutable runtime service or group authorization.
       } else {
-      if (!input.context.services) {
-        throw new Error('Plugin service registry is unavailable for replacement poll publication.');
+      if (!input.context.polls) {
+        throw new Error('Host poll publication is unavailable.');
       }
       if (!input.context.releasePollSendReceipt) {
         throw new Error('Plugin runtime cannot durably hold and release replacement poll history.');
@@ -244,12 +238,11 @@ export async function runEventPollReplacement(input: {
         throw new Error(`Event ${event.id} has no announcement group for its replacement poll.`);
       }
 
-      const reconciled = await input.context.services.call<DoasPollReconcileOutput>({
-        serviceId: DOAS_POLL_SERVICE_ID,
-        method: DOAS_POLL_RECONCILE_METHOD,
+      // The announcement group may differ from the event's source group. The host
+      // resolves its database ID from the covered announcement address and scope.
+      const reconciled = await input.context.polls.reconcile({
         scopeId: replacement.scopeId,
         actorIdentityId: replacement.editorIdentityId,
-        ...(event.groupId ? { groupId: event.groupId } : {}),
         groupWid: announcementGroupWid,
         input: {
           groupWid: announcementGroupWid,
@@ -272,12 +265,9 @@ export async function runEventPollReplacement(input: {
         replacement = getEventPollReplacement(input.db, replacement.operationId) ?? replacement;
         if (replacement.status === 'pending') {
           providerInvocationStarted = true;
-          const sent = await input.context.services.call<DoasPollPublishOutput>({
-            serviceId: DOAS_POLL_SERVICE_ID,
-            method: DOAS_POLL_PUBLISH_METHOD,
+          const sent = await input.context.polls.publish({
             scopeId: replacement.scopeId,
             actorIdentityId: replacement.editorIdentityId,
-            ...(event.groupId ? { groupId: event.groupId } : {}),
             groupWid: announcementGroupWid,
             input: {
               groupWid: announcementGroupWid,
@@ -293,7 +283,7 @@ export async function runEventPollReplacement(input: {
           });
           providerInvocationCompleted = true;
           if (!sent?.messageId) {
-            throw new Error('doas poll service did not return a replacement poll message id.');
+            throw new Error('Host poll publication did not return a replacement poll message id.');
           }
           replacement = markEventPollReplacementPublished(input.db, {
             operationId: replacement.operationId,
@@ -371,12 +361,9 @@ export async function runEventPollReplacement(input: {
             const providerBoundaryAt = clock();
             claim = renewPublicationClaim(input.db, claim, providerBoundaryAt);
             providerInvocationStarted = true;
-            const sent = await input.context.services.call<DoasPollPublishOutput>({
-              serviceId: DOAS_POLL_SERVICE_ID,
-              method: DOAS_POLL_PUBLISH_METHOD,
+            const sent = await input.context.polls.publish({
               scopeId: replacement.scopeId,
               actorIdentityId: replacement.editorIdentityId,
-              ...(event.groupId ? { groupId: event.groupId } : {}),
               groupWid: announcementGroupWid,
               input: {
                 groupWid: announcementGroupWid,
@@ -392,7 +379,7 @@ export async function runEventPollReplacement(input: {
             });
             providerInvocationCompleted = true;
             if (!sent?.messageId) {
-              throw new Error('doas poll service did not return a replacement poll message id.');
+              throw new Error('Host poll publication did not return a replacement poll message id.');
             }
             replacement = markEventPollReplacementPublished(input.db, {
               operationId: replacement.operationId,
@@ -980,7 +967,7 @@ function replacementDeadlinePassed(
 }
 
 /**
- * Releases held DOAS/whatsmeow poll history only after the corresponding poll
+ * Releases held poll history only after the corresponding poll
  * is no longer the authoritative open generation. Release failures are
  * durable and never roll back an already-completed lifecycle transition.
  */

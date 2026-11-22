@@ -50,8 +50,8 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.22.2',
-  coreApiRange: '^0.3.14',
+  version: '0.22.3',
+  coreApiRange: '^0.3.27',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,
@@ -266,7 +266,6 @@ export const eventsManifest: PluginManifest = {
     ]
   },
   dependencies: [
-    { pluginId: 'official.doas', versionRange: '>=0.3.0' },
     { pluginId: 'official.community-subgroups', versionRange: '>=0.1.0' },
     { pluginId: 'official.geocoder', versionRange: '^0.3.0' },
     { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
@@ -288,7 +287,6 @@ export const eventsManifest: PluginManifest = {
       'For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community.'
     ],
     prerequisites: [
-      'official.doas must be enabled for the target scope.',
       'official.community-subgroups must be installed so event subgroups use the shared creation policy.',
       'official.geocoder must be enabled for event profiles whose location comes from a question.',
       'official.poll-assistant 0.3.0 or newer must be enabled in the target scope for new and replacement attendance polls.',

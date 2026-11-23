@@ -1,6 +1,6 @@
 # Community Events
 
-Community events, attendance polls, subgroup creation and recovery, calendar publication, and event weather reports.
+Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.
 
 Standalone WABS package `official.community-events` version `0.22.3`, requiring WABP core API `^0.3.27`. It retains the plugin ID, account-owned `events` database, data version 21, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
 

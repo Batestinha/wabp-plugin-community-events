@@ -1,7 +1,7 @@
 {
   "name": "@wabs/plugin-community-events",
-  "version": "0.24.0",
-  "description": "Guided event polls, unplanned event groups, event subgroup lifecycle, and scoped calendar export for managed communities.",
+  "version": "0.24.1",
+  "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "license": "MIT",
   "private": true,
   "type": "commonjs",

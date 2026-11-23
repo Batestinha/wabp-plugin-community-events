@@ -50,7 +50,7 @@ export const eventsDatabases = [{
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.24.1',
+  version: '0.24.2',
   coreApiRange: '^0.3.29',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -287,7 +287,7 @@ export const eventsManifest: PluginManifest = {
       'For community scopes, treat the community and its child groups as one logical event target; do not ask the user to choose between child groups just because they belong to the same community.'
     ],
     prerequisites: [
-      'Community Administration Assistant must be installed so event subgroups use the shared creation policy.',
+      'Group Administration Assistant must be installed so event subgroups use the shared creation policy.',
       'official.geocoder must be enabled for event profiles whose location comes from a question.',
       'official.poll-assistant 0.3.0 or newer must be enabled in the target scope for new and replacement attendance polls.',
       'The bot must be an admin of the announcement and community groups.',

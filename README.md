@@ -2,7 +2,7 @@
 
 Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.
 
-Standalone WABS package `official.community-events` version `0.22.3`, requiring WABP core API `^0.3.27`. It retains the plugin ID, account-owned `events` database, data version 21, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
+WABS distributes this plugin as `official.community-events`. The version and required WABP core API are listed in `wa-plugin.json`. It retains the plugin ID, account-owned `events` database, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.
 
 Workflow discovery resolves “this event” only from a unique, authorized event whose subgroup matches the invoking chat, independently of title, search and pagination. Explicit event selections remain authoritative. Read-only `locationQuery` discovery returns validated geocoder-backed location candidates and timezones; ambiguous candidates still require a choice before preparation.
 

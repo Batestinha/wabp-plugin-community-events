@@ -1,3 +1,4 @@
+import { withMessageSlot } from './messageSlot';
 import type { TranslateFn } from './runtime';
 import type { PluginAction } from '@wabs/plugin-sdk/actions';
 import type { PluginRuntimeContext } from './runtime';
@@ -551,7 +552,7 @@ async function applyAgreement(
     {
       type: 'message.sendText',
       chatId: event.subgroupChatId!,
-      text: t('official.community-events.startTimeAgreement.applied', { time: localizedTime(localTime, locale) }),
+      text: t('official.community-events.startTimeAgreement.applied', { time: localizedTime(localTime, locale) }), ...withMessageSlot('official.community-events.startTimeAgreement.applied'),
       idempotencyKey: `${operationId}:announcement`
     },
     {
@@ -883,7 +884,7 @@ async function requireEventDayOrganizerTime(
     ...(actor ? [{
       type: 'message.sendText' as const,
       chatId: actor.deliveryChatId,
-      text: t('official.community-events.startTimeAgreement.eventDayManualRequired', { eventId: event.id }),
+      text: t('official.community-events.startTimeAgreement.eventDayManualRequired', { eventId: event.id }), ...withMessageSlot('official.community-events.startTimeAgreement.eventDayManualRequired'),
       idempotencyKey: `start-time-agreement:${event.id}:${agreement.generation}:event-day-manual-required`
     }] : []),
     audit('events.start_time_agreement.event_day_manual_required', { eventId: event.id })
@@ -908,7 +909,7 @@ async function requireManualOrganizerTime(
     ...(actor ? [{
       type: 'message.sendText' as const,
       chatId: actor.deliveryChatId,
-      text: t('official.community-events.startTimeAgreement.manualRequired', { eventId: event.id }),
+      text: t('official.community-events.startTimeAgreement.manualRequired', { eventId: event.id }), ...withMessageSlot('official.community-events.startTimeAgreement.manualRequired'),
       idempotencyKey: `start-time-agreement:${event.id}:${agreement.generation}:manual-required`
     }] : []),
     audit('events.start_time_agreement.manual_required', { eventId: event.id })
@@ -934,7 +935,7 @@ async function blockAgreement(
     ...(actor && t ? [{
       type: 'message.sendText' as const,
       chatId: actor.deliveryChatId,
-      text: t('official.community-events.startTimeAgreement.blocked', { eventId: event.id }),
+      text: t('official.community-events.startTimeAgreement.blocked', { eventId: event.id }), ...withMessageSlot('official.community-events.startTimeAgreement.blocked'),
       idempotencyKey: `start-time-agreement:${event.id}:${agreement.generation}:blocked`
     }] : []),
     audit('events.start_time_agreement.blocked', { eventId: event.id, reason })

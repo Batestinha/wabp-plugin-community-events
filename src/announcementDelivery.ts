@@ -1,13 +1,21 @@
 import type { TemplateMessageMentions } from '@wabs/plugin-sdk/templates';
 import type { PluginDatabase } from '@wabs/plugin-sdk/database';
+import { withMessageSlot } from './messageSlot';
 import {
   claimEventAnnouncementDelivery,
   completeEventAnnouncementDelivery,
+  getEvent,
   getEventAnnouncementDeliveryClaim,
   listEventAnnouncementMessages,
   markEventAnnouncementDeliveryUncertain,
   type EventAnnouncementDeliveryKind
 } from './store';
+
+const ANNOUNCEMENT_SLOT_FIELD: Record<EventAnnouncementDeliveryKind, string> = {
+  calendar_hint: 'calendar.hint.template',
+  event_group_hint: 'eventGroupHint.template',
+  event_edit: 'eventEditAnnouncement.template'
+};
 
 export type ClaimedEventAnnouncementResult =
   | { status: 'sent'; messageId: string }
@@ -94,9 +102,15 @@ export async function sendClaimedEventAnnouncement(input: {
   }
 
   try {
+    const event = getEvent(input.db, input.eventId);
     const sent = await input.sender.sendText(persisted.chatId, persisted.text, {
       ...persisted.mentions,
-      idempotencyKey: persisted.idempotencyKey
+      idempotencyKey: persisted.idempotencyKey,
+      ...(event ? withMessageSlot(
+        `plugin.official.community-events.messages:eventProfiles.${event.profileId}.${ANNOUNCEMENT_SLOT_FIELD[input.kind]}`,
+        undefined,
+        event.scopeId
+      ) : {})
     });
     const messageId = sent.messageId?.trim();
     if (!messageId) {

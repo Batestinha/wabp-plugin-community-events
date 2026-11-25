@@ -1,3 +1,4 @@
+import { withMessageSlot } from './messageSlot';
 import { registerEventPublicationRecovery } from './commands';
 import { resolveEventBody } from './announcements';
 import { startRecoverySweep } from './recoverySweep';
@@ -5608,11 +5609,11 @@ async function cleanupCancelledEventArtifacts(
           endsAt: formatEventDateTime(new Date(event.endsAt), event.timezone),
           eventId: event.id
         }),
-        {
+        withMessageSlot('official.community-events.cancel.staleArtifactNotice', {
           idempotencyKey: `community-events:${event.id}:cancellation-notice`,
           ...(poll ? { quotedMessageId: poll.messageId } : {})
         }
-      );
+      ));
       if (!receipt.messageId) {
         throw new Error('Cancellation notice send returned no WhatsApp message id.');
       }

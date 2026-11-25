@@ -24,6 +24,7 @@ import { appendScopeEventJsonLog } from './log';
 import { EVENTS_JOBS, EVENTS_PLUGIN_ID } from './manifest';
 import { localizeDefaultEventProfiles, type EventProfile } from './config';
 import type { StoredEventRecord } from './store';
+import { withMessageSlot } from './messageSlot';
 import {
   appendEventLog,
   claimEventWeatherDelivery,
@@ -599,7 +600,11 @@ async function deliverPreparedWeatherForecast(
       ? requireWeatherMessageId(await context.sendText(
           claim.delivery.chatId!,
           claim.delivery.meteorologicalText,
-          { ...claim.delivery.mentions, idempotencyKey: claim.delivery.meteorologicalIdempotencyKey! }
+          withMessageSlot(
+            `plugin.official.community-events.messages:eventProfiles.${event.profileId}.weather.template`,
+            { ...claim.delivery.mentions, idempotencyKey: claim.delivery.meteorologicalIdempotencyKey! },
+            event.scopeId
+          )
         ), 'meteorological')
       : undefined;
     fenceReason = weatherDeliveryFenceReason(db, event, claim.delivery, schedule);

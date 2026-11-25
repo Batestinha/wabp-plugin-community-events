@@ -1,3 +1,4 @@
+import { withMessageSlot } from './messageSlot';
 import { randomUUID } from 'node:crypto';
 import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import {
@@ -1182,10 +1183,10 @@ export async function finalizeUnplannedEventLifecycle(input: {
             title: event.subgroupTitle || event.groupTitle,
             eventId: event.id
           }),
-          {
+          withMessageSlot('official.community-events.unplannedProvisioningRecovered', {
             idempotencyKey: `community-events:unplanned-provisioning-recovered:${event.id}`
           }
-        );
+        ));
         appendEventLog(db, {
           eventId: event.id,
           action: 'events.unplanned.recovery_creator_notified',

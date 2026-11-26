@@ -37,6 +37,7 @@ import { eventCleanupJobRequest } from './cleanupScheduling';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { sendClaimedEventAnnouncement } from './announcementDelivery';
 import { sendEventCalendarHint } from './calendarHint';
+import { calendarPageForMessage } from './calendarMessageLink';
 import { eventWeatherForecastJobRequests } from './weather';
 import {
   eventCreatorMembershipPauseKindForFailure,
@@ -1071,6 +1072,7 @@ export async function finalizeUnplannedEventLifecycle(input: {
       );
       const announcementText = renderEventGroupAnnouncement({
         template: input.profile.eventGroupHint.template,
+        calendarPageUrl: await calendarPageForMessage(input.runtime, input.profile.eventGroupHint.template, event, input.config.calendars),
         profile: input.profile,
         event,
         groupDisplayName: event.subgroupTitle || event.groupTitle,
@@ -1079,38 +1081,40 @@ export async function finalizeUnplannedEventLifecycle(input: {
         locale: input.locale,
         creatorDisplayName: input.creatorDisplayName
       });
-      const delivery = await sendClaimedEventAnnouncement({
-        db,
-        eventId: event.id,
-        scopeId: event.scopeId,
-        kind: 'event_group_hint',
-        deliveryKey: 'initial',
-        chatId: announcementGroupWid,
-        text: announcementText,
-        expectedEventUpdatedAt: input.expectedEventUpdatedAt,
-        sender: input.activeTransport
-      });
-      if (delivery.status === 'sent') {
-        await appendFinalizationJsonLog(input.context, {
-          action: 'event.unplanned_announcement_sent',
-          scopeId: event.scopeId,
+      if (announcementText.trim()) {
+        const delivery = await sendClaimedEventAnnouncement({
+          db,
           eventId: event.id,
-          actorWid: event.actorWid,
-          profileId: event.profileId,
-          subgroupChatId,
-          metadata: {
-            announcementGroupWid: event.announcementGroupWid,
-            messageId: delivery.messageId,
-            groupJoinUrl,
-            trigger: input.trigger
-          }
+          scopeId: event.scopeId,
+          kind: 'event_group_hint',
+          deliveryKey: 'initial',
+          chatId: announcementGroupWid,
+          text: announcementText,
+          expectedEventUpdatedAt: input.expectedEventUpdatedAt,
+          sender: input.activeTransport
         });
-      } else if (delivery.status === 'already_claimed') {
-        failures.push('event group announcement: delivery already claimed');
-      } else if (delivery.status === 'superseded') {
-        throw new UnplannedEventFinalizationSupersededError(
-          `Unplanned event ${event.id} changed before its event-group announcement could be sent.`
-        );
+        if (delivery.status === 'sent') {
+          await appendFinalizationJsonLog(input.context, {
+            action: 'event.unplanned_announcement_sent',
+            scopeId: event.scopeId,
+            eventId: event.id,
+            actorWid: event.actorWid,
+            profileId: event.profileId,
+            subgroupChatId,
+            metadata: {
+              announcementGroupWid: event.announcementGroupWid,
+              messageId: delivery.messageId,
+              groupJoinUrl,
+              trigger: input.trigger
+            }
+          });
+        } else if (delivery.status === 'already_claimed') {
+          failures.push('event group announcement: delivery already claimed');
+        } else if (delivery.status === 'superseded') {
+          throw new UnplannedEventFinalizationSupersededError(
+            `Unplanned event ${event.id} changed before its event-group announcement could be sent.`
+          );
+        }
       }
     } catch (error) {
       if (error instanceof UnplannedEventFinalizationSupersededError) {
@@ -2066,6 +2070,7 @@ async function finalizeRecoveredPlannedEventLifecycle(input: {
       const groupJoinUrl = await eventGroupJoinUrl(input.context, template, event.subgroupChatId);
       const text = renderEventGroupAnnouncement({
         template,
+        calendarPageUrl: await calendarPageForMessage(input.context, template, event),
         profile: input.profile,
         event,
         groupDisplayName: event.subgroupTitle || event.groupTitle,

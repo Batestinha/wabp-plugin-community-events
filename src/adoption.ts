@@ -11,6 +11,7 @@ import {
 } from './announcementDelivery';
 import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncement } from './announcements';
 import { sendEventCalendarHint } from './calendarHint';
+import { calendarPageForMessage } from './calendarMessageLink';
 import { eventFlowAnswersFromRaw } from './flow';
 import { materializeEventLifecycle } from './materialize';
 import { localizeDefaultEventProfiles, parseEventsConfig, type EventProfile } from './config';
@@ -727,6 +728,7 @@ export async function sendAdoptedEventGroupHint(input: {
     const groupJoinUrl = await eventGroupJoinUrl(input.context, template, input.event.subgroupChatId);
     const text = renderEventGroupAnnouncement({
       template,
+      calendarPageUrl: await calendarPageForMessage(input.context, template, input.event),
       profile: input.profile,
       event: input.event,
       groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,

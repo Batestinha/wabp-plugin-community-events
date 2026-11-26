@@ -1,5 +1,7 @@
 # Community Events
 
+Event group, edit and calendar hint templates can include `{{#if calendarPageUrl}}Open the calendar: {calendarPageUrl}{{/if}}`. Community Events resolves the assigned calendar in the delivery scope when it builds the message. Integration Manager confirms the Calendar plugin, publication and browser page. The separate `calendarSubscriptionUrl` value in calendar hints refers to the local ICS subscription.
+
 Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.
 
 WABS distributes this plugin as `official.community-events`. The version and required WABP core API are listed in `wa-plugin.json`. It retains the plugin ID, account-owned `events` database, all SQL migrations, scoped configuration, event identifiers, creator bindings, subgroup checkpoints and receipt formats.

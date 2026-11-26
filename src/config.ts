@@ -18,15 +18,16 @@ export const EVENT_CREATE_PERMISSION_PREFIX = 'events.create.';
 export const EVENT_SUBGROUP_SUGGESTION_CONVERSION_POLICIES = ['off', 'auto_convert'] as const;
 export const EVENT_DATE_TEMPLATE_TOKENS = ['weekday', 'dd', 'mm', 'yy', 'yyyy', 'hour', 'minute'] as const;
 export const EVENT_PROFILE_TEMPLATE_TOKENS = ['profileId', 'profileLabel', 'creatorDisplayName'] as const;
-export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId'] as const;
+export const EVENT_GROUP_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarPageUrl'] as const;
 export const EVENT_EDIT_ANNOUNCEMENT_TEMPLATE_TOKENS = [
+  'calendarPageUrl',
   'eventId',
   'groupDisplayName',
   'previousGroupDisplayName',
   'subgroupChatId',
   'editorDisplayName'
 ] as const;
-export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = ['eventId', 'groupDisplayName', 'groupJoinUrl', 'subgroupChatId', 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
+export const EVENT_CALENDAR_HINT_TEMPLATE_TOKENS = [...EVENT_GROUP_HINT_TEMPLATE_TOKENS, 'calendarId', 'calendarDisplayName', 'calendarSubscriptionUrl'] as const;
 export const EVENT_WEATHER_TEMPLATE_TOKENS = [
   'eventId',
   'groupDisplayName',

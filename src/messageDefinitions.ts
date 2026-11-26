@@ -3321,6 +3321,7 @@ export const eventTextDefinitions = [
     "destination": "Command or workflow reply",
     "order": 2120,
     "variables": [
+      "calendarPageUrl",
       "creatorDisplayName",
       "groupDisplayName",
       "groupJoinUrl"
@@ -3338,6 +3339,7 @@ export const eventTextDefinitions = [
     "destination": "Command or workflow reply",
     "order": 2130,
     "variables": [
+      "calendarPageUrl",
       "editorDisplayName",
       "groupDisplayName"
     ],
@@ -3370,6 +3372,7 @@ export const eventTextDefinitions = [
     "destination": "Command or workflow reply",
     "order": 2150,
     "variables": [
+      "calendarPageUrl",
       "calendarDisplayName",
       "calendarSubscriptionUrl",
       "creatorDisplayName"

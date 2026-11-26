@@ -1,4 +1,6 @@
-import type { PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
+import { valueTemplateReferences, type PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
+import type { PluginServiceCaller } from '@wabs/plugin-sdk/services';
+import { calendarPageForMessage, requiresCalendarSubscription } from './calendarMessageLink';
 import { resolveEventBody } from './announcements';
 import type { AppConfig } from './deploymentConfig';
 import type { PluginDatabase } from '@wabs/plugin-sdk/database';
@@ -48,6 +50,7 @@ export type EventCalendarHintResult =
   | 'failed';
 
 export interface EventCalendarHintContext extends PluginTemplateMentionContext {
+  services?: PluginServiceCaller | undefined;
   config: AppConfig;
   getGroupInviteCode?(groupWid: string): Promise<string | null>;
 }
@@ -66,7 +69,7 @@ export type EventCalendarHintTargetAuthorization =
 
 export async function sendEventCalendarHint(input: {
   context: EventCalendarHintContext;
-  runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases'>;
+  runtime: Pick<OfficialPluginCommandRuntime, 'config' | 'databases' | 'services'>;
   db?: PluginDatabase | undefined;
   activeTransport: CalendarHintTextTransport;
   trigger: CalendarHintTrigger;
@@ -188,14 +191,14 @@ export async function sendEventCalendarHint(input: {
       return 'superseded';
     }
     intentPrepared = true;
-    const requiresSubscriptionUrl = templateUsesToken(template, 'calendarSubscriptionUrl');
-    const publicationStatus = requiresSubscriptionUrl
+    const usesSubscriptionUrl = valueTemplateReferences(template).tokens.includes('calendarSubscriptionUrl');
+    const publicationStatus = usesSubscriptionUrl
       ? getCalendarPublicationStatus(db, input.scopeId, calendarId)
       : undefined;
-    const origin = requiresSubscriptionUrl
+    const origin = usesSubscriptionUrl
       ? operatorConsolePublicOriginForRuntime(runtime.config)
       : '';
-    const subscriptionUrl = requiresSubscriptionUrl
+    const subscriptionUrl = usesSubscriptionUrl
       ? resolveEventCalendarHintSubscriptionUrl({
           config: runtime.config,
           scopeId: input.scopeId,
@@ -203,7 +206,7 @@ export async function sendEventCalendarHint(input: {
           publicationStatus
         })
       : '';
-    if (requiresSubscriptionUrl && !subscriptionUrl) {
+    if (!subscriptionUrl && requiresCalendarSubscription(template)) {
       deferEventCalendarHintDelivery(db, {
         eventId: input.event.id,
         deliveryKey,
@@ -240,6 +243,7 @@ export async function sendEventCalendarHint(input: {
         subgroupChatId: input.subgroupChatId ?? input.event.subgroupChatId,
         calendarId: calendar.id,
         calendarDisplayName: calendar.label || calendar.id,
+        calendarPageUrl: await calendarPageForMessage({ services: runtime.services ?? input.context.services }, template, input.event, input.calendars),
         calendarSubscriptionUrl: subscriptionUrl
       }
     }), input.context, input.event, input.announcementGroupWid);

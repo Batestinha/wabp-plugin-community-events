@@ -8,7 +8,7 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.24.3",
+  "version": "0.25.0",
   "coreApiRange": "^0.3.29",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -707,6 +707,9 @@
           "helpText": "Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.",
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
+          "templateVariables": [
+            { "token": "calendarPageUrl", "label": "Calendar page URL" }
+          ],
           "builderTemplateDialect": "conditional-values-v2",
           "builderTemplateMentions": {
             "people": true,
@@ -4262,6 +4265,7 @@
               "destination": "Command or workflow reply",
               "order": 2120,
               "variables": [
+                "calendarPageUrl",
                 "creatorDisplayName",
                 "groupDisplayName",
                 "groupJoinUrl"
@@ -4279,6 +4283,7 @@
               "destination": "Command or workflow reply",
               "order": 2130,
               "variables": [
+                "calendarPageUrl",
                 "editorDisplayName",
                 "groupDisplayName"
               ],
@@ -4311,6 +4316,7 @@
               "destination": "Command or workflow reply",
               "order": 2150,
               "variables": [
+                "calendarPageUrl",
                 "calendarDisplayName",
                 "calendarSubscriptionUrl",
                 "creatorDisplayName"

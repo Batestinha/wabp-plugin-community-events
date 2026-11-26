@@ -34,6 +34,7 @@ import { repairEventEdit } from './editRepair';
 import { eventProfilePermission, localizeDefaultEventProfiles, parseEventsConfig, type EventCalendarResource, type EventProfile } from './config';
 import { eventProfileQuestionSchemaRevision } from './profileRevision';
 import { sendEventCalendarHint } from './calendarHint';
+import { calendarPageForMessage } from './calendarMessageLink';
 import { eventLifecycleCompleteAt, formatEventDateTime } from './datetime';
 import { writePublishAndRecordScopeCalendar } from './calendarStatus';
 import { publishEventCalendarBeforeCommunityLink } from './communityLinkCalendar';
@@ -1728,25 +1729,25 @@ async function replaceOpenEventPollLifecycle(input: {
       template: input.profile.eventEditAnnouncement.template,
       profile: input.profile,
       event: prospectiveEvent,
+      calendarPageUrl: await calendarPageForMessage(input.context, input.profile.eventEditAnnouncement.template, prospectiveEvent, input.config.calendars),
       previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       editorDisplayName: input.actorLabel || input.actorWid,
       locale: input.locale
     }), input.context, prospectiveEvent, announcementGroupWid);
-    if (!text.trim()) {
-      throw new Error('Event edit announcement rendered empty.');
-    }
-    announcementIntent = {
-      scopeId: input.event.scopeId,
-      kind: 'event_edit',
-      deliveryKey: input.operationId,
-      chatId: announcementGroupWid,
-      text, mentions,
-      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
-        eventId: input.event.id,
+    if (text.trim()) {
+      announcementIntent = {
+        scopeId: input.event.scopeId,
         kind: 'event_edit',
-        deliveryKey: input.operationId
-      })
-    };
+        deliveryKey: input.operationId,
+        chatId: announcementGroupWid,
+        text, mentions,
+        idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+          eventId: input.event.id,
+          kind: 'event_edit',
+          deliveryKey: input.operationId
+        })
+      };
+    }
   }
   const repairIntent: EventEditRepairIntent = {
     operationId: input.operationId,
@@ -2449,25 +2450,25 @@ async function updateEventLifecycle(input: {
       template: input.profile.eventEditAnnouncement.template,
       profile: input.profile,
       event: prospectiveEvent,
+      calendarPageUrl: await calendarPageForMessage(input.context, input.profile.eventEditAnnouncement.template, prospectiveEvent, input.config.calendars),
       previousGroupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       editorDisplayName: input.actorLabel || input.actorWid,
       locale: input.locale
     }), input.context, prospectiveEvent, announcementGroupWid);
-    if (!text.trim()) {
-      throw new Error('Event edit announcement rendered empty.');
-    }
-    announcementIntent = {
-      scopeId: input.event.scopeId,
-      kind: 'event_edit',
-      deliveryKey: input.operationId,
-      chatId: announcementGroupWid,
-      text, mentions,
-      idempotencyKey: eventAnnouncementTransportIdempotencyKey({
-        eventId: input.event.id,
+    if (text.trim()) {
+      announcementIntent = {
+        scopeId: input.event.scopeId,
         kind: 'event_edit',
-        deliveryKey: input.operationId
-      })
-    };
+        deliveryKey: input.operationId,
+        chatId: announcementGroupWid,
+        text, mentions,
+        idempotencyKey: eventAnnouncementTransportIdempotencyKey({
+          eventId: input.event.id,
+          kind: 'event_edit',
+          deliveryKey: input.operationId
+        })
+      };
+    }
   }
   const updated = updateEventStructuredData(input.db, {
     eventId: input.event.id,

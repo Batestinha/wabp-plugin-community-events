@@ -27,7 +27,8 @@ import { resolvePluginPollVotes } from '@wabs/plugin-sdk/poll-vote-identity';
 import { enqueuePluginJob } from '@wabs/plugin-sdk/jobs';
 import { parseEventsConfig, type EventProfile } from './config';
 import { formatEventDateTime } from './datetime';
-import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncementFragment, templateUsesToken } from './announcements';
+import { eventGroupHintEnabled, eventGroupJoinUrl, renderEventGroupAnnouncementFragment } from './announcements';
+import { calendarPageForMessage, requiresCalendarSubscription } from './calendarMessageLink';
 import { voterWidsForResponseBehavior, type EventVoteSelection } from './attendance';
 import {
   cancelEventAttendanceLifecycle,
@@ -1188,7 +1189,7 @@ async function enqueueRecoverableEventAnnouncementDeliveryJobs(
         const calendarId = delivery.calendarHintIntent?.calendarId ?? resolvedEventCalendarId(event);
         const calendar = config.calendars.find((candidate) => candidate.id === calendarId);
         readyForAttempt = !profile || !profile.calendar.hint.enabled ||
-          !templateUsesToken(profile.calendar.hint.template, 'calendarSubscriptionUrl') ||
+          !requiresCalendarSubscription(profile.calendar.hint.template) ||
           !calendar?.enabled ||
           Boolean(resolveEventCalendarHintSubscriptionUrl({
               config: context.config,
@@ -5123,6 +5124,7 @@ async function plannedEventAnnouncementActions(
       profile,
       event: record,
       groupDisplayName: input.subgroupTitle || record.groupTitle,
+      calendarPageUrl: await calendarPageForMessage(context, template, record),
       groupJoinUrl,
       subgroupChatId
     }), context, record, record.announcementGroupWid);

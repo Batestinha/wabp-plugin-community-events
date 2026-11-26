@@ -48,6 +48,7 @@ export function renderEventGroupAnnouncementFragment(input: {
   profile: EventProfile;
   event: StoredEventRecord;
   groupDisplayName: string;
+  calendarPageUrl?: string | undefined;
   groupJoinUrl: string;
   subgroupChatId: string;
   locale?: string | undefined;
@@ -67,6 +68,7 @@ export function renderEventGroupAnnouncementFragment(input: {
     extraTokens: {
       eventId: input.event.id,
       groupDisplayName: input.groupDisplayName,
+      calendarPageUrl: input.calendarPageUrl,
       groupJoinUrl: input.groupJoinUrl,
       subgroupChatId: input.subgroupChatId
     }
@@ -79,6 +81,7 @@ export function renderEventEditAnnouncementFragment(input: {
   event: StoredEventRecord;
   previousGroupDisplayName: string;
   editorDisplayName: string;
+  calendarPageUrl?: string | undefined;
   locale?: string | undefined;
 }): TemplateFragment {
   return renderEventTemplateFragment({
@@ -97,7 +100,8 @@ export function renderEventEditAnnouncementFragment(input: {
       groupDisplayName: input.event.subgroupTitle || input.event.groupTitle,
       previousGroupDisplayName: input.previousGroupDisplayName,
       subgroupChatId: input.event.subgroupChatId,
-      editorDisplayName: input.editorDisplayName
+      editorDisplayName: input.editorDisplayName,
+      calendarPageUrl: input.calendarPageUrl
     }
   });
 }

@@ -121,6 +121,7 @@ export const eventsControls: ControlDescriptor[] = [
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',
+    templateVariables: [{ token: 'calendarPageUrl', label: 'Calendar page URL' }],
     builderTextSlots: ['creation', 'questions', 'location', 'poll', 'group', 'start-time', 'weather'],
     builderTemplateDialect: 'conditional-values-v2',
     builderTemplateMentions: eventMessageMentions,

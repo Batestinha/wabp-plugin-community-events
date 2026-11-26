@@ -20,6 +20,8 @@ Run `npm ci --ignore-scripts`, `npm test` and `npm run release:archive`. CI test
 
 The package owns its console operations and runtime administration actions, including calendar subscriptions, token rotation, question-key rename recovery, adoption and cancellation. WABP retains the existing routes and supplies account-bound configuration, read-only inspection databases, revision-checked updates and authorization. Runtime readiness performs recovery through the host contract; background sweeps drain before shutdown.
 
+The subgroup suggestion refusal notice can use `{botDisplayName}` for the connected bot and `{creatorDisplayName}` for the member. Use `{{#if botDisplayName}}…{{/if}}` for wording that needs an available profile name.
+
 ## Typed templates and WhatsApp mentions
 
 Message editors support exact choice and text comparisons, numeric thresholds,

@@ -117,7 +117,7 @@ export const eventsControls: ControlDescriptor[] = [
     { type: 'boolean' },
     { widget: 'toggle' }
   ),
-  control('subgroupSuggestionConversion.preFlowNotice.template', 'Suggestion refusal notice text', 'Explain suggestion conversion before starting event creation.', 50, { type: 'object' }, { widget: 'localized-text', templateVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Ana' }], templateDialect: 'conditional-values-v2', templateActivation: 'when-used', templateConditionVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator' }], templateEmptyResult: 'reject', templateMentions: { ...eventMessageMentions, all: false } }),
+  control('subgroupSuggestionConversion.preFlowNotice.template', 'Suggestion refusal notice text', 'Explain suggestion conversion before starting event creation.', 50, { type: 'object' }, { widget: 'localized-text', templateVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator', sampleValue: 'Ana' }, { token: 'botDisplayName', label: 'Bot display name' }], templateDialect: 'conditional-values-v2', templateActivation: 'when-used', templateConditionVariables: [{ token: 'creatorDisplayName', label: 'Suggestion creator' }, { token: 'botDisplayName', label: 'Bot display name' }], templateEmptyResult: 'reject', templateMentions: { ...eventMessageMentions, all: false } }),
   control('eventProfiles', 'Event profiles', 'Event profile definitions, canonical locations, calendars, and event forecast delivery managed by the event profile builder.', 60, { type: 'array', items: { type: 'object' } }, {
     widget: 'builder',
     builderId: 'official.community-events.event-profiles.v1',

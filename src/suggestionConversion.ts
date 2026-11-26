@@ -176,6 +176,7 @@ export async function reconcileEventSuggestionsForScope(
       services: context.services, ephemeralStore: context.ephemeralStore, databases: context.databases,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,
+      getCurrentBotWid: context.getCurrentBotWid,
       resolveIdentityAddress: context.resolveIdentityAddress,
       dataStore: context.dataStore,
       i18n: context.i18n,

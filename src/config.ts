@@ -565,6 +565,8 @@ export const defaultEventsCalendarResource: EventCalendarResource = {
   }
 };
 
+export const suggestionNoticeTokens = ['creatorDisplayName', 'botDisplayName'] as const;
+
 const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
   .max(1000)
   .refine((value) => value.trim().length > 0, 'Required')
@@ -573,7 +575,7 @@ const eventSubgroupSuggestionPreFlowNoticeTemplateSchema = z.string()
     'Suggested subgroup titles are not available to the notice template'
   )
   .superRefine((template, ctx) => {
-    for (const issue of validateValueTemplate(template, { ...eventTemplateDefinition(['creatorDisplayName'], undefined, true, 'when-used'), mentions: { ...eventMessageMentions, all: false } })) {
+    for (const issue of validateValueTemplate(template, { ...eventTemplateDefinition(suggestionNoticeTokens, undefined, true, 'when-used'), mentions: { ...eventMessageMentions, all: false } })) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue.message });
     }
   });

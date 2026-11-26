@@ -497,6 +497,7 @@ async function startEventFlow(context: PluginOperationContext, ctx: CommandConte
   const privateDeliveryFallback = privateFlowDeliveryFallback(ctx, actor);
   const starter = new EventCreationFlowStarter({
     flowEngine: context.flowEngine,
+    getCurrentBotWid: context.getCurrentBotWid,
     services: context.services, ephemeralStore: runtime.ephemeralStore, databases: runtime.databases,
       coveredGroupsForScope: context.coveredGroupsForScope,
       currentMemberIdentityIdsForScope: context.currentMemberIdentityIdsForScope,

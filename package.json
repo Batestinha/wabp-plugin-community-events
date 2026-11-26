@@ -1,6 +1,6 @@
 {
   "name": "@wabs/plugin-community-events",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "license": "MIT",
   "private": true,

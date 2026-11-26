@@ -1,5 +1,6 @@
 import type { EventLocationResolution } from './eventLocationFlow';
-import { resolvePluginTemplateMentions, combineResolvedTemplate } from '@wabs/plugin-sdk/templates';
+import { valueTemplateReferences, resolvePluginTemplateMentions, combineResolvedTemplate } from '@wabs/plugin-sdk/templates';
+import { suggestionNoticeTokens } from './config';
 import { renderEventConditionalFragment } from './template';
 import type { PluginTemplateMentionContext } from '@wabs/plugin-sdk/templates';
 import { scopeTimezoneSchema } from '@wabs/plugin-sdk/clock';
@@ -118,6 +119,7 @@ export const eventDraftSchema = z.object({
 }).strict();
 
 export interface EventCreationFlowStarterContext extends PluginTemplateMentionContext {
+  getCurrentBotWid?: (() => Promise<string | undefined>) | undefined;
   flowEngine: FlowEngine;
   /** Optional: past places of the scope sharpen place parsing and location search. */
   databases?: PluginDatabaseRegistry | undefined;
@@ -211,6 +213,23 @@ export type RegisterEventCreationCompletionHandlers = (
   profiles: EventProfile[],
   t: TranslateFn
 ) => void;
+
+export async function renderSuggestionRefusalNotice(
+  source: string, creatorDisplayName: string,
+  context: Pick<EventCreationFlowStarterContext, 'getCurrentBotWid' | 'resolveIdentityAddress'>
+) {
+  let botDisplayName: string | undefined;
+  if (valueTemplateReferences(source).tokens.includes('botDisplayName')) {
+    const wid = await context.getCurrentBotWid?.().catch(() => undefined);
+    if (wid) {
+      const bot = await context.resolveIdentityAddress?.(wid).catch(() => undefined);
+      botDisplayName = bot?.displayName?.trim();
+    }
+  }
+  return renderEventConditionalFragment({ source, allowedTokens: suggestionNoticeTokens,
+    values: { creatorDisplayName, botDisplayName }, emptyResult: 'suppress',
+    field: 'subgroupSuggestionConversion.preFlowNotice.template', body: true });
+}
 
 export class EventCreationFlowStarter {
   constructor(
@@ -395,13 +414,7 @@ export class EventCreationFlowStarter {
     });
     const suggestionRefusalNoticeFragment = input.includeSuggestionRefusalNotice
       && input.prepared.suggestionRefusalNoticeTemplate
-      ? renderEventConditionalFragment({
-          source: input.prepared.suggestionRefusalNoticeTemplate,
-          allowedTokens: ['creatorDisplayName'],
-          values: { creatorDisplayName: input.actorLabel },
-          emptyResult: 'suppress',
-          field: 'subgroupSuggestionConversion.preFlowNotice.template', body: true
-        })
+      ? await renderSuggestionRefusalNotice(input.prepared.suggestionRefusalNoticeTemplate, input.actorLabel, this.context)
       : undefined;
     const suggestionRefusalNotice = suggestionRefusalNoticeFragment
       ? combineResolvedTemplate(await resolvePluginTemplateMentions(suggestionRefusalNoticeFragment, {

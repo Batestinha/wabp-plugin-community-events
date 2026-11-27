@@ -1,4 +1,3 @@
-import { eventReadDeclaration } from './assistantReads';
 import { eventsStoredConfigSchema } from './savedText';
 import { eventOperatorActionDeclarations } from './operatorActions';
 import { eventConsoleOperationDeclarations } from './consoleOperationDeclarations';
@@ -48,6 +47,8 @@ export const eventsDatabases = [{
   migrations: 'migrations/events'
 }];
 
+const assistantService = require('../wa-plugin.json').services.find((service: { serviceId: string }) =>
+  service.serviceId === 'official.community-events.assistant.v1');
 const { dependencies, integrations, memberSubscriptions } = require('../wa-plugin.json');
 const relationships = { dependencies, integrations, memberSubscriptions };
 
@@ -55,7 +56,7 @@ export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   ...relationships,
-  version: '0.25.5',
+  version: '0.25.6',
   coreApiRange: '^0.3.33',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -156,7 +157,7 @@ export const eventsManifest: PluginManifest = {
   externalActions: eventOperatorActionDeclarations,
   eventSubscriptions: ['message', 'participant.change', 'poll.vote', 'plugin.job', 'group.dismantled'],
   services: [
-    eventReadDeclaration,
+    assistantService,
     {
       serviceId: EVENT_WORKFLOW_SERVICE_ID,
       description: 'Prepare, apply and inspect requester-authorized event changes through the event lifecycle.',

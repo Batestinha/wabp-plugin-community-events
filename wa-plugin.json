@@ -8,7 +8,7 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.5",
+  "version": "0.25.6",
   "coreApiRange": "^0.3.33",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",

@@ -8,8 +8,8 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.1",
-  "coreApiRange": "^0.3.29",
+  "version": "0.25.2",
+  "coreApiRange": "^0.3.31",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -398,16 +398,28 @@
     {
       "pluginId": "official.poll-assistant",
       "versionRange": ">=0.3.0"
-    },
+    }
+  ],
+  "integrations": [
     {
       "pluginId": "official.weather",
       "versionRange": ">=0.6.0",
-      "optional": true
+      "description": "Adds local weather and tide forecasts to event messages."
     },
     {
       "pluginId": "official.workspace-calendar",
       "versionRange": "^1.0.0",
-      "optional": true
+      "description": "Publishes event schedules to the Workspace calendar."
+    },
+    {
+      "pluginId": "official.integration-manager",
+      "versionRange": ">=1.2.0",
+      "description": "Provides verified links to the published calendar in event messages."
+    },
+    {
+      "pluginId": "official.nl-assistant",
+      "versionRange": "*",
+      "description": "Makes event editing and cancellation available through assistant workflows."
     }
   ],
   "databases": [

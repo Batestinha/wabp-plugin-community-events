@@ -13,7 +13,7 @@ assert.deepEqual(plugin.manifest.integrations, metadata.integrations);
 assert.deepEqual(metadata.memberSubscriptions, []);
 assert.deepEqual(plugin.manifest.memberSubscriptions, metadata.memberSubscriptions);
 assert.equal(plugin.manifest.coreApiRange, metadata.coreApiRange);
-assert.equal(metadata.coreApiRange, '^0.3.33');
+assert.equal(metadata.coreApiRange, '^0.3.34');
 for (const method of ['registerCommands', 'registerCancellations', 'registerHooks', 'registerServices', 'resolveGroupTimezone']) assert.equal(typeof plugin[method], 'function');
 assert.deepEqual(Object.keys(plugin.lifecycle), ['migrateData']);
 const pt = JSON.parse(fs.readFileSync(path.join(root, 'locales/pt-PT/official.community-events.json')));

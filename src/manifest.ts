@@ -47,10 +47,14 @@ export const eventsDatabases = [{
   migrations: 'migrations/events'
 }];
 
+const { dependencies, integrations } = require('../wa-plugin.json');
+const relationships = { dependencies, integrations };
+
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
-  version: '0.25.1',
+  ...relationships,
+  version: '0.25.2',
   coreApiRange: '^0.3.29',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
@@ -265,13 +269,6 @@ export const eventsManifest: PluginManifest = {
       }
     ]
   },
-  dependencies: [
-    { pluginId: 'official.community-admin', versionRange: '^1.0.0' },
-    { pluginId: 'official.geocoder', versionRange: '^0.3.0' },
-    { pluginId: 'official.poll-assistant', versionRange: '>=0.3.0' },
-    { pluginId: 'official.weather', versionRange: '>=0.6.0', optional: true },
-    { pluginId: 'official.workspace-calendar', versionRange: '^1.0.0', optional: true }
-  ],
   ownedData: [{ resource: POLL_HISTORY_OWNED_DATA_RESOURCE }],
   scopeClock: { timezoneConfigPaths: ['timezone'], providesGroupTimezones: true },
   databases: eventsDatabases,

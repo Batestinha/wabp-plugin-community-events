@@ -204,15 +204,25 @@ export function eventLifecycleCompleteAt(input: {
 
 export function parseEventDateTimeInput(input: string, options: EventDateTimeParseOptions): EventDateTimeParseResult {
   const now = options.now ?? new Date();
-  const parsed = parseLocalizedDateTimeInput(input, {
+  const raw = input.trim();
+  const numeric = /^(\d{4})-(\d{2})-(\d{2})([ T]\d{2}:\d{2})?$/.exec(raw);
+  let parserInput = raw;
+  // A middle number above 12 can only be the day. Otherwise keep ISO month-first order.
+  if (numeric && Number(numeric[2]) > 12) {
+    const [, year, day, month, time = ''] = numeric;
+    const date = `${year}-${month}-${day}`;
+    if (!strictLocalDateParts(date)) return { status: 'invalid', reason: 'unrecognized' };
+    parserInput = date + time;
+  }
+  const parsed = parseLocalizedDateTimeInput(parserInput, {
     timezone: options.timezone,
     locale: options.locale,
     now
   });
   const result: EventDateTimeParseResult = parsed.status === 'ok'
-    ? okResult(parsed.raw, parsed.date, true, options.timezone, options.locale)
+    ? okResult(raw, parsed.date, true, options.timezone, options.locale)
     : parsed.status === 'missing_time'
-      ? missingTimeResult(parsed.raw, parsed.date, options.timezone, options.locale)
+      ? missingTimeResult(raw, parsed.date, options.timezone, options.locale)
       : parsed;
   return validateDateTimeResult(result, options, now);
 }

@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const { createEventFlowDefinition, eventInitialFlowData, eventFlowAnswers, eventFlowLocation } = require('../dist/flow');
 const { resolveFlowStepInputForEngine } = require('@wabs/plugin-sdk/flow-input');
 const { parseEventsConfig } = require('../dist/config');
+const { parseEventDateInput, parseEventDateTimeInput } = require('../dist/datetime');
 const { eventsMessages } = require('../dist/messages');
 const { findEmbeddedDateTime, normalizeNumberWords, eventReplyControl, EVENT_CARRIED_ANSWERS_KEY } = require('../dist/answerResilience');
 const { fakeGeocoder } = require('./fakeGeocoder.cjs');
@@ -90,6 +91,36 @@ test('reads spelled-out counts and bare control words', () => {
   assert.equal(eventReplyControl('Sim!'), 'accept');
   assert.equal(eventReplyControl('não'), 'reject');
   assert.equal(eventReplyControl('Sintra'), undefined);
+});
+
+test('a year-day-month reply advances the date question and preserves the original text', async () => {
+  const f = fixture();
+  await f.answer('Sintra');
+  await f.prompt();
+  await f.answer('1');
+  assert.equal(f.state.currentStepId, 'q-climbing-startDate');
+  assert.equal((await f.answer('2026-29-11')).status, 'continue');
+  assert.equal(f.state.currentStepId, 'q-climbing-startTime');
+  assert.equal(f.state.data['q-climbing-startDate'].raw, '2026-29-11');
+  await f.answer('14:00');
+  await f.answer('Bouldering');
+  assert.equal(f.answers().localDate, '2026-11-29');
+  assert.equal(f.answers().localTime, '14:00');
+});
+
+test('year-first dates keep ISO precedence and enforce calendar and event date limits', () => {
+  assert.equal(parseEventDateInput('2026-11-12', lisbon).normalized, '2026-11-12');
+  assert.equal(parseEventDateInput('2028-29-02', lisbon).normalized, '2028-02-29');
+  for (const raw of ['2026-31-11', '2027-29-02', '2026-29-00', '2026-29-13', '2026-32-12']) {
+    assert.deepEqual(parseEventDateInput(raw, lisbon), { status: 'invalid', reason: 'unrecognized' });
+  }
+  assert.equal(parseEventDateInput('2026-15-01', lisbon).reason, 'past');
+  assert.equal(parseEventDateInput('2029-29-11', lisbon).reason, 'too_far');
+  const timed = parseEventDateTimeInput('2026-29-11 14:00', lisbon);
+  assert.equal(timed.status, 'ok');
+  assert.equal(timed.raw, '2026-29-11 14:00');
+  assert.equal(timed.date.toISOString(), '2026-11-29T14:00:00.000Z');
+  assert.equal(parseEventDateInput('2026-29-11 14:00', lisbon).reason, 'has_time');
 });
 
 test('David: a date typed at "Where?" is split off, confirmed once and never asked again', async () => {

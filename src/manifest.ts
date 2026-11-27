@@ -47,14 +47,14 @@ export const eventsDatabases = [{
   migrations: 'migrations/events'
 }];
 
-const { dependencies, integrations } = require('../wa-plugin.json');
-const relationships = { dependencies, integrations };
+const { dependencies, integrations, memberSubscriptions } = require('../wa-plugin.json');
+const relationships = { dependencies, integrations, memberSubscriptions };
 
 export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   ...relationships,
-  version: '0.25.2',
+  version: '0.25.3',
   coreApiRange: '^0.3.31',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {

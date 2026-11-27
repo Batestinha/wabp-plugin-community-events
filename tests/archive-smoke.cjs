@@ -10,6 +10,8 @@ assert.ok(Array.isArray(metadata.dependencies));
 assert.ok(Array.isArray(metadata.integrations));
 assert.deepEqual(plugin.manifest.dependencies, metadata.dependencies);
 assert.deepEqual(plugin.manifest.integrations, metadata.integrations);
+assert.deepEqual(metadata.memberSubscriptions, []);
+assert.deepEqual(plugin.manifest.memberSubscriptions, metadata.memberSubscriptions);
 assert.equal(plugin.manifest.coreApiRange, metadata.coreApiRange);
 assert.equal(metadata.coreApiRange, '^0.3.31');
 for (const method of ['registerCommands', 'registerCancellations', 'registerHooks', 'registerServices', 'resolveGroupTimezone']) assert.equal(typeof plugin[method], 'function');

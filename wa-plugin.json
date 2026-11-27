@@ -8,7 +8,7 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.2",
+  "version": "0.25.3",
   "coreApiRange": "^0.3.31",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -417,11 +417,17 @@
       "description": "Provides verified links to the published calendar in event messages."
     },
     {
+      "pluginId": "official.piwigo-gallery",
+      "versionRange": "^1.1.0",
+      "description": "Lets members use a community event's date and place for a Piwigo album."
+    },
+    {
       "pluginId": "official.nl-assistant",
       "versionRange": "*",
       "description": "Makes event editing and cancellation available through assistant workflows."
     }
   ],
+  "memberSubscriptions": [],
   "databases": [
     {
       "name": "events",

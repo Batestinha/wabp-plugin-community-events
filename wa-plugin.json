@@ -8,7 +8,7 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.4",
+  "version": "0.25.5",
   "coreApiRange": "^0.3.33",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
@@ -4902,7 +4902,8 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle"
+          "widget": "toggle",
+          "helpText": "Allow Weather to supply forecasts for configured event profiles."
         },
         "dangerous": false,
         "sensitivity": {
@@ -4921,7 +4922,8 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle"
+          "widget": "toggle",
+          "helpText": "Publish event schedules to the Workspace Calendar."
         },
         "dangerous": false,
         "sensitivity": {
@@ -4940,7 +4942,8 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle"
+          "widget": "toggle",
+          "helpText": "Use the Integration Manager to resolve calendar links in event messages."
         },
         "dangerous": false,
         "sensitivity": {
@@ -4959,7 +4962,8 @@
           "type": "boolean"
         },
         "ui": {
-          "widget": "toggle"
+          "widget": "toggle",
+          "helpText": "Let the assistant prepare event edits or cancellations under the requester’s permissions."
         },
         "dangerous": false,
         "sensitivity": {

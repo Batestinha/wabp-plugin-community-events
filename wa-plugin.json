@@ -8,8 +8,8 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.6",
-  "coreApiRange": "^0.3.33",
+  "version": "0.25.7",
+  "coreApiRange": "^0.3.34",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -418,11 +418,29 @@
     },
     {
       "pluginId": "official.geocoder",
-      "versionRange": "^0.3.0"
+      "versionRange": "^0.3.0",
+      "feature": {
+        "id": "events.geocoding",
+        "provider": "official.geocoder",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.eventProfiles"
+        ]
+      }
     },
     {
       "pluginId": "official.poll-assistant",
-      "versionRange": ">=0.3.0"
+      "versionRange": ">=0.3.0",
+      "feature": {
+        "id": "events.attendance-polls",
+        "provider": "official.poll-assistant",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.eventProfiles"
+        ]
+      }
     }
   ],
   "integrations": [
@@ -5409,6 +5427,27 @@
       "access": "read",
       "authorization": "resource-token",
       "description": "events Calendar Subscription Document"
+    }
+  ],
+  "operationCatalogVersion": 1,
+  "operationPermissions": [
+    {
+      "id": "official.community-events.configure",
+      "action": "events.configure",
+      "title": "Configure events",
+      "description": "Manage the event settings used by this scope.",
+      "titleKey": "official.community-events.help.feature.title",
+      "descriptionKey": "official.community-events.help.feature.summary",
+      "defaultAccess": "explicit"
+    },
+    {
+      "id": "official.community-events.manage",
+      "action": "events.manage",
+      "title": "Manage events",
+      "description": "Manage events in this scope under their resource policy.",
+      "titleKey": "official.community-events.help.feature.title",
+      "descriptionKey": "official.community-events.help.feature.summary",
+      "defaultAccess": "explicit"
     }
   ]
 }

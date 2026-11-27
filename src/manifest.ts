@@ -53,11 +53,12 @@ const { dependencies, integrations, memberSubscriptions } = require('../wa-plugi
 const relationships = { dependencies, integrations, memberSubscriptions };
 
 export const eventsManifest: PluginManifest = {
+  ...{ operationCatalogVersion: require('../wa-plugin.json').operationCatalogVersion, operationPermissions: require('../wa-plugin.json').operationPermissions },
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   ...relationships,
-  version: '0.25.6',
-  coreApiRange: '^0.3.33',
+  version: '0.25.7',
+  coreApiRange: '^0.3.34',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,

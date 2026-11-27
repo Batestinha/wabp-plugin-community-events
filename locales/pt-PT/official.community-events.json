@@ -1,4 +1,5 @@
 {
+  "official.community-events.assistant.read.events": "Consulta os próximos eventos da comunidade ou os eventos entre duas datas locais. Usa a primeira página dos próximos eventos para encontrar o evento seguinte.",
   "official.community-events.workflow.edit.title": "Editar um evento",
   "official.community-events.workflow.edit.description": "Alterar qualquer campo disponível no editor de eventos, incluindo perguntas, datas, horas, duração e local, com atualização do calendário e do ciclo de vida.",
   "official.community-events.workflow.cancel.title": "Cancelar um evento",

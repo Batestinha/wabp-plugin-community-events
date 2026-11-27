@@ -1,5 +1,6 @@
 // Explicit, complete placements: the platform never infers message locations from keys.
 export const eventTextDefinitions = [
+  {"key": "official.community-events.assistant.read.events", "label": "Event read description", "topic": "Assistant", "destination": "Assistant tool", "order": 2000, "variables": [], "placement": {"sectionId": "general", "groupId": "assistant", "groupLabel": "Assistant"}},
   {
     "key": "official.community-events.workflow.edit.title",
     "label": "Workflow / edit / title",

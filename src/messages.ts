@@ -1,6 +1,7 @@
 import type { MessageCatalog } from './runtime';
 
 export const eventsMessages: MessageCatalog = {
+  'official.community-events.assistant.read.events': 'List upcoming community events or events in a local date range. Fetch the first page with mode upcoming to find the next event.',
   'official.community-events.workflow.edit.title': 'Edit an event',
   'official.community-events.workflow.edit.description': 'Change any field available in the event editor, including questions, dates, times, span and location, with calendar and lifecycle updates.',
   'official.community-events.workflow.cancel.title': 'Cancel an event',

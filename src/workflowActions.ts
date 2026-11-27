@@ -54,6 +54,9 @@ async function actorContext(context: PluginServiceRegistrationContext, call: Plu
   const locale = await context.i18n.resolveScopeLocale(call.scopeId);
   const t = await context.i18n.translatorForIdentity(call.actorIdentityId, call.scopeId);
   const config = parseEventsConfig(await context.configFor(call.scopeId, call.actorIdentityId));
+  if (call.callerPluginId === 'official.nl-assistant' && !config.assistantIntegrationEnabled) {
+    throw new Error('Assistant event workflows are disabled here.');
+  }
   return { actor, locale: locale.locale, t, config, domain: pluginWorkflowOperationContext(context) };
 }
 

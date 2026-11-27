@@ -8,8 +8,8 @@
   },
   "description": "Creates and edits community events, tracks attendance through polls, and manages event groups and announcements. It can publish calendar updates and share forecasts for event locations.",
   "kind": "managed_group",
-  "version": "0.25.3",
-  "coreApiRange": "^0.3.31",
+  "version": "0.25.4",
+  "coreApiRange": "^0.3.33",
   "entrypoint": "dist/index.js",
   "messageNamespace": "official.community-events",
   "descriptionKey": "official.community-events.description",
@@ -243,6 +243,20 @@
           "availability": "installed"
         }
       ]
+    },
+    {
+      "serviceId": "official.community-events.assistant.v1",
+      "methods": [
+        {
+          "name": "events",
+          "access": "read",
+          "assistantRead": {
+            "name": "official.community-events.events",
+            "descriptionKey": "official.community-events.assistant.read.events",
+            "allowScopeMembers": true
+          }
+        }
+      ]
     }
   ],
   "requiredPermissions": [
@@ -389,7 +403,18 @@
   "dependencies": [
     {
       "pluginId": "official.community-admin",
-      "versionRange": "^1.0.0"
+      "versionRange": "^1.0.0",
+      "feature": {
+        "id": "events.promote-group",
+        "provider": "official.community-admin",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.subgroupSuggestionConversion.policy",
+          "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.enabled",
+          "plugin.official.community-events.subgroupSuggestionConversion.preFlowNotice.template"
+        ]
+      }
     },
     {
       "pluginId": "official.geocoder",
@@ -404,27 +429,78 @@
     {
       "pluginId": "official.weather",
       "versionRange": ">=0.6.0",
-      "description": "Adds local weather and tide forecasts to event messages."
+      "description": "Adds local weather and tide forecasts to event messages.",
+      "feature": {
+        "id": "events.weather",
+        "provider": "official.weather",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.weatherIntegrationEnabled"
+        ],
+        "defaultEnabled": true
+      }
     },
     {
       "pluginId": "official.workspace-calendar",
       "versionRange": "^1.0.0",
-      "description": "Publishes event schedules to the Workspace calendar."
+      "description": "Publishes event schedules to the Workspace calendar.",
+      "feature": {
+        "id": "events.calendar",
+        "provider": "official.workspace-calendar",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.workspaceCalendarIntegrationEnabled"
+        ],
+        "defaultEnabled": true
+      }
     },
     {
       "pluginId": "official.integration-manager",
       "versionRange": ">=1.2.0",
-      "description": "Provides verified links to the published calendar in event messages."
+      "description": "Provides verified links to the published calendar in event messages.",
+      "feature": {
+        "id": "events.calendar-links",
+        "provider": "official.integration-manager",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.calendarLinksIntegrationEnabled"
+        ],
+        "defaultEnabled": true
+      }
     },
     {
       "pluginId": "official.piwigo-gallery",
       "versionRange": "^1.1.0",
-      "description": "Lets members use a community event's date and place for a Piwigo album."
+      "description": "Lets members use a community event's date and place for a Piwigo album.",
+      "feature": {
+        "id": "gallery.event-albums",
+        "provider": "official.community-events",
+        "consumer": "official.piwigo-gallery",
+        "settingsOwner": "official.piwigo-gallery",
+        "controlIds": [
+          "plugin.official.piwigo-gallery.eventAlbumsEnabled"
+        ],
+        "defaultEnabled": true,
+        "shared": true
+      }
     },
     {
       "pluginId": "official.nl-assistant",
       "versionRange": "*",
-      "description": "Makes event editing and cancellation available through assistant workflows."
+      "description": "Makes event editing and cancellation available through assistant workflows.",
+      "feature": {
+        "id": "events.assistant",
+        "provider": "official.nl-assistant",
+        "consumer": "official.community-events",
+        "settingsOwner": "official.community-events",
+        "controlIds": [
+          "plugin.official.community-events.assistantIntegrationEnabled"
+        ],
+        "defaultEnabled": true
+      }
     }
   ],
   "memberSubscriptions": [],
@@ -513,7 +589,11 @@
       "cleanup.lastFailureMessage",
       "cleanup.lastFailureAt",
       "messages",
-      "subgroupSuggestionConversion.preFlowNotice.textVersion"
+      "subgroupSuggestionConversion.preFlowNotice.textVersion",
+      "weatherIntegrationEnabled",
+      "workspaceCalendarIntegrationEnabled",
+      "calendarLinksIntegrationEnabled",
+      "assistantIntegrationEnabled"
     ],
     "controls": [
       {
@@ -734,7 +814,10 @@
           "widget": "builder",
           "builderId": "official.community-events.event-profiles.v1",
           "templateVariables": [
-            { "token": "calendarPageUrl", "label": "Calendar page URL" }
+            {
+              "token": "calendarPageUrl",
+              "label": "Calendar page URL"
+            }
           ],
           "builderTemplateDialect": "conditional-values-v2",
           "builderTemplateMentions": {
@@ -970,6 +1053,19 @@
           "widget": "builder",
           "builderId": "official.community-events.messages.v1",
           "textDefinitions": [
+            {
+              "key": "official.community-events.assistant.read.events",
+              "label": "Event read description",
+              "topic": "Assistant",
+              "destination": "Assistant tool",
+              "order": 2000,
+              "variables": [],
+              "placement": {
+                "sectionId": "general",
+                "groupId": "assistant",
+                "groupLabel": "Assistant"
+              }
+            },
             {
               "key": "official.community-events.workflow.edit.title",
               "label": "Workflow / edit / title",
@@ -4794,6 +4890,82 @@
           }
         },
         "dangerous": false
+      },
+      {
+        "path": "weatherIntegrationEnabled",
+        "id": "plugin.official.community-events.weatherIntegrationEnabled",
+        "label": "Include Weather forecasts",
+        "description": "Allow Weather to supply forecasts for configured event profiles.",
+        "section": "Integrations",
+        "order": 90,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
+        }
+      },
+      {
+        "path": "workspaceCalendarIntegrationEnabled",
+        "id": "plugin.official.community-events.workspaceCalendarIntegrationEnabled",
+        "label": "Publish to Calendar",
+        "description": "Publish event schedules to the Workspace Calendar.",
+        "section": "Integrations",
+        "order": 90,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
+        }
+      },
+      {
+        "path": "calendarLinksIntegrationEnabled",
+        "id": "plugin.official.community-events.calendarLinksIntegrationEnabled",
+        "label": "Include Workspace calendar links",
+        "description": "Use the Integration Manager to resolve calendar links in event messages.",
+        "section": "Integrations",
+        "order": 90,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
+        }
+      },
+      {
+        "path": "assistantIntegrationEnabled",
+        "id": "plugin.official.community-events.assistantIntegrationEnabled",
+        "label": "Allow assistant event workflows",
+        "description": "Let the assistant prepare event edits or cancellations under the requester’s permissions.",
+        "section": "Integrations",
+        "order": 90,
+        "schema": {
+          "type": "boolean"
+        },
+        "ui": {
+          "widget": "toggle"
+        },
+        "dangerous": false,
+        "sensitivity": {
+          "sensitive": false,
+          "redact": "none"
+        }
       }
     ],
     "internalConfigPaths": [

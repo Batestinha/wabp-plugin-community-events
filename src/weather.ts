@@ -276,6 +276,7 @@ export async function handleEventWeatherForecastJob(
       reason: 'event_version_changed'
     })];
   }
+  if ((await context.configFor(event.scopeId)).weatherIntegrationEnabled === false) return [];
   if (!profile?.weather.enabled) {
     await markWeatherSkipped(context, db, event, payloadDeliveryKind, 'profile_weather_disabled');
     return [audit('events.weather_forecast.skipped', { eventId, reason: 'profile_weather_disabled' })];

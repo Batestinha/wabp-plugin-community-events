@@ -594,6 +594,10 @@ export const eventSubgroupSuggestionConversionConfigSchema = z.object({
 }).strict().default({});
 
 const eventsConfigObjectSchema = z.object({
+  weatherIntegrationEnabled: z.boolean().default(true),
+  workspaceCalendarIntegrationEnabled: z.boolean().default(true),
+  calendarLinksIntegrationEnabled: z.boolean().default(true),
+  assistantIntegrationEnabled: z.boolean().default(true),
   messages: configuredMessagesSchema.optional(),
   enabled: z.boolean().default(false),
   timezone: z.string().trim().min(1).default('UTC'),

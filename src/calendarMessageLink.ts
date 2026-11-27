@@ -13,9 +13,11 @@ export async function calendarPageForMessage(
 ): Promise<string | undefined> {
   if (!context.services || !valueTemplateReferences(template).tokens.includes('calendarPageUrl')) return undefined;
   try {
+    const config = context.configFor && parseEventsConfig(await context.configFor(event.scopeId));
+    if (config && !config.calendarLinksIntegrationEnabled) return undefined;
     const resourceKey = resolvedEventCalendarId(event);
     if (!resourceKey) return undefined;
-    const resources = calendars ?? (context.configFor && parseEventsConfig(await context.configFor(event.scopeId)).calendars);
+    const resources = calendars ?? (config ? config.calendars : undefined);
     if (!resources?.some(calendar => calendar.id === resourceKey && calendar.enabled)) return undefined;
     const result = await context.services.call<{ url: string | null }>({
       serviceId: 'official.integration-manager.message-links.v1', method: 'resolve', scopeId: event.scopeId,

@@ -9128,6 +9128,26 @@ export function listScopeEvents(db: PluginDatabase, scopeId: string): StoredEven
   ).map(eventFromRow);
 }
 
+export function listEventReadPage(db: PluginDatabase, input: {
+  scopeId: string; start: string; until?: string | undefined;
+  after?: { timestamp: string; id: string } | undefined; limit: number;
+}): StoredEventRecord[] {
+  const filters = ["scope_id = ?", "event_status IN ('active', 'completed')", "starts_at >= ?"];
+  const args: Array<string | number> = [input.scopeId, input.start];
+  if (input.until) {
+    filters.push("starts_at < ?");
+    args.push(input.until);
+  }
+  if (input.after) {
+    filters.push("(starts_at, id) > (?, ?)");
+    args.push(input.after.timestamp, input.after.id);
+  }
+  return db.all<EventRow>(
+    `SELECT * FROM event_records WHERE ${filters.join(' AND ')} ORDER BY starts_at ASC, id ASC LIMIT ?`,
+    ...args, input.limit
+  ).map(eventFromRow);
+}
+
 function eventFromRow(row: EventRow): StoredEventRecord {
   const eventLocation = parseStoredEventLocation(row.event_location_json);
   const attendanceLifecycle = eventAttendanceLifecycleFromRow(row);

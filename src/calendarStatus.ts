@@ -260,7 +260,7 @@ async function publishClaimedCalendarGeneration(
       return { status: 'superseded' };
     }
     const publication = await publishWorkspaceCalendarProjection({
-      services: input.services, scopeId: input.scopeId, timezone: input.config.timezone,
+      services: input.config.workspaceCalendarIntegrationEnabled ? input.services : undefined, scopeId: input.scopeId, timezone: input.config.timezone,
       calendar: frozenCalendar, icsBody: document.body, events: document.events, generation: claim.generation
     });
     throwCalendarPublicationHeartbeatError(heartbeatError);

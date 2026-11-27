@@ -1,3 +1,4 @@
+import { eventReadDeclaration } from './assistantReads';
 import { eventsStoredConfigSchema } from './savedText';
 import { eventOperatorActionDeclarations } from './operatorActions';
 import { eventConsoleOperationDeclarations } from './consoleOperationDeclarations';
@@ -54,8 +55,8 @@ export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   ...relationships,
-  version: '0.25.3',
-  coreApiRange: '^0.3.31',
+  version: '0.25.4',
+  coreApiRange: '^0.3.33',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,
@@ -155,6 +156,7 @@ export const eventsManifest: PluginManifest = {
   externalActions: eventOperatorActionDeclarations,
   eventSubscriptions: ['message', 'participant.change', 'poll.vote', 'plugin.job', 'group.dismantled'],
   services: [
+    eventReadDeclaration,
     {
       serviceId: EVENT_WORKFLOW_SERVICE_ID,
       description: 'Prepare, apply and inspect requester-authorized event changes through the event lifecycle.',

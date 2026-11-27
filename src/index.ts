@@ -1,3 +1,4 @@
+import { registerEventReads } from './assistantReads';
 import { importEventPlacesToGeocoder } from './places';
 import { migrateEventText } from './savedText';
 import { backfillEventTemplateValues } from './templateMigration';
@@ -44,7 +45,7 @@ export const eventsPlugin: BotPlugin = {
   },
   registerExternalActions: registerEventsExternalActions,
   registerServices(context) {
-    return [...registerEventAlbumSourceServices(context), ...registerEventWorkflowServices(context)];
+    return [registerEventReads(context), ...registerEventAlbumSourceServices(context), ...registerEventWorkflowServices(context)];
   }
 };
 

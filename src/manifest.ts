@@ -57,7 +57,7 @@ export const eventsManifest: PluginManifest = {
   pluginId: EVENTS_PLUGIN_ID,
   kind: 'managed_group',
   ...relationships,
-  version: '0.25.7',
+  version: '0.25.8',
   coreApiRange: '^0.3.34',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {

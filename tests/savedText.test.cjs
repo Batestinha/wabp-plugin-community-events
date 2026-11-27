@@ -61,3 +61,15 @@ test('new required catalog keys are added without replacing any saved key', () =
   assert.equal(next.messages.catalogs.en[key], eventMessageSeeds.en[key]);
   assert.equal(next.messages.catalogs.en['official.community-events.invalid'], 'Keep this.');
 });
+
+test('empty navigation hints remain empty in every language and other replies still require text', () => {
+  const saved = materializeEventText({});
+  for (const catalog of Object.values(saved.messages.catalogs)) {
+    catalog['official.community-events.flow.cancelHint'] = '';
+    catalog['official.community-events.flow.backHint'] = '';
+  }
+  assert.deepEqual(eventsStoredConfigSchema.parse(saved).messages, saved.messages);
+
+  saved.messages.catalogs['pt-PT']['official.community-events.cancelled'] = '';
+  assert.throws(() => eventsStoredConfigSchema.parse(saved), /official\.community-events\.cancelled \(pt-PT\): text is required/);
+});

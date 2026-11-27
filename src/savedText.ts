@@ -12,6 +12,10 @@ const portuguese = JSON.parse(readFileSync(path.join(__dirname, '..', 'locales',
 export const eventMessageSeeds = { en: eventsMessages, 'pt-PT': portuguese };
 const textFields = new Set(['label', 'prompt', 'optionalPromptSuffix', 'template', 'titleTemplate', 'descriptionTemplate', 'displayName']);
 const messageVariables = new Map(eventTextDefinitions.map(definition => [definition.key, new Set(definition.variables)]));
+const optionalFlowHints = new Set([
+  'official.community-events.flow.cancelHint',
+  'official.community-events.flow.backHint'
+]);
 
 export function seedMessages(existing?: unknown, catalogs: Record<string, Record<string, string>> = eventMessageSeeds): ConfiguredMessages {
   const saved = existing ? configuredMessagesSchema.parse(existing) : undefined;
@@ -67,6 +71,7 @@ export const eventsStoredConfigSchema = z.unknown().transform((input, ctx) => {
       for (const [key, value] of Object.entries(catalog)) {
         const seed = eventsMessages[key];
         if (seed === undefined) continue;
+        if (value === '' && optionalFlowHints.has(key)) continue;
         if (!value.trim() && seed.trim()) throw new Error(`${key} (${locale}): text is required`);
         const allowed = messageVariables.get(key) ?? new Set<string>();
         for (const match of value.matchAll(/\{([A-Za-z0-9_]+)\}/gu)) {

@@ -55,7 +55,7 @@ export const eventsManifest: PluginManifest = {
   kind: 'managed_group',
   ...relationships,
   version: '0.25.2',
-  coreApiRange: '^0.3.29',
+  coreApiRange: '^0.3.31',
   consoleOperations: eventConsoleOperationDeclarations,
   configuration: {
     configuredMessages: true,
